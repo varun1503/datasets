@@ -1,17 +1,29 @@
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
-class TransformerResources:
-    _tokenizer = None
-    _model = None
+class TransformerLoader:
+    def __init__(self, model_name_or_path: str):
+        """
+        Initialize with the model name or path.
+        """
+        self.model_name_or_path = model_name_or_path
+        self.tokenizer = None
+        self.model = None
 
-    @staticmethod
-    def get_tokenizer(model_name="bert-base-uncased"):
-        if TransformerResources._tokenizer is None:
-            TransformerResources._tokenizer = AutoTokenizer.from_pretrained(model_name)
-        return TransformerResources._tokenizer
+    def load_tokenizer(self):
+        """
+        Load the tokenizer for the specified model.
+        """
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name_or_path)
+        print("Tokenizer loaded.")
+        return self.tokenizer
 
-    @staticmethod
-    def get_model(model_name="bert-base-uncased"):
-        if TransformerResources._model is None:
-            TransformerResources._model = AutoModel.from_pretrained(model_name)
-        return TransformerResources._model
+    def load_model(self, num_labels: int):
+        """
+        Load the transformer model for sequence classification.
+        """
+        self.model = AutoModelForSequenceClassification.from_pretrained(
+            self.model_name_or_path, 
+            num_labels=num_labels
+        )
+        print("Model loaded.")
+        return self.model
