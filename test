@@ -1,29 +1,20 @@
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
+Using venv (Built-in)
+Navigate to your project directory (optional):
 
-class TransformerLoader:
-    def __init__(self, model_name_or_path: str):
-        """
-        Initialize with the model name or path.
-        """
-        self.model_name_or_path = model_name_or_path
-        self.tokenizer = None
-        self.model = None
+bash
+Copy code
+cd /path/to/your/project
+Create a virtual environment:
 
-    def load_tokenizer(self):
-        """
-        Load the tokenizer for the specified model.
-        """
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name_or_path)
-        print("Tokenizer loaded.")
-        return self.tokenizer
+bash
+Copy code
+python3 -m venv myenv
+Replace myenv with the desired name for your environment.
 
-    def load_model(self, num_labels: int):
-        """
-        Load the transformer model for sequence classification.
-        """
-        self.model = AutoModelForSequenceClassification.from_pretrained(
-            self.model_name_or_path, 
-            num_labels=num_labels
-        )
-        print("Model loaded.")
-        return self.model
+Activate the environment:
+myenv\Scripts\activate
+Install packages within the environment:
+
+bash
+Copy code
+pip install <package-name>
