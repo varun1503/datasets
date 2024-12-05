@@ -1,20 +1,10 @@
-Using venv (Built-in)
-Navigate to your project directory (optional):
-
-bash
-Copy code
-cd /path/to/your/project
-Create a virtual environment:
-
-bash
-Copy code
-python3 -m venv myenv
-Replace myenv with the desired name for your environment.
-
-Activate the environment:
-myenv\Scripts\activate
-Install packages within the environment:
-
-bash
-Copy code
-pip install <package-name>
+def early_stop(validation_loss, best_loss, epochs_no_improve, patience, min_delta):
+    if validation_loss < best_loss - min_delta:
+        best_loss = validation_loss
+        epochs_no_improve = 0  # Reset counter on improvement
+        return False, best_loss, epochs_no_improve
+    else:
+        epochs_no_improve += 1  # Increment counter on no improvement
+        if epochs_no_improve >= patience:
+            return True, best_loss, epochs_no_improve
+        return False, best_loss, epochs_no_improve
