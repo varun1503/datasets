@@ -1,5 +1,17 @@
-Currently, we are utilizing Optuna exclusively for performing hyperparameter tuning (HPT) on the BERT model. A configuration file (config.yml) is used to define the search space, along with data and model-related configurations, as outlined earlier. The accompanying MDK chart illustrates this process.
+The Model Interpretability (MI) module incorporates multiple algorithms to provide comprehensive insights into model predictions, including LIME, SHAP, Saliency Maps, and Layer Integrated Gradients. Each technique offers a unique perspective on interpretability, as detailed below:
 
-After tuning the text model using HPT, several artifacts are generated, including test dataset results, model checkpoints (best model), and plots. The supported features are summarized in the table above.
+Layer Integrated Gradients: A path attribution explainer that highlights the contributions of specific input features (e.g., words or tokens) to the prediction of a particular class by leveraging the gradients at specific layers of the model.
 
-As depicted in the diagram, we evaluated multiple options for HPT, with the details of our findings presented in the table below.
+Saliency Map: A gradient-based method that identifies critical input features (e.g., words or tokens) contributing to the prediction by calculating their attributions.
+
+LIME: A local explainer that interprets individual predictions by perturbing input instances (e.g., masking words) and estimating the contribution of each word to the final prediction.
+
+SHAP: A partition-based explainer that masks subsets of input features (e.g., groups of words) to determine their impact on the model's predictions.
+
+Once the analysis is complete, all visualization plots are saved as artifacts in PNG or JPEG format.
+
+
+
+
+
+
