@@ -1,5 +1,5 @@
-Hyperparameter tuning (HPT) is a crucial step in the machine learning model lifecycle. It aims to identify the optimal set of hyperparameters for a given model, thereby enhancing its overall performance. For this purpose, we utilized Dask and Optuna as frameworks for hyperparameter optimization and model development.
+Currently, we are utilizing Optuna exclusively for performing hyperparameter tuning (HPT) on the BERT model. A configuration file (config.yml) is used to define the search space, along with data and model-related configurations, as outlined earlier. The accompanying MDK chart illustrates this process.
 
-Our work focused on fine-tuning a pre-trained BERT model, customized for a multiclass classification task involving the categories "LIFESTYLE," "MEMBER SERVICE," and "TRAVEL."
+After tuning the text model using HPT, several artifacts are generated, including test dataset results, model checkpoints (best model), and plots. The supported features are summarized in the table above.
 
-Model interpretability (MI) is another vital aspect, especially in regulated industries, as it helps explain model predictions. We explored various algorithms to improve interpretability, including Integrated Gradients and Saliency Maps, to gain deeper insights into model behavior
+As depicted in the diagram, we evaluated multiple options for HPT, with the details of our findings presented in the table below.
