@@ -1,17 +1,10 @@
-The Model Interpretability (MI) module incorporates multiple algorithms to provide comprehensive insights into model predictions, including LIME, SHAP, Saliency Maps, and Layer Integrated Gradients. Each technique offers a unique perspective on interpretability, as detailed below:
+Encode the Text: Use the [CLS] token embeddings as a representation of the entire text. This provides a fixed-length feature vector for each text.
 
-Layer Integrated Gradients: A path attribution explainer that highlights the contributions of specific input features (e.g., words or tokens) to the prediction of a particular class by leveraging the gradients at specific layers of the model.
+Compute Pairwise Distances:
 
-Saliency Map: A gradient-based method that identifies critical input features (e.g., words or tokens) contributing to the prediction by calculating their attributions.
+Use metrics like Cosine Similarity or Euclidean Distance to compute the distance between embeddings from the training and new data.
+Construct a distance matrix to compare distributions.
+Measure Drift:
 
-LIME: A local explainer that interprets individual predictions by perturbing input instances (e.g., masking words) and estimating the contribution of each word to the final prediction.
-
-SHAP: A partition-based explainer that masks subsets of input features (e.g., groups of words) to determine their impact on the model's predictions.
-
-Once the analysis is complete, all visualization plots are saved as artifacts in PNG or JPEG format.
-
-
-
-
-
-
+Compute aggregate statistics like the mean distance, maximum distance, or divergence metrics (e.g., KL divergence).
+Detect drift if the distances exceed predefined thresholds.
