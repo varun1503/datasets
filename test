@@ -1,10 +1,17 @@
-Encode the Text: Use the [CLS] token embeddings as a representation of the entire text. This provides a fixed-length feature vector for each text.
-
-Compute Pairwise Distances:
-
-Use metrics like Cosine Similarity or Euclidean Distance to compute the distance between embeddings from the training and new data.
-Construct a distance matrix to compare distributions.
-Measure Drift:
-
-Compute aggregate statistics like the mean distance, maximum distance, or divergence metrics (e.g., KL divergence).
-Detect drift if the distances exceed predefined thresholds.
+Key Features of Evidently AI
+1. Data Drift Detection
+Compares the distribution of features in the training (reference) and current (production) datasets.
+Uses statistical tests like Wasserstein Distance and Kolmogorov-Smirnov Test to quantify drift.
+Reports metrics and visualizations for feature-wise drift detection.
+2. Target Drift Detection
+Monitors changes in the target variable's distribution.
+Useful for classification tasks where class distributions may change over time.
+3. Model Performance Monitoring
+Tracks performance metrics such as accuracy, precision, recall, and F1-score over time.
+Detects performance degradation caused by data or concept drift.
+4. Data Quality Monitoring
+Checks for anomalies such as missing values, duplicate rows, and outliers.
+Tracks statistics like feature mean, variance, and standard deviation.
+5. Feature Correlation Analysis
+Monitors the correlation between features and the target variable.
+Identifies unexpected changes in feature importance or relationships.
