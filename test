@@ -1,1 +1,1 @@
-Alibi Detect is an open-source Python library focused on drift detection, outlier detection, and adversarial detection in machine learning models
+CMD ["sh", "-c", "./create.sh ${PROJECT_NAME} && python ${PROJECT_NAME}/cli.py --help"]
