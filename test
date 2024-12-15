@@ -1,18 +1,15 @@
-import torch
-from alibi_detect.cd.pytorch import KSDrift
+# Plot the Distributions
+plt.figure(figsize=(10, 6))
+x = np.arange(len(reference))
 
-# Convert to tensors
-X_ref_tensor = torch.tensor(X_ref_tfidf, dtype=torch.float32)
-X_test_tensor = torch.tensor(X_test_tfidf, dtype=torch.float32)
+# Bar Plot for both distributions
+plt.bar(x - 0.2, reference, width=0.4, label='Reference', alpha=0.7)
+plt.bar(x + 0.2, current, width=0.4, label='Current', alpha=0.7)
 
-# Initialize KSDrift
-cd = KSDrift(X_ref_tensor, p_val=0.05)
-
-# Predict drift
-preds = cd.predict(X_test_tensor)
-
-# Results
-is_drift = preds['data']['is_drift']
-p_vals = preds['data']['p_val']
-print(f"Drift detected: {is_drift}")
-print(f"P-values: {p_vals}")
+# Add JS Divergence annotation
+plt.title(f"Reference vs Current Distribution\nJS Divergence: {js_divergence:.4f}", fontsize=14)
+plt.xlabel("TF-IDF Features", fontsize=12)
+plt.ylabel("Probability", fontsize=12)
+plt.legend()
+plt.tight_layout()
+plt.show()
