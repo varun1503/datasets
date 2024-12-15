@@ -1,15 +1,12 @@
-# Plot the Distributions
 plt.figure(figsize=(10, 6))
-x = np.arange(len(reference))
 
-# Bar Plot for both distributions
-plt.bar(x - 0.2, reference, width=0.4, label='Reference', alpha=0.7)
-plt.bar(x + 0.2, current, width=0.4, label='Current', alpha=0.7)
+sns.kdeplot(reference, label='Reference', fill=True, alpha=0.5, color='blue')
+sns.kdeplot(current, label='Current', fill=True, alpha=0.5, color='orange')
 
 # Add JS Divergence annotation
 plt.title(f"Reference vs Current Distribution\nJS Divergence: {js_divergence:.4f}", fontsize=14)
-plt.xlabel("TF-IDF Features", fontsize=12)
-plt.ylabel("Probability", fontsize=12)
+plt.xlabel("Feature Space", fontsize=12)
+plt.ylabel("Density", fontsize=12)
 plt.legend()
 plt.tight_layout()
 plt.show()
