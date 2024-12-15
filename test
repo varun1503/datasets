@@ -1,11 +1,15 @@
-plt.figure(figsize=(10, 6))
+ks_stat = pred['data']['distance']
+p_value = pred['data']['p_val']
 
+# Plot Distributions
+plt.figure(figsize=(10, 6))
 sns.kdeplot(reference, label='Reference', fill=True, alpha=0.5, color='blue')
 sns.kdeplot(current, label='Current', fill=True, alpha=0.5, color='orange')
 
-# Add JS Divergence annotation
-plt.title(f"Reference vs Current Distribution\nJS Divergence: {js_divergence:.4f}", fontsize=14)
-plt.xlabel("Feature Space", fontsize=12)
+# Annotate KS Test Result
+result = "Drift Detected" if pred['data']['is_drift'] else "No Drift"
+plt.title(f"KS Test Result: {result}\nKS Statistic: {ks_stat:.4f}, p-value: {p_value:.4e}", fontsize=14)
+plt.xlabel("Value", fontsize=12)
 plt.ylabel("Density", fontsize=12)
 plt.legend()
 plt.tight_layout()
