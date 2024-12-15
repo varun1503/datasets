@@ -1,34 +1,15 @@
-import matplotlib.pyplot as plt
-import numpy as np
+Output Explanation
+P-value Distribution:
 
-# Perform drift detection on a sample dataset
-X_test = tokenizer(X_h0, padding='max_length', max_length=max_len, return_tensors='tf')
-X_test_tokens = X_test['input_ids'].numpy()
+If many p-values are below 0.05, 
+𝐻
+0
+H 
+0
+​
+  (no drift) is rejected, indicating drift.
+P-values close to 1 suggest no evidence of drift.
+KS Test Statistics:
 
-# Get drift detection results
-preds = cd.predict(X_test_tokens, return_p_val=True)
+Higher test statistics indicate greater divergence between the reference and test datasets.
 
-# Extract p-values and test statistics
-p_values = preds['data']['p_val']
-test_stat = preds['data']['distance']
-
-# Visualize p-value distribution
-plt.figure(figsize=(12, 5))
-
-plt.subplot(1, 2, 1)
-plt.hist(p_values, bins=30, color='skyblue', alpha=0.7, edgecolor='black')
-plt.axvline(x=0.05, color='red', linestyle='--', label='Significance Threshold (p=0.05)')
-plt.title('P-value Distribution')
-plt.xlabel('P-value')
-plt.ylabel('Frequency')
-plt.legend()
-
-# Visualize test statistics
-plt.subplot(1, 2, 2)
-plt.bar(range(len(test_stat)), test_stat, color='orange', alpha=0.7, edgecolor='black')
-plt.title('KS Test Statistics per Feature')
-plt.xlabel('Feature Index')
-plt.ylabel('KS Test Statistic')
-
-plt.tight_layout()
-plt.show()
