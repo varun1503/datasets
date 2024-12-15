@@ -1,58 +1,56 @@
-from transformers import BertTokenizer
-from sklearn.feature_extraction.text import TfidfVectorizer
 import numpy as np
+import torch
+from sklearn.feature_extraction.text import TfidfVectorizer
+from alibi_detect.cd.pytorch import KSDrift
+from alibi_detect.saving import save_detector, load_detector
+from typing import Tuple
 
-# Load BERT tokenizer
-tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+# Data Loading
+def load_dataset(dataset: str, split: str = 'test') -> Tuple[np.ndarray, np.ndarray]:
+    from datasets import load_dataset
+    data = load_dataset(dataset, split=split)
+    X = [x['text'] for x in data]
+    y = [x['label'] for x in data]
+    return np.array(X), np.array(y)
 
-# Tokenize texts
-def tokenize_texts(texts):
-    return [" ".join(tokenizer.tokenize(text)) for text in texts]
+# TF-IDF Feature Extraction
+def compute_tfidf_features(X: np.ndarray, max_features: int = 10000) -> np.ndarray:
+    vectorizer = TfidfVectorizer(max_features=max_features)
+    X_tfidf = vectorizer.fit_transform(X)
+    return X_tfidf.toarray()
 
-# Compute TF or TF-IDF values
-def compute_tfidf(texts):
-    tfidf_vectorizer = TfidfVectorizer()
-    tfidf_matrix = tfidf_vectorizer.fit_transform(texts)
-    return tfidf_matrix.toarray(), tfidf_vectorizer.get_feature_names_out()
+# Drift Detection with KS-Drift
+def init_drift_detector(X_ref: np.ndarray, p_val: float = 0.05) -> KSDrift:
+    X_ref_tensor = torch.tensor(X_ref, dtype=torch.float32)
+    return KSDrift(X_ref_tensor, p_val=p_val)
 
-# Tokenize and compute TF-IDF for reference and current datasets
-reference_tokens = tokenize_texts(reference_texts)
-current_tokens = tokenize_texts(current_texts)
+# Predict Drift
+def predict_drift(cd: KSDrift, X: np.ndarray) -> Tuple[bool, np.ndarray]:
+    X_tensor = torch.tensor(X, dtype=torch.float32)
+    preds = cd.predict(X_tensor)
+    return preds['data']['is_drift'], preds['data']['p_val']
 
-reference_tfidf, token_names = compute_tfidf(reference_tokens)
-current_tfidf, _ = compute_tfidf(current_tokens)
-# Example labeled text data
-text_data = [
-    ("The stock market is experiencing a downturn.", 0),  # Label 0
-    ("Artificial intelligence is transforming industries.", 1),  # Label 1
-    ("Climate change poses significant risks to the planet.", 2),  # Label 2
-    ("Machine learning algorithms are improving daily.", 0),
-    ("Space exploration has gained renewed attention.", 1),
-    ("Advancements in AI are accelerating scientific research.", 2),
-    ("The global economy is recovering at a slow pace.", 0),
-    ("Renewable energy sources are becoming more popular.", 1),
-    ("Climate policies are being implemented worldwide.", 2),
-    ("There are significant advancements in robotics.", 0),
-]
-
-# Group by label
-from collections import defaultdict
-import random
-
-grouped_data = defaultdict(list)
-for text, label in text_data:
-    grouped_data[label].append(text)
-
-# Split each group
-reference_texts = []
-current_texts = []
-
-for label, texts in grouped_data.items():
-    random.shuffle(texts)
-    split_idx = int(len(texts) * 0.7)  # 70% reference, 30% current
-    reference_texts.extend(texts[:split_idx])
-    current_texts.extend(texts[split_idx:])
-
-print("Reference Texts:", reference_texts)
-print("Current Texts:", current_texts)
-
+# Example Usage
+if __name__ == "__main__":
+    # Load dataset
+    X, y = load_dataset('imdb', split='train')
+    
+    # Prepare Reference and Test Sets
+    n_samples = 1000
+    X_ref, X_test = X[:n_samples], X[n_samples:2*n_samples]
+    
+    # Compute TF-IDF Features
+    X_ref_tfidf = compute_tfidf_features(X_ref)
+    X_test_tfidf = compute_tfidf_features(X_test)
+    
+    # Initialize Drift Detector
+    cd = init_drift_detector(X_ref_tfidf)
+    
+    # Save/Load Detector
+    save_detector(cd, "ks_drift_tfidf")
+    cd = load_detector("ks_drift_tfidf")
+    
+    # Detect Drift
+    is_drift, p_vals = predict_drift(cd, X_test_tfidf)
+    print(f"Drift detected: {is_drift}")
+    print(f"p-values: {p_vals}")
