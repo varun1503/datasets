@@ -1,56 +1,24 @@
-import numpy as np
-import torch
 from sklearn.feature_extraction.text import TfidfVectorizer
-from alibi_detect.cd.pytorch import KSDrift
-from alibi_detect.saving import save_detector, load_detector
-from typing import Tuple
 
-# Data Loading
-def load_dataset(dataset: str, split: str = 'test') -> Tuple[np.ndarray, np.ndarray]:
-    from datasets import load_dataset
-    data = load_dataset(dataset, split=split)
-    X = [x['text'] for x in data]
-    y = [x['label'] for x in data]
-    return np.array(X), np.array(y)
+# Sample tokenization function
+def tokenize(texts):
+    return [" ".join(text.split()) for text in texts]
 
-# TF-IDF Feature Extraction
-def compute_tfidf_features(X: np.ndarray, max_features: int = 10000) -> np.ndarray:
-    vectorizer = TfidfVectorizer(max_features=max_features)
-    X_tfidf = vectorizer.fit_transform(X)
-    return X_tfidf.toarray()
+# Tokenize both reference and test datasets
+X_ref_tokenized = tokenize(X_ref)  # Replace X_ref with your reference data
+X_test_tokenized = tokenize(X_test)  # Replace X_test with your test data
 
-# Drift Detection with KS-Drift
-def init_drift_detector(X_ref: np.ndarray, p_val: float = 0.05) -> KSDrift:
-    X_ref_tensor = torch.tensor(X_ref, dtype=torch.float32)
-    return KSDrift(X_ref_tensor, p_val=p_val)
+# TF-IDF Vectorization
+vectorizer = TfidfVectorizer(max_features=10000)
 
-# Predict Drift
-def predict_drift(cd: KSDrift, X: np.ndarray) -> Tuple[bool, np.ndarray]:
-    X_tensor = torch.tensor(X, dtype=torch.float32)
-    preds = cd.predict(X_tensor)
-    return preds['data']['is_drift'], preds['data']['p_val']
+# Fit on reference data
+X_ref_tfidf = vectorizer.fit_transform(X_ref_tokenized).toarray()
 
-# Example Usage
-if __name__ == "__main__":
-    # Load dataset
-    X, y = load_dataset('imdb', split='train')
-    
-    # Prepare Reference and Test Sets
-    n_samples = 1000
-    X_ref, X_test = X[:n_samples], X[n_samples:2*n_samples]
-    
-    # Compute TF-IDF Features
-    X_ref_tfidf = compute_tfidf_features(X_ref)
-    X_test_tfidf = compute_tfidf_features(X_test)
-    
-    # Initialize Drift Detector
-    cd = init_drift_detector(X_ref_tfidf)
-    
-    # Save/Load Detector
-    save_detector(cd, "ks_drift_tfidf")
-    cd = load_detector("ks_drift_tfidf")
-    
-    # Detect Drift
-    is_drift, p_vals = predict_drift(cd, X_test_tfidf)
-    print(f"Drift detected: {is_drift}")
-    print(f"p-values: {p_vals}")
+# Transform test data using the same vectorizer
+X_test_tfidf = vectorizer.transform(X_test_tokenized).toarray()
+
+# Validate dimensions
+assert X_ref_tfidf.shape[1] == X_test_tfidf.shape[1], "Feature dimensions do not match!"
+
+# Ready for drift detection or further analysis
+print(f"X_ref shape: {X_ref_tfidf.shape}, X_test shape: {X_test_tfidf.shape}")
