@@ -1,15 +1,27 @@
-Output Explanation
-P-value Distribution:
+import seaborn as sns
+import matplotlib.pyplot as plt
 
-If many p-values are below 0.05, 
-𝐻
-0
-H 
-0
-​
-  (no drift) is rejected, indicating drift.
-P-values close to 1 suggest no evidence of drift.
-KS Test Statistics:
+# Generate embeddings for the reference and current datasets
+# Reference embeddings
+tokens_ref = tokenizer(X_ref, padding='max_length', max_length=max_len, return_tensors='tf')
+emb_ref = embedding(tokens_ref)
 
-Higher test statistics indicate greater divergence between the reference and test datasets.
+# Current embeddings
+tokens_curr = tokenizer(X_h0, padding='max_length', max_length=max_len, return_tensors='tf')
+emb_curr = embedding(tokens_curr)
 
+# Select a specific feature index to plot (e.g., first dimension)
+feature_idx = 0
+reference = emb_ref[:, feature_idx].numpy()
+current = emb_curr[:, feature_idx].numpy()
+
+# Plot distributions
+plt.figure(figsize=(10, 6))
+sns.kdeplot(reference, label='Reference', fill=True, alpha=0.5, color='blue')
+sns.kdeplot(current, label='Current', fill=True, alpha=0.5, color='orange')
+plt.title(f'Distribution Comparison for Feature {feature_idx}', fontsize=14)
+plt.xlabel('Feature Value', fontsize=12)
+plt.ylabel('Density', fontsize=12)
+plt.legend()
+plt.grid(alpha=0.3)
+plt.show()
