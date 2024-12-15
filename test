@@ -21,3 +21,38 @@ current_tokens = tokenize_texts(current_texts)
 
 reference_tfidf, token_names = compute_tfidf(reference_tokens)
 current_tfidf, _ = compute_tfidf(current_tokens)
+# Example labeled text data
+text_data = [
+    ("The stock market is experiencing a downturn.", 0),  # Label 0
+    ("Artificial intelligence is transforming industries.", 1),  # Label 1
+    ("Climate change poses significant risks to the planet.", 2),  # Label 2
+    ("Machine learning algorithms are improving daily.", 0),
+    ("Space exploration has gained renewed attention.", 1),
+    ("Advancements in AI are accelerating scientific research.", 2),
+    ("The global economy is recovering at a slow pace.", 0),
+    ("Renewable energy sources are becoming more popular.", 1),
+    ("Climate policies are being implemented worldwide.", 2),
+    ("There are significant advancements in robotics.", 0),
+]
+
+# Group by label
+from collections import defaultdict
+import random
+
+grouped_data = defaultdict(list)
+for text, label in text_data:
+    grouped_data[label].append(text)
+
+# Split each group
+reference_texts = []
+current_texts = []
+
+for label, texts in grouped_data.items():
+    random.shuffle(texts)
+    split_idx = int(len(texts) * 0.7)  # 70% reference, 30% current
+    reference_texts.extend(texts[:split_idx])
+    current_texts.extend(texts[split_idx:])
+
+print("Reference Texts:", reference_texts)
+print("Current Texts:", current_texts)
+
