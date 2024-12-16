@@ -2,33 +2,50 @@ import numpy as np
 from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
 
-# Sample data: Replace with your actual embeddings and labels
-# embeddings shape: (n_samples, embedding_dim)
-embeddings = np.random.rand(300, 768)  # Replace with your BERT embeddings
-labels = np.array([0]*100 + [1]*100 + [2]*100)  # Replace with your labels (0: travel, 1: lifestyle, 2: member service)
-current_embedding = np.random.rand(1, 768)  # Replace with your current embedding
+# Replace these with your actual embeddings
+# Embeddings for each class
+travel_embeddings = np.random.rand(100, 768)  # Replace with actual travel embeddings
+lifestyle_embeddings = np.random.rand(100, 768)  # Replace with actual lifestyle embeddings
+member_service_embeddings = np.random.rand(100, 768)  # Replace with actual member service embeddings
 
-# Append the current embedding to the existing embeddings
-all_embeddings = np.vstack([embeddings, current_embedding])
-all_labels = np.append(labels, 3)  # Label '3' for the current embedding
+# Combine all embeddings
+all_embeddings = np.vstack([travel_embeddings, lifestyle_embeddings, member_service_embeddings])
+
+# Create labels for each class
+travel_labels = np.zeros(len(travel_embeddings))  # 0 for travel
+lifestyle_labels = np.ones(len(lifestyle_embeddings))  # 1 for lifestyle
+member_service_labels = np.ones(len(member_service_embeddings)) * 2  # 2 for member service
+
+all_labels = np.concatenate([travel_labels, lifestyle_labels, member_service_labels])
+
+# New embedding to compare
+new_embedding = np.random.rand(1, 768)  # Replace with the actual new embedding
+all_embeddings = np.vstack([all_embeddings, new_embedding])
+all_labels = np.append(all_labels, 3)  # Label for the new embedding as 3
 
 # Apply t-SNE
 tsne = TSNE(n_components=2, random_state=42, perplexity=30, n_iter=1000)
 reduced_embeddings = tsne.fit_transform(all_embeddings)
 
 # Plot the t-SNE result
-plt.figure(figsize=(10, 8))
-colors = ['blue', 'green', 'orange', 'red']
-labels_map = ['Travel', 'Lifestyle', 'Member Service', 'Current']
+plt.figure(figsize=(12, 8))
 
-for i in range(4):  # Iterate through all classes including the current embedding
+# Define colors and markers for each class
+colors = ['blue', 'green', 'orange', 'red']
+markers = ['o', 'o', 'o', 'X']  # 'X' for the new embedding
+labels_map = ['Travel', 'Lifestyle', 'Member Service', 'New Embedding']
+
+# Plot each class
+for i in range(4):
     idx = all_labels == i
     plt.scatter(reduced_embeddings[idx, 0], reduced_embeddings[idx, 1], 
-                label=labels_map[i], color=colors[i], s=50, alpha=0.6 if i != 3 else 1.0)
+                c=colors[i], marker=markers[i], label=labels_map[i], 
+                s=100 if i == 3 else 50, alpha=1.0 if i == 3 else 0.7)
 
-# Add labels and legend
-plt.title('t-SNE Visualization of BERT Embeddings')
-plt.xlabel('t-SNE Dimension 1')
-plt.ylabel('t-SNE Dimension 2')
-plt.legend()
+# Add grid, legend, and labels
+plt.title('t-SNE Visualization of BERT Embeddings', fontsize=16)
+plt.xlabel('t-SNE Dimension 1', fontsize=12)
+plt.ylabel('t-SNE Dimension 2', fontsize=12)
+plt.legend(fontsize=12)
+plt.grid(True, linestyle='--', alpha=0.5)
 plt.show()
