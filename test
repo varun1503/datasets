@@ -1,97 +1,18 @@
-To enable the return of hidden states in AutoModelForSequenceClassification, you need to explicitly set the output_hidden_states parameter to True when loading the model. This allows the model to return the hidden states for all layers, which can then be used for embedding extraction.
+from scipy.spatial.distance import cosine
+import numpy as np
 
-Here's how to do it:
+# Calculate average embedding for each class as the reference
+reference_embeddings = {
+    "lifestyle": np.mean(lifestyle_embeddings, axis=0),
+    "members_service": np.mean(members_service_embeddings, axis=0),
+    "travel": np.mean(travel_embeddings, axis=0)
+}
 
+# Function to calculate cosine similarity
+def calculate_similarity(embeddings, reference):
+    return [1 - cosine(emb, reference) for emb in embeddings]
 
----
-
-Step-by-Step to Enable Hidden States in AutoModelForSequenceClassification
-
-1. Enable Hidden States
-
-Set output_hidden_states=True when loading the model.
-
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
-import torch
-
-# Load tokenizer and model with hidden states enabled
-tokenizer = AutoTokenizer.from_pretrained("your-model-name")
-model = AutoModelForSequenceClassification.from_pretrained(
-    "your-model-name", 
-    output_hidden_states=True
-)
-
-# Set the model to evaluation mode
-model.eval()
-
-
----
-
-2. Extract Embeddings from Hidden States
-
-You can now access the hidden states for each input. Typically, the CLS token embedding from the last hidden layer is used for sentence embeddings.
-
-# Function to extract embeddings
-def get_embeddings(texts):
-    inputs = tokenizer(texts, return_tensors="pt", padding=True, truncation=True, max_length=512)
-    with torch.no_grad():
-        outputs = model(**inputs)
-    
-    # Access hidden states
-    hidden_states = outputs.hidden_states  # Tuple of all hidden states
-    
-    # Use the last hidden state
-    last_hidden_state = hidden_states[-1]
-    
-    # Extract the CLS token (first token) for sentence embeddings
-    cls_embeddings = last_hidden_state[:, 0, :]  # Shape: (batch_size, hidden_size)
-    return cls_embeddings.numpy()
-
-
----
-
-3. Generate Embeddings for Each Class
-
-Now use the function to extract embeddings for the classes in your dataset.
-
-# Generate embeddings for each class
-lifestyle_embeddings = get_embeddings(lifestyle['text'].tolist())
-members_service_embeddings = get_embeddings(members_service['text'].tolist())
-travel_embeddings = get_embeddings(travel['text'].tolist())
-
-
----
-
-4. Compare and Visualize Embeddings
-
-Use the embeddings as described earlier to calculate similarities, compare distributions, and visualize results.
-
-
----
-
-Notes
-
-1. Hidden States Shape:
-
-hidden_states is a tuple where each element corresponds to a layer's output.
-
-If your model has 12 layers, hidden_states will have 12 tensors, each with shape (batch_size, sequence_length, hidden_size).
-
-
-
-2. Choosing Layers:
-
-Common practice is to use the last hidden state (hidden_states[-1]) or an average of the last few layers for robust sentence embeddings:
-
-# Mean of last 4 layers
-cls_embeddings = torch.mean(torch.stack(hidden_states[-4:]), dim=0)[:, 0, :]
-
-
-
-3. Enabling Gradient Tracking:
-
-If you plan to fine-tune or backpropagate, avoid `
-
-
-
-
+# Compare embeddings to reference embeddings
+lifestyle_similarity = calculate_similarity(lifestyle_embeddings, reference_embeddings["lifestyle"])
+members_service_similarity = calculate_similarity(members_service_embeddings, reference_embeddings["members_service"])
+travel_similarity = calculate_similarity(travel_embeddings, reference_embeddings["travel"])
