@@ -1,33 +1,16 @@
-from scipy.spatial.distance import cosine
-import numpy as np
+from scipy.stats import wasserstein_distance
 
-# Calculate average embedding for each class as the reference
-reference_embeddings = {
-    "lifestyle": np.mean(lifestyle_embeddings, axis=0),
-    "members_service": np.mean(members_service_embeddings, axis=0),
-    "travel": np.mean(travel_embeddings, axis=0)
-}
+# Flatten embeddings for cross-class comparison
+lifestyle_flat = lifestyle_embeddings.flatten()
+members_service_flat = members_service_embeddings.flatten()
+travel_flat = travel_embeddings.flatten()
 
-# Function to calculate cosine similarity
-def calculate_similarity(embeddings, reference):
-    return [1 - cosine(emb, reference) for emb in embeddings]
+# Calculate Wasserstein distances
+lifestyle_vs_members = wasserstein_distance(lifestyle_flat, members_service_flat)
+lifestyle_vs_travel = wasserstein_distance(lifestyle_flat, travel_flat)
+members_vs_travel = wasserstein_distance(members_service_flat, travel_flat)
 
-# Compare embeddings to reference embeddings
-lifestyle_similarity = calculate_similarity(lifestyle_embeddings, reference_embeddings["lifestyle"])
-members_service_similarity = calculate_similarity(members_service_embeddings, reference_embeddings["members_service"])
-travel_similarity = calculate_similarity(travel_embeddings, reference_embeddings["travel"])
-import matplotlib.pyplot as plt
-import seaborn as sns
-
-# Create a DataFrame for visualization
-similarity_data = pd.DataFrame({
-    "lifestyle": lifestyle_similarity,
-    "members_service": members_service_similarity,
-    "travel": travel_similarity
-})
-
-# Plot the similarity distributions
-sns.boxplot(data=similarity_data)
-plt.title("Embedding Similarity Distributions by Class")
-plt.ylabel("Cosine Similarity")
-plt.show()
+print("Wasserstein distances between classes:")
+print(f"Lifestyle vs Members Service: {lifestyle_vs_members}")
+print(f"Lifestyle vs Travel: {lifestyle_vs_travel}")
+print(f"Members Service vs Travel: {members_vs_travel}")
