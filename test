@@ -1,16 +1,184 @@
-from scipy.stats import wasserstein_distance
+sTo achieve your goal, here's how to implement the process step-by-step:
 
-# Flatten embeddings for cross-class comparison
-lifestyle_flat = lifestyle_embeddings.flatten()
-members_service_flat = members_service_embeddings.flatten()
-travel_flat = travel_embeddings.flatten()
 
-# Calculate Wasserstein distances
-lifestyle_vs_members = wasserstein_distance(lifestyle_flat, members_service_flat)
-lifestyle_vs_travel = wasserstein_distance(lifestyle_flat, travel_flat)
-members_vs_travel = wasserstein_distance(members_service_flat, travel_flat)
+---
 
-print("Wasserstein distances between classes:")
-print(f"Lifestyle vs Members Service: {lifestyle_vs_members}")
-print(f"Lifestyle vs Travel: {lifestyle_vs_travel}")
-print(f"Members Service vs Travel: {members_vs_travel}")
+Final Objective
+
+1. Pre-compute Reference Embeddings:
+
+Extract embeddings for the three reference classes: lifestyle, members service, and travel.
+
+Store these embeddings for future comparisons.
+
+
+
+2. Calculate Cosine Similarity for New Data:
+
+When new data arrives, extract embeddings for it.
+
+Compute cosine similarity between new data embeddings and the reference class embeddings.
+
+
+
+3. Visualize using t-SNE/UMAP:
+
+Visualize the distribution of reference class embeddings along with the new data embeddings.
+
+
+
+
+
+---
+
+Step 1: Pre-compute Reference Embeddings
+
+Extract and store embeddings for the three classes (lifestyle, members service, travel) using the get_embeddings function.
+
+# Generate and store reference embeddings
+lifestyle_embeddings = get_embeddings(lifestyle['text'].tolist())
+members_service_embeddings = get_embeddings(members_service['text'].tolist())
+travel_embeddings = get_embeddings(travel['text'].tolist())
+
+# Calculate the mean embeddings for each reference class
+reference_embeddings = {
+    "lifestyle": np.mean(lifestyle_embeddings, axis=0),
+    "members_service": np.mean(members_service_embeddings, axis=0),
+    "travel": np.mean(travel_embeddings, axis=0)
+}
+
+Store these reference_embeddings for future use. Save them in a file or database if needed.
+
+
+---
+
+Step 2: Process New Data
+
+When new data arrives, calculate its embeddings and compare it to the pre-computed reference embeddings using cosine similarity.
+
+from scipy.spatial.distance import cosine
+
+# Function to calculate cosine similarity
+def calculate_similarity(new_data_embeddings, reference_embeddings):
+    similarities = {}
+    for class_name, ref_emb in reference_embeddings.items():
+        # Compute cosine similarity for each reference class
+        similarities[class_name] = [1 - cosine(emb, ref_emb) for emb in new_data_embeddings]
+    return similarities
+
+# Example: Processing new data
+new_data = pd.DataFrame({"text": ["New text sample 1", "New text sample 2"]})  # Replace with your new data
+new_data_embeddings = get_embeddings(new_data['text'].tolist())
+
+# Calculate cosine similarity
+similarity_scores = calculate_similarity(new_data_embeddings, reference_embeddings)
+print(similarity_scores)
+
+
+---
+
+Step 3: Visualize Using t-SNE and UMAP
+
+Generate a combined map (t-SNE or UMAP) for the reference class embeddings and the new data embeddings.
+
+t-SNE Example
+
+from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
+
+# Combine embeddings for visualization
+all_embeddings = np.vstack([
+    lifestyle_embeddings,
+    members_service_embeddings,
+    travel_embeddings,
+    new_data_embeddings
+])
+
+# Labels for each point
+labels = (
+    ["lifestyle"] * len(lifestyle_embeddings) +
+    ["members_service"] * len(members_service_embeddings) +
+    ["travel"] * len(travel_embeddings) +
+    ["new_data"] * len(new_data_embeddings)
+)
+
+# Perform t-SNE
+tsne = TSNE(n_components=2, random_state=42)
+tsne_results = tsne.fit_transform(all_embeddings)
+
+# Visualize
+plt.figure(figsize=(10, 8))
+for label in set(labels):
+    idx = [i for i, l in enumerate(labels) if l == label]
+    plt.scatter(tsne_results[idx, 0], tsne_results[idx, 1], label=label, alpha=0.7)
+plt.legend()
+plt.title("t-SNE Visualization of Embeddings")
+plt.show()
+
+UMAP Example
+
+If you prefer UMAP for visualization:
+
+pip install umap-learn
+
+import umap
+
+# Perform UMAP
+umap_model = umap.UMAP(n_neighbors=15, min_dist=0.1, random_state=42)
+umap_results = umap_model.fit_transform(all_embeddings)
+
+# Visualize
+plt.figure(figsize=(10, 8))
+for label in set(labels):
+    idx = [i for i, l in enumerate(labels) if l == label]
+    plt.scatter(umap_results[idx, 0], umap_results[idx, 1], label=label, alpha=0.7)
+plt.legend()
+plt.title("UMAP Visualization of Embeddings")
+plt.show()
+
+
+---
+
+Output
+
+1. Cosine Similarity:
+
+Similarity scores between the new data embeddings and each reference class will be printed.
+
+Example:
+
+{
+    "lifestyle": [0.85, 0.72],
+    "members_service": [0.67, 0.78],
+    "travel": [0.55, 0.60]
+}
+
+
+
+2. t-SNE/UMAP Visualization:
+
+A scatter plot showing the embedding distributions for reference classes (lifestyle, members service, travel) and the new data.
+
+
+
+
+
+---
+
+Notes
+
+Optimization:
+
+Pre-compute and store reference_embeddings to avoid recalculating them each time.
+
+Use a database or file system to persist reference embeddings.
+
+
+Scalability:
+
+If you have a large dataset, consider reducing the dimensionality of embeddings (e.g., using PCA) before visualization.
+
+
+
+Let me know if you need help with saving or loading embeddings, or optimizing the workflow!
+
