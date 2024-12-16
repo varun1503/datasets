@@ -16,3 +16,18 @@ def calculate_similarity(embeddings, reference):
 lifestyle_similarity = calculate_similarity(lifestyle_embeddings, reference_embeddings["lifestyle"])
 members_service_similarity = calculate_similarity(members_service_embeddings, reference_embeddings["members_service"])
 travel_similarity = calculate_similarity(travel_embeddings, reference_embeddings["travel"])
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Create a DataFrame for visualization
+similarity_data = pd.DataFrame({
+    "lifestyle": lifestyle_similarity,
+    "members_service": members_service_similarity,
+    "travel": travel_similarity
+})
+
+# Plot the similarity distributions
+sns.boxplot(data=similarity_data)
+plt.title("Embedding Similarity Distributions by Class")
+plt.ylabel("Cosine Similarity")
+plt.show()
