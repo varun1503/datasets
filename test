@@ -1,27 +1,18 @@
-import seaborn as sns
-import matplotlib.pyplot as plt
+from transformers import BertTokenizer, BertModel
+import torch
 
-# Generate embeddings for the reference and current datasets
-# Reference embeddings
-tokens_ref = tokenizer(X_ref, padding='max_length', max_length=max_len, return_tensors='tf')
-emb_ref = embedding(tokens_ref)
+# Load BERT model and tokenizer
+tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+model = BertModel.from_pretrained('bert-base-uncased')
 
-# Current embeddings
-tokens_curr = tokenizer(X_h0, padding='max_length', max_length=max_len, return_tensors='tf')
-emb_curr = embedding(tokens_curr)
+def get_embeddings(texts):
+    inputs = tokenizer(texts, return_tensors='pt', padding=True, truncation=True, max_length=512)
+    with torch.no_grad():
+        outputs = model(**inputs)
+    # Use CLS token embedding as representation
+    return outputs.last_hidden_state[:, 0, :].numpy()
 
-# Select a specific feature index to plot (e.g., first dimension)
-feature_idx = 0
-reference = emb_ref[:, feature_idx].numpy()
-current = emb_curr[:, feature_idx].numpy()
-
-# Plot distributions
-plt.figure(figsize=(10, 6))
-sns.kdeplot(reference, label='Reference', fill=True, alpha=0.5, color='blue')
-sns.kdeplot(current, label='Current', fill=True, alpha=0.5, color='orange')
-plt.title(f'Distribution Comparison for Feature {feature_idx}', fontsize=14)
-plt.xlabel('Feature Value', fontsize=12)
-plt.ylabel('Density', fontsize=12)
-plt.legend()
-plt.grid(alpha=0.3)
-plt.show()
+# Generate embeddings for each class
+lifestyle_embeddings = get_embeddings(lifestyle['text'].tolist())
+members_service_embeddings = get_embeddings(members_service['text'].tolist())
+travel_embeddings = get_embeddings(travel['text'].tolist())
