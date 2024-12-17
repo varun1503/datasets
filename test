@@ -1,51 +1,35 @@
+Comparing two BERT embeddings:
+
+If you plot both embeddings on the same KDE graph, the curves will help visualize how similar or different the distributions of values are.
+Similar KDE curves → The two embeddings have similar distributions of values.
+Different KDE curves → The embeddings' distributions differ, which might indicate dissimilarity between the embeddings.
+Interpretation of the KDE Plot:
+
+If the BERT embeddings represent similar inputs (e.g., two similar sentences), their KDE plots should be close, as BERT would produce similar high-dimensional representations.
+For embeddings of dissimilar inputs (e.g., unrelated sentences), the KDE plots will likely show a significant difference in density distributions.
+import umap
+import plotly.express as px
 import numpy as np
-from sklearn.manifold import TSNE
-import matplotlib.pyplot as plt
 
-# Replace these with your actual embeddings
-# Embeddings for each class
-travel_embeddings = np.random.rand(100, 768)  # Replace with actual travel embeddings
-lifestyle_embeddings = np.random.rand(100, 768)  # Replace with actual lifestyle embeddings
-member_service_embeddings = np.random.rand(100, 768)  # Replace with actual member service embeddings
+# Example Embeddings
+embedding1 = np.random.rand(100, 768)  # Simulated 100x768-dimensional vector
+embedding2 = np.random.rand(100, 768)  # Another 100x768-dimensional vector
 
-# Combine all embeddings
-all_embeddings = np.vstack([travel_embeddings, lifestyle_embeddings, member_service_embeddings])
+# Combine embeddings
+combined_embeddings = np.vstack((embedding1, embedding2))
+labels = ['Embedding 1'] * 100 + ['Embedding 2'] * 100  # Labels for differentiation
 
-# Create labels for each class
-travel_labels = np.zeros(len(travel_embeddings))  # 0 for travel
-lifestyle_labels = np.ones(len(lifestyle_embeddings))  # 1 for lifestyle
-member_service_labels = np.ones(len(member_service_embeddings)) * 2  # 2 for member service
+# Reduce dimensionality with UMAP
+reducer = umap.UMAP(n_components=2, random_state=42)
+embeddings_2d = reducer.fit_transform(combined_embeddings)
 
-all_labels = np.concatenate([travel_labels, lifestyle_labels, member_service_labels])
+# Plot using Plotly
+fig = px.scatter(
+    x=embeddings_2d[:, 0],
+    y=embeddings_2d[:, 1],
+    color=labels,
+    labels={'x': 'UMAP 1', 'y': 'UMAP 2', 'color': 'Embedding'},
+    title="UMAP Projection of Two Embeddings"
+)
 
-# New embedding to compare
-new_embedding = np.random.rand(1, 768)  # Replace with the actual new embedding
-all_embeddings = np.vstack([all_embeddings, new_embedding])
-all_labels = np.append(all_labels, 3)  # Label for the new embedding as 3
-
-# Apply t-SNE
-tsne = TSNE(n_components=2, random_state=42, perplexity=30, n_iter=1000)
-reduced_embeddings = tsne.fit_transform(all_embeddings)
-
-# Plot the t-SNE result
-plt.figure(figsize=(12, 8))
-
-# Define colors and markers for each class
-colors = ['blue', 'green', 'orange', 'red']
-markers = ['o', 'o', 'o', 'X']  # 'X' for the new embedding
-labels_map = ['Travel', 'Lifestyle', 'Member Service', 'New Embedding']
-
-# Plot each class
-for i in range(4):
-    idx = all_labels == i
-    plt.scatter(reduced_embeddings[idx, 0], reduced_embeddings[idx, 1], 
-                c=colors[i], marker=markers[i], label=labels_map[i], 
-                s=100 if i == 3 else 50, alpha=1.0 if i == 3 else 0.7)
-
-# Add grid, legend, and labels
-plt.title('t-SNE Visualization of BERT Embeddings', fontsize=16)
-plt.xlabel('t-SNE Dimension 1', fontsize=12)
-plt.ylabel('t-SNE Dimension 2', fontsize=12)
-plt.legend(fontsize=12)
-plt.grid(True, linestyle='--', alpha=0.5)
-plt.show()
+fig.show()
