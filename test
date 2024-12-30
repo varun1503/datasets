@@ -1,35 +1,9 @@
-Comparing two BERT embeddings:
-
-If you plot both embeddings on the same KDE graph, the curves will help visualize how similar or different the distributions of values are.
-Similar KDE curves → The two embeddings have similar distributions of values.
-Different KDE curves → The embeddings' distributions differ, which might indicate dissimilarity between the embeddings.
-Interpretation of the KDE Plot:
-
-If the BERT embeddings represent similar inputs (e.g., two similar sentences), their KDE plots should be close, as BERT would produce similar high-dimensional representations.
-For embeddings of dissimilar inputs (e.g., unrelated sentences), the KDE plots will likely show a significant difference in density distributions.
-import umap
-import plotly.express as px
 import numpy as np
 
-# Example Embeddings
-embedding1 = np.random.rand(100, 768)  # Simulated 100x768-dimensional vector
-embedding2 = np.random.rand(100, 768)  # Another 100x768-dimensional vector
+def pad_to_same_length(vec1, vec2):
+    max_length = max(len(vec1), len(vec2))
+    padded_vec1 = np.pad(vec1, (0, max_length - len(vec1)), 'constant')
+    padded_vec2 = np.pad(vec2, (0, max_length - len(vec2)), 'constant')
+    return padded_vec1, padded_vec2
 
-# Combine embeddings
-combined_embeddings = np.vstack((embedding1, embedding2))
-labels = ['Embedding 1'] * 100 + ['Embedding 2'] * 100  # Labels for differentiation
-
-# Reduce dimensionality with UMAP
-reducer = umap.UMAP(n_components=2, random_state=42)
-embeddings_2d = reducer.fit_transform(combined_embeddings)
-
-# Plot using Plotly
-fig = px.scatter(
-    x=embeddings_2d[:, 0],
-    y=embeddings_2d[:, 1],
-    color=labels,
-    labels={'x': 'UMAP 1', 'y': 'UMAP 2', 'color': 'Embedding'},
-    title="UMAP Projection of Two Embeddings"
-)
-
-fig.show()
+padded_vec1, padded_vec2 = pad_to_same_length(vector1, vector2)
