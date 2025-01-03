@@ -1,9 +1,51 @@
-import numpy as np
+import psycopg2
 
-def pad_to_same_length(vec1, vec2):
-    max_length = max(len(vec1), len(vec2))
-    padded_vec1 = np.pad(vec1, (0, max_length - len(vec1)), 'constant')
-    padded_vec2 = np.pad(vec2, (0, max_length - len(vec2)), 'constant')
-    return padded_vec1, padded_vec2
+# Connection details
+connection = psycopg2.connect(
+    host="localhost",        # Use the container's IP if not mapped to localhost
+    port=5432,               # Default PostgreSQL port
+    database="postgres",     # Change to your database name if needed
+    user="postgres",         # Default username
+    password="mysecretpassword"  # Password you set
+)
 
-padded_vec1, padded_vec2 = pad_to_same_length(vector1, vector2)
+# Create a cursor
+cursor = connection.cursor()
+
+# Ensure the 'vector' extension is enabled
+cursor.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+
+# Create a table with a vector column
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS items (
+    id SERIAL PRIMARY KEY,
+    embedding VECTOR(3)
+);
+""")
+
+# Insert some example vectors
+cursor.execute("""
+INSERT INTO items (embedding) VALUES
+    ('[1, 2, 3]'),
+    ('[4, 5, 6]');
+""")
+
+# Commit the changes
+connection.commit()
+
+# Perform a similarity search
+query = """
+SELECT id, embedding
+FROM items
+ORDER BY embedding <-> '[3, 1, 2]'
+LIMIT 1;
+"""
+cursor.execute(query)
+
+# Fetch and print the closest vector
+result = cursor.fetchall()
+print("Closest vector:", result)
+
+# Clean up
+cursor.close()
+connection.close()
