@@ -1,51 +1,31 @@
-import psycopg2
+Slide 1: MDK Overview
+MDK: Machine Learning Development Kit
 
-# Connection details
-connection = psycopg2.connect(
-    host="localhost",        # Use the container's IP if not mapped to localhost
-    port=5432,               # Default PostgreSQL port
-    database="postgres",     # Change to your database name if needed
-    user="postgres",         # Default username
-    password="mysecretpassword"  # Password you set
-)
+Supports Two Model Types:
+Image Models
+Text Models
+Three Core Services:
 
-# Create a cursor
-cursor = connection.cursor()
+Hyperparameter Tuning (HPT):
 
-# Ensure the 'vector' extension is enabled
-cursor.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+Tools: Optuna + Dask for efficient and scalable optimization.
+Model Interpretation:
 
-# Create a table with a vector column
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS items (
-    id SERIAL PRIMARY KEY,
-    embedding VECTOR(3)
-);
-""")
+Tools: LIME, SHAP, Captum for understanding predictions.
+Drift Detection:
 
-# Insert some example vectors
-cursor.execute("""
-INSERT INTO items (embedding) VALUES
-    ('[1, 2, 3]'),
-    ('[4, 5, 6]');
-""")
+Tools: Alibi framework with KS, MMD, Cosine Distance, and EMD.
+Slide 2: MDK Highlights
+1. Hyperparameter Tuning (HPT):
 
-# Commit the changes
-connection.commit()
+Combines Optuna (optimization) with Dask (parallel processing) for robust and scalable tuning.
+2. Model Interpretation:
 
-# Perform a similarity search
-query = """
-SELECT id, embedding
-FROM items
-ORDER BY embedding <-> '[3, 1, 2]'
-LIMIT 1;
-"""
-cursor.execute(query)
+Explains predictions using:
+LIME: Local interpretability.
+SHAP: Feature importance.
+Captum: Deep learning interpretability.
+3. Drift Detection:
 
-# Fetch and print the closest vector
-result = cursor.fetchall()
-print("Closest vector:", result)
-
-# Clean up
-cursor.close()
-connection.close()
+Detects data shifts using Alibi framework with advanced metrics:
+KS, MMD, Cosine Distance, EMD.
