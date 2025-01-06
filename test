@@ -9,3 +9,16 @@ def list_tables(self):
     """)
     tables = self.cursor.fetchall()
     return [table[0] for table in tables]
+
+def drop_table(self, table_name: str):
+    """
+    Drops the specified table from the database.
+    """
+    drop_query = f"DROP TABLE IF EXISTS {table_name};"
+    try:
+        self.cursor.execute(drop_query)
+        self.conn.commit()  # Commit the transaction to apply changes
+        print(f"Table '{table_name}' dropped successfully.")
+    except Exception as e:
+        print(f"Error dropping table '{table_name}': {e}")
+        self.conn.rollback()  # Rollback in case of error
