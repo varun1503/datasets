@@ -174,5 +174,180 @@ else:
 
 By following these steps and customizing thresholds based on your data and use case, you can effectively monitor and handle drift in your BERT-based text model.
 
+Guidelines for Drift Detection Results: Visualizations, Saving, and Interpretation
+
+1. Generate Visualizations
+
+Use visualizations to analyze and interpret drift metrics. Here are common techniques:
+
+1.1 t-SNE Plot
+
+Projects high-dimensional embeddings into 2D or 3D for visualization.
+
+Shows how the reference and new dataset embeddings cluster or diverge.
+
+Interpretation: Overlapping clusters indicate minimal drift, while separate clusters suggest drift.
+
+
+Code:
+
+from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
+
+# Combine reference and new embeddings
+combined_embeddings = np.vstack([reference_embeddings, new_embeddings])
+
+# Generate t-SNE projection
+tsne = TSNE(n_components=2, random_state=42)
+tsne_result = tsne.fit_transform(combined_embeddings)
+
+# Split results for plotting
+ref_tsne = tsne_result[:len(reference_embeddings)]
+new_tsne = tsne_result[len(reference_embeddings):]
+
+# Plot t-SNE
+plt.figure(figsize=(8, 6))
+plt.scatter(ref_tsne[:, 0], ref_tsne[:, 1], label='Reference', alpha=0.5)
+plt.scatter(new_tsne[:, 0], new_tsne[:, 1], label='New', alpha=0.5)
+plt.legend()
+plt.title("t-SNE Plot of Embeddings")
+plt.savefig("plots/tsne_plot.png")  # Save plot
+plt.show()
+
+1.2 UMAP Plot
+
+Similar to t-SNE but preserves more of the global structure.
+
+Interpretation: Compare clustering patterns between datasets.
+
+
+Code:
+
+import umap
+
+# UMAP projection
+reducer = umap.UMAP(random_state=42)
+umap_result = reducer.fit_transform(combined_embeddings)
+
+# Split results for plotting
+ref_umap = umap_result[:len(reference_embeddings)]
+new_umap = umap_result[len(reference_embeddings):]
+
+# Plot UMAP
+plt.figure(figsize=(8, 6))
+plt.scatter(ref_umap[:, 0], ref_umap[:, 1], label='Reference', alpha=0.5)
+plt.scatter(new_umap[:, 0], new_umap[:, 1], label='New', alpha=0.5)
+plt.legend()
+plt.title("UMAP Plot of Embeddings")
+plt.savefig("plots/umap_plot.png")  # Save plot
+plt.show()
+
+
+---
+
+2. Metric Matrix
+
+Create a table or heatmap showing drift metric values between the reference and new datasets.
+
+Use metrics like KS statistic, MMD, JS distance, and cosine similarity.
+
+
+Code for Metric Matrix:
+
+import pandas as pd
+import seaborn as sns
+
+# Example metric values
+metrics = {
+    "KS Statistic": ks_statistic,
+    "MMD": mmd_value,
+    "JS Distance": js_distance,
+    "EMD": emd_value,
+    "Cosine Similarity": mean_cosine_similarity
+}
+
+# Create DataFrame
+df_metrics = pd.DataFrame(metrics, index=["Value"])
+
+# Save as CSV
+df_metrics.to_csv("results/drift_metrics.csv", index=True)
+
+# Heatmap
+plt.figure(figsize=(6, 4))
+sns.heatmap(df_metrics, annot=True, cmap="coolwarm")
+plt.title("Drift Metric Values")
+plt.savefig("plots/metric_matrix.png")  # Save heatmap
+plt.show()
+
+Interpretation:
+
+Lower JS distance, MMD, or KS values indicate minimal drift.
+
+High cosine similarity (>0.9) suggests no drift.
+
+Significant changes in metrics imply potential drift.
+
+
+
+---
+
+3. Saving Results
+
+Plots: Save visualizations in the plots/ directory (e.g., tsne_plot.png, umap_plot.png, metric_matrix.png).
+
+Metrics: Save metric values in results/drift_metrics.csv.
+
+
+
+---
+
+4. Interpretation of Results
+
+Clusters in t-SNE/UMAP:
+
+Overlapping clusters: No significant drift.
+
+Separate clusters: Drift detected.
+
+
+Metric Values:
+
+KS Statistic: Higher value (> threshold, e.g., 0.05) suggests drift.
+
+MMD: Higher value indicates greater divergence.
+
+JS Distance: A value closer to 1 indicates drift.
+
+Cosine Similarity: Values < 0.9 suggest potential drift.
+
+EMD: Higher values (>0.5) suggest drift.
+
+
+Metric Matrix:
+
+Use as a summary to pinpoint specific metrics that exceed thresholds.
+
+
+
+
+---
+
+5. Alerting and Next Steps
+
+If drift is detected:
+
+Investigate specific metrics and embeddings contributing to the drift.
+
+Retrain the model with new data to address the drift.
+
+
+Automate monitoring:
+
+Use scripts to periodically calculate drift metrics and generate alerts if thresholds are exceeded.
+
+
+
+By following this guideline, you can effectively detect, save, and interpret drift in your text-based BERT model.
+
 
 
