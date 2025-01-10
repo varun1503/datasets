@@ -1,121 +1,178 @@
-## Presentation: Evaluating Data Drift Using KS and MMD Metrics
+To detect drift in a text-based BERT model using metrics such as KS Statistics, Maximum Mean Discrepancy (MMD), Jensen-Shannon (JS) distance, Earth Mover's Distance (EMD), and Cosine Similarity, here’s how you can proceed step by step:
 
-### Objective
-The goal of this analysis is to evaluate data drift in a three-class BERT-based text classification model. The classes include:
-- Lifestyle
-- Travel
-- Member Service
-
-We inject noisy words into the data and assess the drift using KS (Kolmogorov-Smirnov) and MMD (Maximum Mean Discrepancy) metrics. The results are compared between the normal data and perturbed datasets to quantify the extent of drift.
 
 ---
 
-### Methodology
+1. Understand the Metrics
 
-#### 1. Data Preparation
-We split the original test set into:
-- **Reference Dataset:** A subset of the original test set.
-- **H0 Dataset:** A subset of the test set that should not be rejected under the null hypothesis.
-- **Imbalanced Datasets:** Artificially imbalanced subsets.
+KS Statistic (Kolmogorov-Smirnov Test): Measures the maximum difference between two cumulative distribution functions. It's useful for numerical features or embeddings.
 
-#### Code for Data Splitting:
-```python
+MMD (Maximum Mean Discrepancy): Measures the difference between distributions in a reproducing kernel Hilbert space, often used with embeddings.
+
+JS Distance: Measures divergence between two probability distributions. A JS distance close to 0 indicates similarity.
+
+EMD (Earth Mover's Distance): Measures the "work" needed to transform one distribution into another.
+
+Cosine Similarity: Measures similarity between vectors by the cosine of the angle between them. A value close to 1 means high similarity.
+
+
+
+---
+
+2. Generate Embeddings
+
+Use your BERT model to generate embeddings for the reference (training) dataset and the new dataset. These embeddings will be the input to your drift detection methods.
+
+from transformers import BertTokenizer, BertModel
+import torch
+
+tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+model = BertModel.from_pretrained('bert-base-uncased')
+
+def get_embeddings(texts):
+    inputs = tokenizer(texts, return_tensors="pt", padding=True, truncation=True)
+    outputs = model(**inputs)
+    return outputs.last_hiddenGuidelines for Drift Detection in Text Using BERT
+
+1. Preprocessing
+
+1.1 Prepare the datasets:
+
+Reference dataset (e.g., training data).
+
+New dataset (e.g., incoming or test data).
+
+
+1.2 Generate embeddings:
+
+Use the BERT model to extract embeddings for both datasets. These embeddings represent the text in a high-dimensional space.
+
+
+
+---
+
+2. Select Drift Metrics
+
+Choose one or more metrics to compare the reference and new datasets:
+
+KS Statistic: Compare the distributions of embeddings across features.
+
+MMD: Use to compare the mean difference of embedding distributions.
+
+JS Distance: Compare probability distributions (e.g., softmax probabilities from the model).
+
+EMD: Assess the effort needed to transform one embedding distribution to another.
+
+Cosine Similarity: Compare the similarity of embeddings directly.
+
+
+
+---
+
+3. Threshold Setting
+
+3.1 Empirical thresholding:
+
+Compute the metric values between reference and reference (self-comparison) to establish a baseline.
+
+Set thresholds based on acceptable deviation. For instance:
+
+KS Statistic: threshold = 0.05 (low difference indicates similarity).
+
+MMD: Use a threshold obtained from cross-validation.
+
+JS Distance: Values below 0.1 generally indicate minimal drift.
+
+EMD: Set based on embedding scales (e.g., normalized embeddings, threshold < 0.5).
+
+Cosine Similarity: High similarity (> 0.9) is desirable.
+
+
+
+3.2 Domain-specific thresholds:
+
+Adjust thresholds based on the criticality of drift for your application.
+
+
+
+---
+
+4. Drift Detection Steps
+
+4.1 Calculate metrics:
+
+Compute the selected metrics for the reference and new dataset embeddings.
+
+
+4.2 Compare with thresholds:
+
+Compare computed metric values against the set thresholds to detect drift.
+
+
+4.3 Interpret results:
+
+If the metric exceeds the threshold, drift is likely present.
+
+Investigate which features or dimensions contribute most to the drift.
+
+
+
+---
+
+5. Mitigation Actions
+
+Retrain the model: Include the new data to adapt to the drift.
+
+Reevaluate data pipeline: Address potential changes in data collection or preprocessing.
+
+Alert system: Implement alerts for detected drift exceeding critical thresholds.
+
+
+
+---
+
+6. Tools and Libraries
+
+Use libraries such as:
+
+SciPy: For KS Statistics.
+
+PyTorch / TensorFlow: To compute embeddings.
+
+Scikit-learn: For JS distance and cosine similarity.
+
+Alibi-detect or Evidently: For advanced drift detection.
+
+
+
+
+---
+
+7. Example
+
+Python Code for Cosine Similarity and Thresholding:
+
+from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 
-def random_sample(X: np.ndarray, y: np.ndarray, proba_zero: float, n: int):
-    idx_0 = np.where(y == 0)[0]
-    idx_1 = np.where(y == 1)[0]
-    n_0, n_1 = int(n * proba_zero), int(n * (1 - proba_zero))
-    idx_0_out = np.random.choice(idx_0, n_0, replace=False)
-    idx_1_out = np.random.choice(idx_1, n_1, replace=False)
-    X_out = np.concatenate([X[idx_0_out], X[idx_1_out]])
-    y_out = np.concatenate([y[idx_0_out], y[idx_1_out]])
-    return X_out.tolist(), y_out.tolist()
-```
+# Reference and new embeddings (shape: [num_samples, embedding_dim])
+reference_embeddings = np.random.rand(100, 768)
+new_embeddings = np.random.rand(100, 768)
 
-#### 2. Noisy Word Injection
-We injected selected noisy words such as “fantastic,” “good,” “bad,” and “horrible” into the dataset at varying perturbation levels (1% and 5% of tokens per instance). 
+# Calculate cosine similarity
+similarities = cosine_similarity(reference_embeddings, new_embeddings)
 
-Code snippet for word injection:
-```python
-def inject_word(token: int, X: np.ndarray, perc_chg: float):
-    seq_len = X.shape[1]
-    n_chg = int(perc_chg * 0.01 * seq_len)
-    X_cp = X.copy()
-    for i in range(X.shape[0]):
-        idx = np.random.choice(np.arange(seq_len), n_chg, replace=False)
-        X_cp[i, idx] = token
-    return X_cp.tolist()
-```
+# Mean similarity
+mean_similarity = np.mean(similarities)
 
----
+# Threshold
+threshold = 0.9
+if mean_similarity < threshold:
+    print("Drift detected!")
+else:
+    print("No significant drift.")
 
-### Results
+By following these steps and customizing thresholds based on your data and use case, you can effectively monitor and handle drift in your BERT-based text model.
 
-#### 1. Drift Evaluation on H0 Dataset
-We verified that the H0 dataset does not exhibit drift. This serves as a baseline.
 
-**Results:**
-- Drift: No
-- P-value: [Example Values]
-
-#### 2. Drift Evaluation on Imbalanced Datasets
-We created imbalanced datasets with different proportions of the classes and evaluated drift.
-
-**Results:**
-- 10% Negative Sentiment:
-  - Drift: Yes
-  - P-value: [Example Values]
-- 90% Negative Sentiment:
-  - Drift: Yes
-  - P-value: [Example Values]
-
-#### 3. Drift Evaluation on Noisy Word Injection
-We injected noisy words at different perturbation levels (1% and 5%) and checked for drift.
-
-**Results:**
-- **Word: Fantastic**
-  - 1% Perturbed: Drift = No, P-value = [0.88, 0.91, ...]
-  - 5% Perturbed: Drift = Yes, P-value = [1.29e-02, 1.52e-11, ...]
-
-- **Word: Good**
-  - 1% Perturbed: Drift = Yes, P-value = [0.34, 0.98, ...]
-  - 5% Perturbed: Drift = Yes, P-value = [6.13e-16, 2.40e-04, ...]
-
-- **Word: Bad**
-  - 1% Perturbed: Drift = No, P-value = [0.88, 0.95, ...]
-  - 5% Perturbed: Drift = Yes, P-value = [7.04e-08, 3.69e-01, ...]
-
----
-
-### Visualizations
-#### 1. KS and MMD Metrics Across Datasets
-- [Insert KS metric visualization comparing normal and perturbed datasets]
-- [Insert MMD visualization for imbalanced datasets]
-
-#### 2. Class Distribution
-- Reference vs. Imbalanced Datasets:
-  - Bar plot showing class proportions.
-
-#### 3. Perturbation Impact
-- Word-level drift plots at 1% and 5% perturbation levels.
-
----
-
-### Key Takeaways
-1. Drift was successfully detected in imbalanced and perturbed datasets.
-2. Higher perturbation levels led to significant drift, as evidenced by lower p-values.
-3. KS and MMD metrics provide reliable measures to quantify data drift.
-4. Drift detection ensures the robustness of the BERT-based classification model.
-
----
-
-### Next Steps
-1. Implement additional mitigation strategies to handle data drift in production.
-2. Regularly monitor KS and MMD metrics to ensure model performance.
-3. Explore other metrics or methods to detect drift at a finer granularity.
-
----
-
-**Thank you!**
 
