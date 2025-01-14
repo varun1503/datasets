@@ -1,353 +1,68 @@
-To detect drift in a text-based BERT model using metrics such as KS Statistics, Maximum Mean Discrepancy (MMD), Jensen-Shannon (JS) distance, Earth Mover's Distance (EMD), and Cosine Similarity, here’s how you can proceed step by step:
-
-
----
-
-1. Understand the Metrics
-
-KS Statistic (Kolmogorov-Smirnov Test): Measures the maximum difference between two cumulative distribution functions. It's useful for numerical features or embeddings.
-
-MMD (Maximum Mean Discrepancy): Measures the difference between distributions in a reproducing kernel Hilbert space, often used with embeddings.
-
-JS Distance: Measures divergence between two probability distributions. A JS distance close to 0 indicates similarity.
-
-EMD (Earth Mover's Distance): Measures the "work" needed to transform one distribution into another.
-
-Cosine Similarity: Measures similarity between vectors by the cosine of the angle between them. A value close to 1 means high similarity.
-
-
-
----
-
-2. Generate Embeddings
-
-Use your BERT model to generate embeddings for the reference (training) dataset and the new dataset. These embeddings will be the input to your drift detection methods.
-
-from transformers import BertTokenizer, BertModel
-import torch
-
-tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-model = BertModel.from_pretrained('bert-base-uncased')
-
-def get_embeddings(texts):
-    inputs = tokenizer(texts, return_tensors="pt", padding=True, truncation=True)
-    outputs = model(**inputs)
-    return outputs.last_hiddenGuidelines for Drift Detection in Text Using BERT
-
-1. Preprocessing
-
-1.1 Prepare the datasets:
-
-Reference dataset (e.g., training data).
-
-New dataset (e.g., incoming or test data).
-
-
-1.2 Generate embeddings:
-
-Use the BERT model to extract embeddings for both datasets. These embeddings represent the text in a high-dimensional space.
-
-
-
----
-
-2. Select Drift Metrics
-
-Choose one or more metrics to compare the reference and new datasets:
-
-KS Statistic: Compare the distributions of embeddings across features.
-
-MMD: Use to compare the mean difference of embedding distributions.
-
-JS Distance: Compare probability distributions (e.g., softmax probabilities from the model).
-
-EMD: Assess the effort needed to transform one embedding distribution to another.
-
-Cosine Similarity: Compare the similarity of embeddings directly.
-
-
-
----
-
-3. Threshold Setting
-
-3.1 Empirical thresholding:
-
-Compute the metric values between reference and reference (self-comparison) to establish a baseline.
-
-Set thresholds based on acceptable deviation. For instance:
-
-KS Statistic: threshold = 0.05 (low difference indicates similarity).
-
-MMD: Use a threshold obtained from cross-validation.
-
-JS Distance: Values below 0.1 generally indicate minimal drift.
-
-EMD: Set based on embedding scales (e.g., normalized embeddings, threshold < 0.5).
-
-Cosine Similarity: High similarity (> 0.9) is desirable.
-
-
-
-3.2 Domain-specific thresholds:
-
-Adjust thresholds based on the criticality of drift for your application.
-
-
-
----
-
-4. Drift Detection Steps
-
-4.1 Calculate metrics:
-
-Compute the selected metrics for the reference and new dataset embeddings.
-
-
-4.2 Compare with thresholds:
-
-Compare computed metric values against the set thresholds to detect drift.
-
-
-4.3 Interpret results:
-
-If the metric exceeds the threshold, drift is likely present.
-
-Investigate which features or dimensions contribute most to the drift.
-
-
-
----
-
-5. Mitigation Actions
-
-Retrain the model: Include the new data to adapt to the drift.
-
-Reevaluate data pipeline: Address potential changes in data collection or preprocessing.
-
-Alert system: Implement alerts for detected drift exceeding critical thresholds.
-
-
-
----
-
-6. Tools and Libraries
-
-Use libraries such as:
-
-SciPy: For KS Statistics.
-
-PyTorch / TensorFlow: To compute embeddings.
-
-Scikit-learn: For JS distance and cosine similarity.
-
-Alibi-detect or Evidently: For advanced drift detection.
-
-
-
-
----
-
-7. Example
-
-Python Code for Cosine Similarity and Thresholding:
-
-from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
-
-# Reference and new embeddings (shape: [num_samples, embedding_dim])
-reference_embeddings = np.random.rand(100, 768)
-new_embeddings = np.random.rand(100, 768)
-
-# Calculate cosine similarity
-similarities = cosine_similarity(reference_embeddings, new_embeddings)
-
-# Mean similarity
-mean_similarity = np.mean(similarities)
-
-# Threshold
-threshold = 0.9
-if mean_similarity < threshold:
-    print("Drift detected!")
-else:
-    print("No significant drift.")
-
-By following these steps and customizing thresholds based on your data and use case, you can effectively monitor and handle drift in your BERT-based text model.
-
-Guidelines for Drift Detection Results: Visualizations, Saving, and Interpretation
-
-1. Generate Visualizations
-
-Use visualizations to analyze and interpret drift metrics. Here are common techniques:
-
-1.1 t-SNE Plot
-
-Projects high-dimensional embeddings into 2D or 3D for visualization.
-
-Shows how the reference and new dataset embeddings cluster or diverge.
-
-Interpretation: Overlapping clusters indicate minimal drift, while separate clusters suggest drift.
-
-
-Code:
-
-from sklearn.manifold import TSNE
-import matplotlib.pyplot as plt
-
-# Combine reference and new embeddings
-combined_embeddings = np.vstack([reference_embeddings, new_embeddings])
-
-# Generate t-SNE projection
-tsne = TSNE(n_components=2, random_state=42)
-tsne_result = tsne.fit_transform(combined_embeddings)
-
-# Split results for plotting
-ref_tsne = tsne_result[:len(reference_embeddings)]
-new_tsne = tsne_result[len(reference_embeddings):]
-
-# Plot t-SNE
-plt.figure(figsize=(8, 6))
-plt.scatter(ref_tsne[:, 0], ref_tsne[:, 1], label='Reference', alpha=0.5)
-plt.scatter(new_tsne[:, 0], new_tsne[:, 1], label='New', alpha=0.5)
-plt.legend()
-plt.title("t-SNE Plot of Embeddings")
-plt.savefig("plots/tsne_plot.png")  # Save plot
-plt.show()
-
-1.2 UMAP Plot
-
-Similar to t-SNE but preserves more of the global structure.
-
-Interpretation: Compare clustering patterns between datasets.
-
-
-Code:
-
-import umap
-
-# UMAP projection
-reducer = umap.UMAP(random_state=42)
-umap_result = reducer.fit_transform(combined_embeddings)
-
-# Split results for plotting
-ref_umap = umap_result[:len(reference_embeddings)]
-new_umap = umap_result[len(reference_embeddings):]
-
-# Plot UMAP
-plt.figure(figsize=(8, 6))
-plt.scatter(ref_umap[:, 0], ref_umap[:, 1], label='Reference', alpha=0.5)
-plt.scatter(new_umap[:, 0], new_umap[:, 1], label='New', alpha=0.5)
-plt.legend()
-plt.title("UMAP Plot of Embeddings")
-plt.savefig("plots/umap_plot.png")  # Save plot
-plt.show()
-
-
----
-
-2. Metric Matrix
-
-Create a table or heatmap showing drift metric values between the reference and new datasets.
-
-Use metrics like KS statistic, MMD, JS distance, and cosine similarity.
-
-
-Code for Metric Matrix:
-
-import pandas as pd
-import seaborn as sns
-
-# Example metric values
-metrics = {
-    "KS Statistic": ks_statistic,
-    "MMD": mmd_value,
-    "JS Distance": js_distance,
-    "EMD": emd_value,
-    "Cosine Similarity": mean_cosine_similarity
-}
-
-# Create DataFrame
-df_metrics = pd.DataFrame(metrics, index=["Value"])
-
-# Save as CSV
-df_metrics.to_csv("results/drift_metrics.csv", index=True)
-
-# Heatmap
-plt.figure(figsize=(6, 4))
-sns.heatmap(df_metrics, annot=True, cmap="coolwarm")
-plt.title("Drift Metric Values")
-plt.savefig("plots/metric_matrix.png")  # Save heatmap
-plt.show()
-
-Interpretation:
-
-Lower JS distance, MMD, or KS values indicate minimal drift.
-
-High cosine similarity (>0.9) suggests no drift.
-
-Significant changes in metrics imply potential drift.
-
-
-
----
-
-3. Saving Results
-
-Plots: Save visualizations in the plots/ directory (e.g., tsne_plot.png, umap_plot.png, metric_matrix.png).
-
-Metrics: Save metric values in results/drift_metrics.csv.
-
-
-
----
-
-4. Interpretation of Results
-
-Clusters in t-SNE/UMAP:
-
-Overlapping clusters: No significant drift.
-
-Separate clusters: Drift detected.
-
-
-Metric Values:
-
-KS Statistic: Higher value (> threshold, e.g., 0.05) suggests drift.
-
-MMD: Higher value indicates greater divergence.
-
-JS Distance: A value closer to 1 indicates drift.
-
-Cosine Similarity: Values < 0.9 suggest potential drift.
-
-EMD: Higher values (>0.5) suggest drift.
-
-
-Metric Matrix:
-
-Use as a summary to pinpoint specific metrics that exceed thresholds.
-
-
-
-
----
-
-5. Alerting and Next Steps
-
-If drift is detected:
-
-Investigate specific metrics and embeddings contributing to the drift.
-
-Retrain the model with new data to address the drift.
-
-
-Automate monitoring:
-
-Use scripts to periodically calculate drift metrics and generate alerts if thresholds are exceeded.
-
-
-
-By following this guideline, you can effectively detect, save, and interpret drift in your text-based BERT model.
-
-
-
+import yaml
+import pytest
+from src.mdkcli.data.preprocessing.text_preprocess import read_df, train_test_splits
+from src.mdkcli.services.hpt.optimizer import TextHPTOptimizer
+
+# Fixture to load configuration
+@pytest.fixture
+def configs():
+    with open("mdkcli/config/config.yml", "r") as f:
+        config = yaml.safe_load(f)
+    return config
+
+# Test for configuration keys
+def test_configuration(configs):
+    """
+    Validate that required keys are present in the configuration.
+    """
+    assert "num_epochs" in configs["model_type"]["text_config"]["text-hpt"]["optuna"]["hyperparameter_space"], "num_epochs missing in config"
+    assert "batch_size" in configs["model_type"]["text_config"]["text-hpt"]["optuna"]["hyperparameter_space"], "batch_size missing in config"
+    assert "learning_rate" in configs["model_type"]["text_config"]["text-hpt"]["optuna"]["hyperparameter_space"], "learning_rate missing in config"
+    assert "weight_decay" in configs["model_type"]["text_config"]["text-hpt"]["optuna"]["hyperparameter_space"], "weight_decay missing in config"
+    assert "hidden_dropout_prob" in configs["model_type"]["text_config"]["text-hpt"]["optuna"]["hyperparameter_space"], "hidden_dropout_prob missing in config"
+
+# Data handler class
+class Data:
+    def test_text_data(self, path):
+        """
+        Reads data and splits it into train/test/validation sets.
+        """
+        dataframe = read_df(path)
+        dataframe = dataframe.sample(frac=0.1)  # Sample 10% of the data
+        train_df, test_df = train_test_splits(dataframe, test_size=0.2)
+        train_df, validate_df = train_test_splits(train_df)
+        return train_df, test_df, validate_df
+
+# Fixture to initialize HPT optimizer
+@pytest.fixture
+def test_hpt_service_text(configs):
+    """
+    Initialize the Hyperparameter Tuning optimizer.
+    """
+    return TextHPTOptimizer(configs)
+
+# Test for the HPT service initialization
+def test_hpt_service_initialization(test_hpt_service_text):
+    """
+    Ensure the HPT service is initialized properly.
+    """
+    assert test_hpt_service_text is not None, "HPT service initialization failed"
+
+# Test for running the study
+def test_run_study(test_hpt_service_text, configs):
+    """
+    Run the HPT study and validate its execution.
+    """
+    # First, validate the configuration keys
+    test_configuration(configs)  # Call test_configuration within test_run_study
+
+    # Proceed with the study
+    path = configs["data"]["text_data_path"]
+    handler = Data()
+    train_df, test_df, validation_df = handler.test_text_data(path)
+
+    # Run the study
+    test_hpt_service_text.run_study(train_df, test_df)
+
+    # Assert that the best parameters are identified
+    assert test_hpt_service_text.study.best_params is not None, "No best parameters found"
