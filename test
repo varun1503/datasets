@@ -1,68 +1,95 @@
-import yaml
-import pytest
-from src.mdkcli.data.preprocessing.text_preprocess import read_df, train_test_splits
-from src.mdkcli.services.hpt.optimizer import TextHPTOptimizer
+Here’s a structured approach to creating a visually appealing one-slider in Word for your task. The goal is to present the work in a concise, professional, and engaging way. Here's how you can structure it:
 
-# Fixture to load configuration
-@pytest.fixture
-def configs():
-    with open("mdkcli/config/config.yml", "r") as f:
-        config = yaml.safe_load(f)
-    return config
 
-# Test for configuration keys
-def test_configuration(configs):
-    """
-    Validate that required keys are present in the configuration.
-    """
-    assert "num_epochs" in configs["model_type"]["text_config"]["text-hpt"]["optuna"]["hyperparameter_space"], "num_epochs missing in config"
-    assert "batch_size" in configs["model_type"]["text_config"]["text-hpt"]["optuna"]["hyperparameter_space"], "batch_size missing in config"
-    assert "learning_rate" in configs["model_type"]["text_config"]["text-hpt"]["optuna"]["hyperparameter_space"], "learning_rate missing in config"
-    assert "weight_decay" in configs["model_type"]["text_config"]["text-hpt"]["optuna"]["hyperparameter_space"], "weight_decay missing in config"
-    assert "hidden_dropout_prob" in configs["model_type"]["text_config"]["text-hpt"]["optuna"]["hyperparameter_space"], "hidden_dropout_prob missing in config"
+---
 
-# Data handler class
-class Data:
-    def test_text_data(self, path):
-        """
-        Reads data and splits it into train/test/validation sets.
-        """
-        dataframe = read_df(path)
-        dataframe = dataframe.sample(frac=0.1)  # Sample 10% of the data
-        train_df, test_df = train_test_splits(dataframe, test_size=0.2)
-        train_df, validate_df = train_test_splits(train_df)
-        return train_df, test_df, validate_df
+One-Slider Design for Text Model Package Creation
 
-# Fixture to initialize HPT optimizer
-@pytest.fixture
-def test_hpt_service_text(configs):
-    """
-    Initialize the Hyperparameter Tuning optimizer.
-    """
-    return TextHPTOptimizer(configs)
+Title:
 
-# Test for the HPT service initialization
-def test_hpt_service_initialization(test_hpt_service_text):
-    """
-    Ensure the HPT service is initialized properly.
-    """
-    assert test_hpt_service_text is not None, "HPT service initialization failed"
+"Streamlining Text Model Package Creation and Deployment for MDK"
 
-# Test for running the study
-def test_run_study(test_hpt_service_text, configs):
-    """
-    Run the HPT study and validate its execution.
-    """
-    # First, validate the configuration keys
-    test_configuration(configs)  # Call test_configuration within test_run_study
 
-    # Proceed with the study
-    path = configs["data"]["text_data_path"]
-    handler = Data()
-    train_df, test_df, validation_df = handler.test_text_data(path)
+---
 
-    # Run the study
-    test_hpt_service_text.run_study(train_df, test_df)
+Key Objectives:
 
-    # Assert that the best parameters are identified
-    assert test_hpt_service_text.study.best_params is not None, "No best parameters found"
+1. Package Availability in Artifactory:
+
+Developed setup.py for seamless packaging of the text model.
+
+
+
+2. Testing Framework:
+
+Local testing performed using GoldML and additional environments.
+
+
+
+3. Automated Testing:
+
+Created robust pytest cases to validate the pipeline.
+
+
+
+4. Continuous Deployment:
+
+Integrated pipeline with Jenkins for automated deployment to Artifactory.
+
+
+
+
+
+---
+
+Work Completed:
+
+
+---
+
+Visual Flow of the Workflow:
+
+(Add a diagram or flowchart)
+
+Text Model Development → Local Testing → Unit Testing (pytest) → Jenkins Deployment → Artifactory
+
+
+
+---
+
+Achievements:
+
+Created a streamlined pipeline for text model deployment.
+
+Ensured reliability through automated testing and CI/CD integration.
+
+Optimized the process for faster deployment cycles.
+
+
+
+---
+
+Closing Note:
+
+This work sets a precedent for efficient and scalable package management in the MDK ecosystem.
+
+
+---
+
+To make it visually AWESOME, include:
+
+1. Icons or images for tools (Python, Jenkins, Pytest, Artifactory).
+
+
+2. Professional font styles (e.g., Calibri or Arial).
+
+
+3. Use color coding (e.g., green for success, blue for progress).
+
+
+4. A visually appealing diagram (e.g., workflow or task completion timeline).
+
+
+
+Let me know if you'd like help designing the diagram or formatting the document!
+
