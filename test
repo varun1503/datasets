@@ -10,7 +10,62 @@ Using Statsmodels for Proportions
 # Calculate sample size
 sample_size = samplesize_proportions(proportion, alpha=alpha, margin=margin_of_error)
 print("Sample size using Statsmodels:", math.ceil(sample_size))
+ Sample Size for Proportions
+If you want to sample a dataset where the distribution of labels or categories matters:
 
+Formula:
+𝑛
+=
+𝑍
+2
+⋅
+𝑝
+⋅
+(
+1
+−
+𝑝
+)
+𝑒
+2
+n= 
+e 
+2
+ 
+Z 
+2
+ ⋅p⋅(1−p)
+​
+ 
+Where:
+
+𝑛
+n: Required sample size
+𝑍
+Z: Z-score corresponding to the confidence level (e.g., 1.96 for 95% confidence)
+𝑝
+p: Estimated proportion of the population (e.g., 0.5 if unknown for maximum variability)
+𝑒
+e: Margin of error (e.g., 0.05 for ±5%)
+Example:
+To determine a sample size with 95% confidence and a 5% margin of error:
+
+python
+Copy
+Edit
+import math
+
+# Inputs
+confidence_level = 0.95  # 95% confidence
+margin_of_error = 0.05   # ±5% margin
+population_proportion = 0.5  # Maximum variability
+z_score = 1.96  # For 95% confidence
+
+# Sample size formula
+sample_size = (z_score**2 * population_proportion * (1 - population_proportion)) / (margin_of_error**2)
+
+print("Sample size needed:", math.ceil(sample_size))
+2. Adjusted Sample Size for Finite Population
 If the population size is finite (e.g., 5400 samples), adjust the sample size:
 
 𝑛
@@ -32,20 +87,32 @@ adj
 1+ 
 N
 n−1
+​
+ 
 n
 ​
-
-Stratified Sampling Size
-If the data is stratified into labels or categories, calculate the sample size for each stratum:
-
-Formula:
-nh=Nh/nh.n
+ 
 Where:
 
- : Sample size for stratum 
+𝑛
+𝑎
+𝑑
+𝑗
+n 
+adj
 ​
- : Population size of stratum 
+ : Adjusted sample size
+𝑛
+n: Initial sample size
+𝑁
+N: Population size
+Example:
+python
+Copy
+Edit
+# Adjusted sample size for finite population
+population_size = 5400  # Total dataset size
 
-N: Total population size
+adjusted_sample_size = sample_size / (1 + (sample_size - 1) / population_size)
+print("Adjusted sample size:", math.ceil(adjusted_sample_size))
 
-n: Total sample size
