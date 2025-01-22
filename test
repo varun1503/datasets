@@ -1,11 +1,6 @@
-lass Imbalance
-Balanced Classes: Each label has a similar proportion of samples (e.g., 33%, 33%, 34% for three classes).
-Imbalanced Classes: Use resampling techniques:
-Oversampling: Duplicate samples in minority classes.
-Undersampling: Remove samples from majority classes.
-Hybrid Sampling: Combine oversampling and undersampling.
-Embedding Feature Distribution
-Uniform Distributions: Variances across dimensions and classes are consistent.
-Skewed Distributions: If variances differ significantly across classes or dimensions:
-Dimensional Normalization: Standardize embeddings (e.g., z-score normalization).
-Feature Selection: Remove noisy or redundant dimensions.
+Token Frequency Balancing
+Analyze token distributions across labels and balance the frequency of tokens in your sample.
+Key Metrics:
+
+Term Frequency (TF): Number of times a token appears in a document.
+Inverse Document Frequency (IDF): Weight tokens that are rare in the corpus.
