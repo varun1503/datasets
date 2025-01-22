@@ -4,3 +4,6 @@ Key Metrics:
 
 Term Frequency (TF): Number of times a token appears in a document.
 Inverse Document Frequency (IDF): Weight tokens that are rare in the corpus.
+
+Clustering with Token Frequency Considerations
+Perform clustering on embeddings and adjust cluster size weights using token frequency.
