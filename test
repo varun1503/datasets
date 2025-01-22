@@ -1,34 +1,11 @@
-Step 1: Cluster BERT Embeddings
-Perform clustering on the embeddings.
-Select samples evenly across clusters.
-
-Step 2: Stratified Sampling by Labels
-Ensure equal representation of labels in the sampled data
-
-Step 3: Measure Cosine Similarity for Token Balance
-Compute pairwise cosine similarity within and across labels to select diverse embeddings.
-
-Step 4: Combine Clustering and Stratification
-Combine clustering and label-based stratification to ensure both diversity and balance.
-
-Data Preprocessing for Text Quality
-Key Methods:
-Text Cleaning:
-
-Lowercasing, removing punctuation, and handling special characters.
-Removing stopwords and stemming/lemmatization.
-Outlier Detection:
-
-Detect unusually short or long text samples.
-Identify embeddings with abnormal distance metrics (e.g., high cosine similarity to unrelated samples).
-Check for Corrupt Text:
-
-Detect null or incomplete entries.
-Flag entries with unprintable characters.
-Steps for Detecting Corrupt Text
-Detect Null or Empty Entries:
-Identify rows where the text is missing (null or empty strings).
-Flag Incomplete Entries:
-Identify text that is unusually short or doesn't meet expected criteria (e.g., missing tokens).
-Unprintable Characters:
-Detect text with unprintable or non-ASCII characters.
+lass Imbalance
+Balanced Classes: Each label has a similar proportion of samples (e.g., 33%, 33%, 34% for three classes).
+Imbalanced Classes: Use resampling techniques:
+Oversampling: Duplicate samples in minority classes.
+Undersampling: Remove samples from majority classes.
+Hybrid Sampling: Combine oversampling and undersampling.
+Embedding Feature Distribution
+Uniform Distributions: Variances across dimensions and classes are consistent.
+Skewed Distributions: If variances differ significantly across classes or dimensions:
+Dimensional Normalization: Standardize embeddings (e.g., z-score normalization).
+Feature Selection: Remove noisy or redundant dimensions.
