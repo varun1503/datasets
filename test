@@ -1,95 +1,51 @@
-Here’s a structured approach to creating a visually appealing one-slider in Word for your task. The goal is to present the work in a concise, professional, and engaging way. Here's how you can structure it:
+from statsmodels.stats.proportion import samplesize_proportions
 
+# Example inputs
+alpha = 0.05  # Significance level
+proportion = 0.5  # Assumed proportion
+margin_of_error = 0.05
+You can also use statistical libraries like Statsmodels or SciPy for more complex sample size calculations.
 
----
+Using Statsmodels for Proportions
+# Calculate sample size
+sample_size = samplesize_proportions(proportion, alpha=alpha, margin=margin_of_error)
+print("Sample size using Statsmodels:", math.ceil(sample_size))
 
-One-Slider Design for Text Model Package Creation
+If the population size is finite (e.g., 5400 samples), adjust the sample size:
 
-Title:
+𝑛
+𝑎
+𝑑
+𝑗
+=
+𝑛
+1
++
+𝑛
+−
+1
+𝑁
+n 
+adj
+​
+ = 
+1+ 
+N
+n−1
+n
+​
 
-"Streamlining Text Model Package Creation and Deployment for MDK"
+Stratified Sampling Size
+If the data is stratified into labels or categories, calculate the sample size for each stratum:
 
+Formula:
+nh=Nh/nh.n
+Where:
 
----
+ : Sample size for stratum 
+​
+ : Population size of stratum 
 
-Key Objectives:
+N: Total population size
 
-1. Package Availability in Artifactory:
-
-Developed setup.py for seamless packaging of the text model.
-
-
-
-2. Testing Framework:
-
-Local testing performed using GoldML and additional environments.
-
-
-
-3. Automated Testing:
-
-Created robust pytest cases to validate the pipeline.
-
-
-
-4. Continuous Deployment:
-
-Integrated pipeline with Jenkins for automated deployment to Artifactory.
-
-
-
-
-
----
-
-Work Completed:
-
-
----
-
-Visual Flow of the Workflow:
-
-(Add a diagram or flowchart)
-
-Text Model Development → Local Testing → Unit Testing (pytest) → Jenkins Deployment → Artifactory
-
-
-
----
-
-Achievements:
-
-Created a streamlined pipeline for text model deployment.
-
-Ensured reliability through automated testing and CI/CD integration.
-
-Optimized the process for faster deployment cycles.
-
-
-
----
-
-Closing Note:
-
-This work sets a precedent for efficient and scalable package management in the MDK ecosystem.
-
-
----
-
-To make it visually AWESOME, include:
-
-1. Icons or images for tools (Python, Jenkins, Pytest, Artifactory).
-
-
-2. Professional font styles (e.g., Calibri or Arial).
-
-
-3. Use color coding (e.g., green for success, blue for progress).
-
-
-4. A visually appealing diagram (e.g., workflow or task completion timeline).
-
-
-
-Let me know if you'd like help designing the diagram or formatting the document!
-
+n: Total sample size
