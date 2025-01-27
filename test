@@ -1,13 +1,18 @@
- Analyze anomalies
-for idx in anomalous_indices:
-    print(f"Analyzing document: {documents[idx]}")
-    # Get TF-IDF values for this document
-    tfidf_values = vectors[idx]
-    # Create a DataFrame for easier visualization
-    word_contributions = pd.DataFrame({
-        "Word": feature_names,
-        "TF-IDF Value": tfidf_values
-    })
-    # Sort by importance (TF-IDF Value)
-    word_contributions = word_contributions.sort_values(by="TF-IDF Value", ascending=False)
-    print(word_contributions)
+# Step 3: Analyze contributing words for outliers
+for idx, label in enumerate(outlier_labels):
+    if label == -1:  # Outliers are labeled as -1
+        print(f"\nOutlier Sentence: {texts[idx]}")
+        
+        # Get the TF-IDF scores for the sentence
+        tfidf_scores = tfidf_matrix[idx].toarray().flatten()
+        
+        # Map scores to words
+        word_scores = {feature_names[i]: tfidf_scores[i] for i in range(len(feature_names)) if tfidf_scores[i] > 0}
+        
+        # Sort words by their TF-IDF scores (descending)
+        sorted_words = sorted(word_scores.items(), key=lambda x: x[1], reverse=True)
+        
+        # Display contributing words
+        print("Contributing Words (sorted by TF-IDF score):")
+        for word, score in sorted_words:
+            print(f"  {word}: {score:.4f}")
