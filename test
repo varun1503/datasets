@@ -1,43 +1,24 @@
-from sklearn.decomposition import PCA
-from sklearn.metrics import pairwise_distances
-import matplotlib.pyplot as plt
-import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
 
-# Reduce dimensionality with PCA
-pca = PCA(n_components=2)  # For visualization, reduce to 2D
-ref_pca = pca.fit_transform(ref_embeddings)  # Fit and transform reference embeddings
-curr_pca = pca.transform(curr_embeddings)    # Transform current embeddings
+def divide_data_equal_distribution(excel_path, sample_size=200, reference_ratio=0.8):
+    # Load data
+    df = pd.read_excel(excel_path)
 
-# Compute distances from the mean of reference embeddings
-mean_ref_pca = ref_pca.mean(axis=0)
-distances = pairwise_distances(curr_pca, mean_ref_pca.reshape(1, -1))
+    # Split into reference and current datasets
+    reference_data, current_data = train_test_split(df, test_size=1-reference_ratio, stratify=df['label'])
 
-# Identify outliers based on a threshold (95th percentile)
-threshold = np.percentile(distances, 95)
-outliers = [idx for idx, dist in enumerate(distances) if dist > threshold]
+    # Function to sample equal distribution of labels
+    def sample_equal_distribution(data, sample_size):
+        sampled_data = data.groupby('label').apply(lambda x: x.sample(min(len(x), sample_size // len(data['label'].unique()))))
+        return sampled_data.sample(n=sample_size, random_state=42)
 
-# Prepare colors for current data: Red for outliers, Blue for inliers
-colors = ["red" if idx in outliers else "blue" for idx in range(len(curr_embeddings))]
+    # Sample 200 points at a time for reference data
+    reference_sampled = sample_equal_distribution(reference_data, sample_size)
 
-# Plot reference and current embeddings
-plt.figure(figsize=(10, 6))
+    return reference_sampled, current_data
 
-# Plot reference embeddings
-plt.scatter(ref_pca[:, 0], ref_pca[:, 1], c="green", label="Reference Data", alpha=0.6)
+# Example usage
+reference_sampled, current_data = divide_data_equal_distribution('your_data.xlsx', sample_size=200)
 
-# Plot current embeddings (inliers and outliers)
-plt.scatter(curr_pca[:, 0], curr_pca[:, 1], c=colors, label="Current Data", alpha=0.8)
-
-# Add mean reference point
-plt.scatter(mean_ref_pca[0], mean_ref_pca[1], c="black", label="Reference Mean", marker="x", s=100)
-
-plt.legend()
-plt.title("Outlier Detection in PCA Space")
-plt.xlabel("PCA Component 1")
-plt.ylabel("PCA Component 2")
-plt.grid(True)
-plt.show()
-
-# Print results
-print("Outlier Indices:", outliers)
-print("Outlier Texts:", [current_data[i] for i in outliers])
+# The resulting `reference_sampled` will have 200 points with equal label distribution.
