@@ -1,20 +1,17 @@
-pca = PCA(n_components=2)
-target_reduced = pca.fit_transform(target_matrix)
+# Dimensionality reduction for reference embeddings
+tsne_ref = TSNE(n_components=2, random_state=42, perplexity=30)
+ref_2d = tsne_ref.fit_transform(ref_embeddings)
 
-# Step 6: Visualize the target data with labels
+# Dimensionality reduction for current embeddings
+tsne_curr = TSNE(n_components=2, random_state=42, perplexity=30)
+curr_2d = tsne_curr.fit_transform(curr_embeddings)
+
+# Plot
 plt.figure(figsize=(10, 6))
-
-# Plot target data points with specific labels
-for idx, (x, y) in enumerate(target_reduced):
-    color = 'red' if target_labels[idx] == -1 else 'blue'
-    label = "Outlier" if target_labels[idx] == -1 else "Inlier"
-    plt.scatter(x, y, c=color, label=label if label not in plt.gca().get_legend_handles_labels()[1] else None)
-    plt.text(x + 0.05, y + 0.05, f"Target {idx+1}", fontsize=10)
-
-# Add labeling and legend
-plt.title("Target Data: Isolation Forest Outlier Detection")
-plt.xlabel("PCA Dimension 1")
-plt.ylabel("PCA Dimension 2")
-plt.legend(loc="best", fontsize="medium")
-plt.grid(True)
+plt.scatter(ref_2d[:, 0], ref_2d[:, 1], c="green", label="Reference Data", alpha=0.6)
+plt.scatter(curr_2d[:, 0], curr_2d[:, 1], c=colors, label="Current Data", alpha=0.8)
+plt.legend()
+plt.title("Isolation Forest Outlier Detection in BERT Embedding Space (t-SNE)")
+plt.xlabel("t-SNE Dimension 1")
+plt.ylabel("t-SNE Dimension 2")
 plt.show()
