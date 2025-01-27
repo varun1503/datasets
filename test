@@ -1,62 +1,13 @@
-import torch
-import torch.nn as nn
-from transformers import AutoModelForSequenceClassification, AutoConfig
-
-
-class TransformerLoader:
-    def load_model(self, model_name_or_path, hidden_dropout_prob=0.1, attention_dropout_prob=0.1):
-        """
-        Load the transformer model for sequence classification with customized hidden and attention dropouts.
-        """
-        config = AutoConfig.from_pretrained(
-            model_name_or_path,
-            hidden_dropout_prob=hidden_dropout_prob,
-            attention_probs_dropout_prob=attention_dropout_prob,
-            output_attentions=True,
-            output_hidden_states=True,
-        )
-        model = AutoModelForSequenceClassification.from_pretrained(model_name_or_path, config=config)
-        return model
-
-
-class SourceClassifier(nn.Module):
-    def __init__(self, model, classifier_dropout_prob=0.3):
-        """
-        Initialize the SourceClassifier with a pretrained model and an additional dropout for the classifier.
-        """
-        super(SourceClassifier, self).__init__()
-        self.bert = model
-        self.dropout = nn.Dropout(classifier_dropout_prob)
-
-    def forward(self, ids, mask):
-        """
-        Perform a forward pass and return logits.
-        """
-        output = self.bert(input_ids=ids, attention_mask=mask)
-        logits = self.dropout(output.logits)  # Apply dropout to logits
-        return logits
-
-    def forward_attention(self, ids, mask):
-        """
-        Perform a forward pass with attention outputs.
-        """
-        output = self.bert(
-            input_ids=ids,
-            attention_mask=mask,
-            output_attentions=True,
-            output_hidden_states=True,
-        )
-        return output
-
-    def freeze_bert(self):
-        """
-        Freeze the parameters of the BERT model.
-        """
-        for param in self.bert.named_parameters():
-            param[1].requires_grad = False
-
-    def count_parameters(self):
-        """
-        Count the trainable parameters in the model.
-        """
-        return sum(p.numel()
+ Analyze anomalies
+for idx in anomalous_indices:
+    print(f"Analyzing document: {documents[idx]}")
+    # Get TF-IDF values for this document
+    tfidf_values = vectors[idx]
+    # Create a DataFrame for easier visualization
+    word_contributions = pd.DataFrame({
+        "Word": feature_names,
+        "TF-IDF Value": tfidf_values
+    })
+    # Sort by importance (TF-IDF Value)
+    word_contributions = word_contributions.sort_values(by="TF-IDF Value", ascending=False)
+    print(word_contributions)
