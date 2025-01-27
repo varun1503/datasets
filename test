@@ -1,16 +1,24 @@
+pca = PCA(n_components=2)
+reduced_matrix = pca.fit_transform(tfidf_matrix.toarray())
+
+# Step 6: Visualize the results
+plt.figure(figsize=(10, 6))
+
+# Plot reference data (green 'x')
+for x, y in reduced_matrix[:len(reference_texts)]:
+    plt.scatter(x, y, c='green', label='Reference Data' if 'Reference Data' not in plt.gca().get_legend_handles_labels()[1] else None, marker='x')
+
+# Plot target data with labels
 for idx, (x, y) in enumerate(reduced_matrix[len(reference_texts):]):
     color = 'red' if target_labels[idx] == -1 else 'blue'
-    plt.scatter(x, y, c=color, label=f"Target Sentence {idx+1}" if color == 'red' else None)
-    plt.text(x+0.1, y+0.1, f"{idx+1}", fontsize=12)
+    label = "Outlier" if target_labels[idx] == -1 else "Inlier"
+    plt.scatter(x, y, c=color, label=label if label not in plt.gca().get_legend_handles_labels()[1] else None)
+    plt.text(x + 0.1, y + 0.1, f"Target {idx+1}", fontsize=10)
 
-# Plot the reference data points
-for x, y in reduced_matrix[:len(reference_texts)]:
-    plt.scatter(x, y, c='green', label="Reference", marker='x')
-
-# Labeling
-plt.title("2D Visualization of Text Data with Outliers Highlighted")
+# Add labeling and legend
+plt.title("Isolation Forest: 2D Visualization with Outlier Detection")
 plt.xlabel("PCA Dimension 1")
 plt.ylabel("PCA Dimension 2")
-plt.legend(loc="best", fontsize="small", markerscale=1, scatterpoints=1)
+plt.legend(loc="best", fontsize="medium")
 plt.grid(True)
 plt.show()
