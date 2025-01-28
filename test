@@ -1,28 +1,18 @@
-from sklearn.feature_extraction.text import TfidfVectorizer
-import pandas as pd
-import seaborn as sns
-import matplotlib.pyplot as plt
+rom sklearn.manifold import TSNE
 
-# Example text data
-text_data = [
-    "This is a simple example.",
-    "Here's another document with more words.",
-    "Short one.",
-    "Yet another example to visualize text data."
-]
+# Apply t-SNE to reduce dimensions to 2
+tsne = TSNE(n_components=2, random_state=42, perplexity=30)
+reduced_embeddings_tsne = tsne.fit_transform(embeddings)
 
-# Calculate TF-IDF
-tfidf = TfidfVectorizer(max_features=10)  # Limit to top 10 terms for visualization
-tfidf_matrix = tfidf.fit_transform(text_data)
-tfidf_df = pd.DataFrame(tfidf_matrix.toarray(), columns=tfidf.get_feature_names_out())
+# Convert to DataFrame for easy plotting
+df_tsne = pd.DataFrame(reduced_embeddings_tsne, columns=['TSNE1', 'TSNE2'])
+df_tsne['label'] = labels
 
-# Summarize term importance
-term_importance = tfidf_df.sum().sort_values(ascending=False)
-
-# Plot TF-IDF scores
+# Plot t-SNE results
 plt.figure(figsize=(8, 6))
-sns.barplot(x=term_importance.values, y=term_importance.index, palette="viridis")
-plt.title('TF-IDF Feature Distribution')
-plt.xlabel('TF-IDF Score')
-plt.ylabel('Terms')
+sns.scatterplot(data=df_tsne, x='TSNE1', y='TSNE2', hue='label', palette={'A': 'blue', 'B': 'orange'}, s=100)
+plt.title('Feature Distribution of BERT Embeddings (Datasets A and B) - t-SNE')
+plt.xlabel('t-SNE Dimension 1')
+plt.ylabel('t-SNE Dimension 2')
+plt.legend(title='Dataset')
 plt.show()
