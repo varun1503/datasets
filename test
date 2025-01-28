@@ -1,24 +1,36 @@
-import pandas as pd
-from sklearn.model_selection import train_test_split
+# Step 4: Plot TF-IDF Variance Comparison
+plt.figure(figsize=(10, 6))
+plt.plot(var_a, label="Dataset A - Variance", marker='o')
+plt.plot(var_b, label="Dataset B - Variance", marker='x')
+plt.title("TF-IDF Variance Comparison")
+plt.xlabel("Feature Index")
+plt.ylabel("Variance Value")
+plt.legend()
+plt.grid(True)
+plt.show()
 
-def divide_data_equal_distribution(excel_path, sample_size=200, reference_ratio=0.8):
-    # Load data
-    df = pd.read_excel(excel_path)
+# Step 5: Analyze and Plot Top Features for a Single Dataset
+text = "The quick brown fox jumps over the lazy dog. Dogs are not lazy but loyal."
+tfidf_vec = TfidfVectorizer()
+X_tfidf = tfidf_vec.fit_transform([text])
 
-    # Split into reference and current datasets
-    reference_data, current_data = train_test_split(df, test_size=1-reference_ratio, stratify=df['label'])
+# Extract feature names and their corresponding scores
+features = tfidf_vec.get_feature_names_out()
+scores = X_tfidf.toarray()[0]
 
-    # Function to sample equal distribution of labels
-    def sample_equal_distribution(data, sample_size):
-        sampled_data = data.groupby('label').apply(lambda x: x.sample(min(len(x), sample_size // len(data['label'].unique()))))
-        return sampled_data.sample(n=sample_size, random_state=42)
+# Combine and sort by TF-IDF score
+tfidf_data = sorted(zip(features, scores), key=lambda x: x[1], reverse=True)
 
-    # Sample 200 points at a time for reference data
-    reference_sampled = sample_equal_distribution(reference_data, sample_size)
+# Plot top N features
+top_n = 10
+top_features = tfidf_data[:top_n]
+labels, values = zip(*top_features)
 
-    return reference_sampled, current_data
-
-# Example usage
-reference_sampled, current_data = divide_data_equal_distribution('your_data.xlsx', sample_size=200)
-
-# The resulting `reference_sampled` will have 200 points with equal label distribution.
+plt.figure(figsize=(10, 6))
+plt.barh(labels, values, color='skyblue')
+plt.title("Top 10 TF-IDF Features")
+plt.xlabel("TF-IDF Score")
+plt.ylabel("Features")
+plt.gca().invert_yaxis()
+plt.grid(True, axis='x')
+plt.show()
