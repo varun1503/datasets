@@ -1,36 +1,28 @@
-# Step 4: Plot TF-IDF Variance Comparison
-plt.figure(figsize=(10, 6))
-plt.plot(var_a, label="Dataset A - Variance", marker='o')
-plt.plot(var_b, label="Dataset B - Variance", marker='x')
-plt.title("TF-IDF Variance Comparison")
-plt.xlabel("Feature Index")
-plt.ylabel("Variance Value")
-plt.legend()
-plt.grid(True)
-plt.show()
+from sklearn.feature_extraction.text import TfidfVectorizer
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
 
-# Step 5: Analyze and Plot Top Features for a Single Dataset
-text = "The quick brown fox jumps over the lazy dog. Dogs are not lazy but loyal."
-tfidf_vec = TfidfVectorizer()
-X_tfidf = tfidf_vec.fit_transform([text])
+# Example text data
+text_data = [
+    "This is a simple example.",
+    "Here's another document with more words.",
+    "Short one.",
+    "Yet another example to visualize text data."
+]
 
-# Extract feature names and their corresponding scores
-features = tfidf_vec.get_feature_names_out()
-scores = X_tfidf.toarray()[0]
+# Calculate TF-IDF
+tfidf = TfidfVectorizer(max_features=10)  # Limit to top 10 terms for visualization
+tfidf_matrix = tfidf.fit_transform(text_data)
+tfidf_df = pd.DataFrame(tfidf_matrix.toarray(), columns=tfidf.get_feature_names_out())
 
-# Combine and sort by TF-IDF score
-tfidf_data = sorted(zip(features, scores), key=lambda x: x[1], reverse=True)
+# Summarize term importance
+term_importance = tfidf_df.sum().sort_values(ascending=False)
 
-# Plot top N features
-top_n = 10
-top_features = tfidf_data[:top_n]
-labels, values = zip(*top_features)
-
-plt.figure(figsize=(10, 6))
-plt.barh(labels, values, color='skyblue')
-plt.title("Top 10 TF-IDF Features")
-plt.xlabel("TF-IDF Score")
-plt.ylabel("Features")
-plt.gca().invert_yaxis()
-plt.grid(True, axis='x')
+# Plot TF-IDF scores
+plt.figure(figsize=(8, 6))
+sns.barplot(x=term_importance.values, y=term_importance.index, palette="viridis")
+plt.title('TF-IDF Feature Distribution')
+plt.xlabel('TF-IDF Score')
+plt.ylabel('Terms')
 plt.show()
