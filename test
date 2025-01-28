@@ -1,18 +1,40 @@
-rom sklearn.manifold import TSNE
+import re
+from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
 
-# Apply t-SNE to reduce dimensions to 2
-tsne = TSNE(n_components=2, random_state=42, perplexity=30)
-reduced_embeddings_tsne = tsne.fit_transform(embeddings)
+# Example datasets a and b
+data_a = ["This is a sentence from dataset A.", "Another example from dataset A."]
+data_b = ["This is a sentence from dataset B.", "Another example from dataset B."]
 
-# Convert to DataFrame for easy plotting
-df_tsne = pd.DataFrame(reduced_embeddings_tsne, columns=['TSNE1', 'TSNE2'])
-df_tsne['label'] = labels
+# Function to preprocess text: lowercasing, tokenizing, and removing stopwords
+def preprocess(text):
+    text = text.lower()  # Convert to lowercase
+    words = re.findall(r'\b\w+\b', text)  # Tokenize by word boundaries
+    words = [word for word in words if word not in ENGLISH_STOP_WORDS]  # Remove stopwords
+    return set(words)
 
-# Plot t-SNE results
-plt.figure(figsize=(8, 6))
-sns.scatterplot(data=df_tsne, x='TSNE1', y='TSNE2', hue='label', palette={'A': 'blue', 'B': 'orange'}, s=100)
-plt.title('Feature Distribution of BERT Embeddings (Datasets A and B) - t-SNE')
-plt.xlabel('t-SNE Dimension 1')
-plt.ylabel('t-SNE Dimension 2')
-plt.legend(title='Dataset')
-plt.show()
+# Get vocab sets for both datasets
+vocab_a = set()
+vocab_b = set()
+
+for text in data_a:
+    vocab_a.update(preprocess(text))
+
+for text in data_b:
+    vocab_b.update(preprocess(text))
+
+# Calculate the Jaccard Index
+intersection = len(vocab_a.intersection(vocab_b))
+union = len(vocab_a.union(vocab_b))
+
+jaccard_index = intersection / union
+
+# Print the results
+print(f"Vocabulary A: {vocab_a}")
+print(f"Vocabulary B: {vocab_b}")
+print(f"Jaccard Index: {jaccard_index:.4f}")
+
+# Low Jaccard index indicates potential drift (low overlap of vocabulary)
+if jaccard_index < 0.5:
+    print("Potential drift detected! The datasets have a low overlap in vocabulary.")
+else:
+    print("No significant drift detected. The datasets have a reasonable overlap in vocabulary.")
