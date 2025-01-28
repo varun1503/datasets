@@ -1,40 +1,39 @@
-import re
-from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
+import pandas as pd
 
-# Example datasets a and b
-data_a = ["This is a sentence from dataset A.", "Another example from dataset A."]
-data_b = ["This is a sentence from dataset B.", "Another example from dataset B."]
+def balance_reference_by_length(current_df: pd.DataFrame, reference_df: pd.DataFrame, label_column: str) -> pd.DataFrame:
+    """
+    Balances the reference dataframe so that:
+    1. Its total length matches the current dataframe.
+    2. Each label in the reference dataframe is equally represented.
+    
+    Args:
+        current_df (pd.DataFrame): The current dataframe.
+        reference_df (pd.DataFrame): The reference dataframe containing more rows.
+        label_column (str): The name of the column containing the labels.
 
-# Function to preprocess text: lowercasing, tokenizing, and removing stopwords
-def preprocess(text):
-    text = text.lower()  # Convert to lowercase
-    words = re.findall(r'\b\w+\b', text)  # Tokenize by word boundaries
-    words = [word for word in words if word not in ENGLISH_STOP_WORDS]  # Remove stopwords
-    return set(words)
-
-# Get vocab sets for both datasets
-vocab_a = set()
-vocab_b = set()
-
-for text in data_a:
-    vocab_a.update(preprocess(text))
-
-for text in data_b:
-    vocab_b.update(preprocess(text))
-
-# Calculate the Jaccard Index
-intersection = len(vocab_a.intersection(vocab_b))
-union = len(vocab_a.union(vocab_b))
-
-jaccard_index = intersection / union
-
-# Print the results
-print(f"Vocabulary A: {vocab_a}")
-print(f"Vocabulary B: {vocab_b}")
-print(f"Jaccard Index: {jaccard_index:.4f}")
-
-# Low Jaccard index indicates potential drift (low overlap of vocabulary)
-if jaccard_index < 0.5:
-    print("Potential drift detected! The datasets have a low overlap in vocabulary.")
-else:
-    print("No significant drift detected. The datasets have a reasonable overlap in vocabulary.")
+    Returns:
+        pd.DataFrame: A balanced reference dataframe.
+    """
+    target_length = len(current_df)
+    labels = reference_df[label_column].unique()
+    num_labels = len(labels)
+    
+    # Calculate the target number of samples per label
+    samples_per_label = target_length // num_labels
+    
+    # Handle any remaining rows after division
+    extra_samples = target_length % num_labels
+    
+    balanced_reference = pd.DataFrame()
+    
+    for i, label in enumerate(labels):
+        label_data = reference_df[reference_df[label_column] == label]
+        if i < extra_samples:
+            # Add one extra sample for the first 'extra_samples' labels
+            sampled_data = label_data.sample(n=samples_per_label + 1, random_state=42)
+        else:
+            sampled_data = label_data.sample(n=samples_per_label, random_state=42)
+        
+        balanced_reference = pd.concat([balanced_reference, sampled_data], ignore_index=True)
+    
+    return balanced_reference
