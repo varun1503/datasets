@@ -1,34 +1,9 @@
-import pandas as pd
-import matplotlib.pyplot as plt
-from sklearn.feature_extraction.text import TfidfVectorizer
-
-# Assuming `corpus` is a list of text documents
-tfidf_vec = TfidfVectorizer()
-X_tfidf = tfidf_vec.fit_transform(corpus)
-
-# Get all features and their average scores across the corpus
-features = tfidf_vec.get_feature_names_out()
-scores = X_tfidf.toarray().mean(axis=0)
-
-# Combine features and scores into a sorted list
-tfidf_data = sorted(zip(features, scores), key=lambda x: x[1], reverse=True)
-
-# Convert to DataFrame
-df_tfidf = pd.DataFrame(tfidf_data, columns=['Feature', 'TF-IDF Score'])
-
-# Get the top 50 features
-top_50_features = df_tfidf.head(50)
-
-# Plot top 10 features
-top_10_features = top_50_features.head(10)
-plt.figure(figsize=(10, 6))
-plt.barh(top_10_features['Feature'], top_10_features['TF-IDF Score'], color='skyblue')
-plt.title("Top 10 TF-IDF Features Across Corpus")
-plt.xlabel("TF-IDF Score")
-plt.ylabel("Features")
-plt.gca().invert_yaxis()
-plt.grid(True, axis='x')
-plt.show()
-
-# Display the DataFrame of top 50 features
-print(top_50_features)
+Prepare Drift Detection Guidelines – Research methods for detecting data drift, ensuring data quality, and handling range-based drift detection.
+Implement in Notebook – Develop and visualize drift detection using IF (Isolation Forest), IDF (Inverse Document Frequency), and BERT embeddings.
+Integrate Drift Detection Utility – Combine drift detection with Hyperparameter Tuning (HPT) and Mutual Information (MI) for text models.
+Write Pytest Cases – Implement unit tests for HPT, MI, and drift detection.
+Set Up Jenkins Pipeline – Automate the process for pushing the package to Artifactory.
+Review & Enhance Drift Detection – Improve the drift detection framework with additional text-based features.
+Present Demo of MDK Package – Showcase the capabilities and functionalities of the package.
+Refine HPT & Drift Based on Feedback – Incorporate recommended improvements to HPT and drift detection.
+Update Package & Test on GCP – Deploy the updated package and validate its performance in a GCP environment.
