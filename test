@@ -1,9 +1,49 @@
-Prepare Drift Detection Guidelines – Research methods for detecting data drift, ensuring data quality, and handling range-based drift detection.
-Implement in Notebook – Develop and visualize drift detection using IF (Isolation Forest), IDF (Inverse Document Frequency), and BERT embeddings.
-Integrate Drift Detection Utility – Combine drift detection with Hyperparameter Tuning (HPT) and Mutual Information (MI) for text models.
-Write Pytest Cases – Implement unit tests for HPT, MI, and drift detection.
-Set Up Jenkins Pipeline – Automate the process for pushing the package to Artifactory.
-Review & Enhance Drift Detection – Improve the drift detection framework with additional text-based features.
-Present Demo of MDK Package – Showcase the capabilities and functionalities of the package.
-Refine HPT & Drift Based on Feedback – Incorporate recommended improvements to HPT and drift detection.
-Update Package & Test on GCP – Deploy the updated package and validate its performance in a GCP environment.
+import shap
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import kurtosis
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+# Load pre-trained BERT model and tokenizer (modify as needed)
+model_name = "bert-base-uncased"  # Change this if using another model
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForSequenceClassification.from_pretrained(model_name)
+
+# Sample list of sentences with varying lengths
+sentences = [
+    "The weather is great today.",
+    "I love traveling to new places.",
+    "Machine learning is fascinating.",
+    "This restaurant serves delicious food.",
+    "The book was very interesting and informative.",
+    "AI is the future of technology and innovation."
+]
+
+# Tokenize sentences
+inputs = tokenizer(sentences, padding=True, truncation=True, return_tensors="pt")
+
+# Define SHAP explainer
+explainer = shap.Explainer(model, tokenizer)
+
+# Compute SHAP values
+shap_values = explainer(sentences)
+
+# Process SHAP values: Aggregate across tokens for each sentence
+shap_sentence_values = [np.mean(np.abs(sv.values), axis=0) for sv in shap_values]
+
+# Compute kurtosis for each sentence's SHAP values
+kurtosis_values = [kurtosis(sv, fisher=True) for sv in shap_sentence_values]
+
+# Plot kurtosis values
+plt.figure(figsize=(10, 5))
+plt.bar(range(len(sentences)), kurtosis_values, color="skyblue")
+plt.xlabel("Sentence Index")
+plt.ylabel("Kurtosis")
+plt.title("Kurtosis of SHAP Values for Sentences")
+plt.xticks(range(len(sentences)), range(1, len(sentences) + 1))
+plt.show()
+
+# Print kurtosis values
+for i, k in enumerate(kurtosis_values):
+    print(f"Sentence {i+1}: Kurtosis = {k:.4f}")
