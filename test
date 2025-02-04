@@ -1,60 +1,74 @@
-import shap
-import torch
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy.stats import kurtosis
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
-# Load pre-trained BERT model and tokenizer
-MODEL_NAME = "bert-base-uncased"  # Change to your specific model if needed
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
+# Load SHAP values from your computation
+shap_values = ...  # Use your computed SHAP values here
 
-# Define sentences
-sentences = [
-    "The sun rises in the east and sets in the west.",
-    "She enjoys reading mystery novels in her free time.",
-    "The cat jumped onto the windowsill to watch the birds.",
-    "He practiced every day to improve his guitar skills.",
-    "Our team won the championship after a tough match."
-]
+# Extract tokens from all sentences
+all_tokens = shap_values.data  # Each array inside contains tokens for one sentence
+all_shap_values = np.abs(shap_values.values).sum(axis=2)  # Aggregate across outputs if multiple
 
-# Tokenize the sentences
-inputs = tokenizer(sentences, padding=True, truncation=True, return_tensors="pt")
+# Flatten token and SHAP values while keeping mapping
+token_shap_dict = {}
 
-# Define SHAP explainer
-explainer = shap.Explainer(lambda x: model(**tokenizer(x, padding=True, truncation=True, return_tensors="pt")).logits.detach().numpy(), sentences)
+for i, tokens in enumerate(all_tokens):  # Iterate over each sentence
+    for token, shap_value in zip(tokens, all_shap_values[i]):
+        if token in token_shap_dict:
+            token_shap_dict[token].append(shap_value)  # Append new values
+        else:
+            token_shap_dict[token] = [shap_value]  # Initialize list
 
-# Compute SHAP values
-shap_values = explainer(sentences)
+# Compute aggregated SHAP metrics per token
+token_stats = {
+    "Token": [],
+    "SHAP Sum": [],
+    "SHAP Mean": [],
+    "SHAP Kurtosis": []
+}
 
-# Extract mean absolute SHAP values per token
-tokens = tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
-word_importance = np.abs(shap_values.values).mean(axis=0)
+for token, values in token_shap_dict.items():
+    token_stats["Token"].append(token)
+    token_stats["SHAP Sum"].append(np.sum(values))
+    token_stats["SHAP Mean"].append(np.mean(values))
+    token_stats["SHAP Kurtosis"].append(kurtosis(values))
 
-# Compute kurtosis
-word_kurtosis = kurtosis(word_importance)
+# Create a DataFrame
+shap_table = pd.DataFrame(token_stats)
+shap_table = shap_table.sort_values(by="SHAP Kurtosis", ascending=False)
 
-# Plot SHAP values and kurtosis
-fig, ax1 = plt.subplots(figsize=(10, 5))
+# Display the SHAP table
+print(shap_table)
 
-# Bar plot for SHAP values
-ax1.bar(tokens, word_importance, color='b', alpha=0.6, label='SHAP Importance')
-ax1.set_ylabel('SHAP Importance', color='b')
-ax1.tick_params(axis='y', labelcolor='b')
-ax1.set_xticklabels(tokens, rotation=45, ha="right")
-
-# Line plot for kurtosis
-ax2 = ax1.twinx()
-ax2.axhline(word_kurtosis, color='r', linestyle='dashed', label='Kurtosis')
-ax2.set_ylabel('Kurtosis', color='r')
-ax2.tick_params(axis='y', labelcolor='r')
-
-fig.tight_layout()
-plt.title("SHAP Importance & Kurtosis of Tokens (BERT)")
+# Plot SHAP importance distribution
+plt.figure(figsize=(10, 5))
+sns.histplot(shap_table["SHAP Mean"], kde=True, bins=20, color="b", label="SHAP Distribution")
+plt.axvline(np.mean(shap_table["SHAP Mean"]), color='r', linestyle='dashed', label="Mean SHAP Value")
+plt.xlabel("SHAP Value")
+plt.ylabel("Frequency")
+plt.title("SHAP Value Distribution")
+plt.legend()
 plt.show()
 
-# Print SHAP importance & kurtosis
-for token, importance in zip(tokens, word_importance):
-    print(f"Token: {token}, SHAP Importance: {importance:.4f}, Kurtosis: {word_kurtosis:.4f}")
+# Generate visual representation of kurtosis categories
+fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+# Mesokurtic (Normal)
+x = np.random.normal(0, 1, 1000)
+sns.histplot(x, bins=20, kde=True, ax=axes[0], color="blue")
+axes[0].set_title("Mesokurtic (Normal)")
+
+# Leptokurtic (High Kurtosis)
+x = np.concatenate([np.random.normal(0, 1, 900), np.random.normal(5, 0.2, 100)])
+sns.histplot(x, bins=20, kde=True, ax=axes[1], color="green")
+axes[1].set_title("Leptokurtic (High Kurtosis)")
+
+# Platykurtic (Low Kurtosis)
+x = np.random.uniform(-2, 2, 1000)
+sns.histplot(x, bins=20, kde=True, ax=axes[2], color="red")
+axes[2].set_title("Platykurtic (Low Kurtosis)")
+
+plt.tight_layout()
+plt.show()
