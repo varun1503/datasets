@@ -1,74 +1,9 @@
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-from scipy.stats import kurtosis
-
-# Load SHAP values from your computation
-shap_values = ...  # Use your computed SHAP values here
-
-# Extract tokens from all sentences
-all_tokens = shap_values.data  # Each array inside contains tokens for one sentence
-all_shap_values = np.abs(shap_values.values).sum(axis=2)  # Aggregate across outputs if multiple
-
-# Flatten token and SHAP values while keeping mapping
-token_shap_dict = {}
-
-for i, tokens in enumerate(all_tokens):  # Iterate over each sentence
-    for token, shap_value in zip(tokens, all_shap_values[i]):
-        if token in token_shap_dict:
-            token_shap_dict[token].append(shap_value)  # Append new values
-        else:
-            token_shap_dict[token] = [shap_value]  # Initialize list
-
-# Compute aggregated SHAP metrics per token
-token_stats = {
-    "Token": [],
-    "SHAP Sum": [],
-    "SHAP Mean": [],
-    "SHAP Kurtosis": []
-}
-
-for token, values in token_shap_dict.items():
-    token_stats["Token"].append(token)
-    token_stats["SHAP Sum"].append(np.sum(values))
-    token_stats["SHAP Mean"].append(np.mean(values))
-    token_stats["SHAP Kurtosis"].append(kurtosis(values))
-
-# Create a DataFrame
-shap_table = pd.DataFrame(token_stats)
-shap_table = shap_table.sort_values(by="SHAP Kurtosis", ascending=False)
-
-# Display the SHAP table
-print(shap_table)
-
-# Plot SHAP importance distribution
-plt.figure(figsize=(10, 5))
-sns.histplot(shap_table["SHAP Mean"], kde=True, bins=20, color="b", label="SHAP Distribution")
-plt.axvline(np.mean(shap_table["SHAP Mean"]), color='r', linestyle='dashed', label="Mean SHAP Value")
-plt.xlabel("SHAP Value")
-plt.ylabel("Frequency")
-plt.title("SHAP Value Distribution")
-plt.legend()
-plt.show()
-
-# Generate visual representation of kurtosis categories
-fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-
-# Mesokurtic (Normal)
-x = np.random.normal(0, 1, 1000)
-sns.histplot(x, bins=20, kde=True, ax=axes[0], color="blue")
-axes[0].set_title("Mesokurtic (Normal)")
-
-# Leptokurtic (High Kurtosis)
-x = np.concatenate([np.random.normal(0, 1, 900), np.random.normal(5, 0.2, 100)])
-sns.histplot(x, bins=20, kde=True, ax=axes[1], color="green")
-axes[1].set_title("Leptokurtic (High Kurtosis)")
-
-# Platykurtic (Low Kurtosis)
-x = np.random.uniform(-2, 2, 1000)
-sns.histplot(x, bins=20, kde=True, ax=axes[2], color="red")
-axes[2].set_title("Platykurtic (Low Kurtosis)")
-
-plt.tight_layout()
+# 📊 **Plot Kurtosis of Tokens**
+plt.figure(figsize=(12, 6))
+sns.barplot(x=shap_table["Token"][:20], y=shap_table["SHAP Kurtosis"][:20], palette="coolwarm")  # Top 20 tokens
+plt.xticks(rotation=45, ha="right")
+plt.xlabel("Token")
+plt.ylabel("SHAP Kurtosis")
+plt.title("SHAP Kurtosis for Most Important Tokens")
+plt.grid(axis="y", linestyle="--", alpha=0.7)
 plt.show()
