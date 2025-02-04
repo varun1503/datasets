@@ -2,48 +2,59 @@ import shap
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 from scipy.stats import kurtosis
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
-# Load pre-trained BERT model and tokenizer (modify as needed)
-model_name = "bert-base-uncased"  # Change this if using another model
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModelForSequenceClassification.from_pretrained(model_name)
+# Load pre-trained BERT model and tokenizer
+MODEL_NAME = "bert-base-uncased"  # Change to your specific model if needed
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
 
-# Sample list of sentences with varying lengths
+# Define sentences
 sentences = [
-    "The weather is great today.",
-    "I love traveling to new places.",
-    "Machine learning is fascinating.",
-    "This restaurant serves delicious food.",
-    "The book was very interesting and informative.",
-    "AI is the future of technology and innovation."
+    "The sun rises in the east and sets in the west.",
+    "She enjoys reading mystery novels in her free time.",
+    "The cat jumped onto the windowsill to watch the birds.",
+    "He practiced every day to improve his guitar skills.",
+    "Our team won the championship after a tough match."
 ]
 
-# Tokenize sentences
+# Tokenize the sentences
 inputs = tokenizer(sentences, padding=True, truncation=True, return_tensors="pt")
 
 # Define SHAP explainer
-explainer = shap.Explainer(model, tokenizer)
+explainer = shap.Explainer(lambda x: model(**tokenizer(x, padding=True, truncation=True, return_tensors="pt")).logits.detach().numpy(), sentences)
 
 # Compute SHAP values
 shap_values = explainer(sentences)
 
-# Process SHAP values: Aggregate across tokens for each sentence
-shap_sentence_values = [np.mean(np.abs(sv.values), axis=0) for sv in shap_values]
+# Extract mean absolute SHAP values per token
+tokens = tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
+word_importance = np.abs(shap_values.values).mean(axis=0)
 
-# Compute kurtosis for each sentence's SHAP values
-kurtosis_values = [kurtosis(sv, fisher=True) for sv in shap_sentence_values]
+# Compute kurtosis
+word_kurtosis = kurtosis(word_importance)
 
-# Plot kurtosis values
-plt.figure(figsize=(10, 5))
-plt.bar(range(len(sentences)), kurtosis_values, color="skyblue")
-plt.xlabel("Sentence Index")
-plt.ylabel("Kurtosis")
-plt.title("Kurtosis of SHAP Values for Sentences")
-plt.xticks(range(len(sentences)), range(1, len(sentences) + 1))
+# Plot SHAP values and kurtosis
+fig, ax1 = plt.subplots(figsize=(10, 5))
+
+# Bar plot for SHAP values
+ax1.bar(tokens, word_importance, color='b', alpha=0.6, label='SHAP Importance')
+ax1.set_ylabel('SHAP Importance', color='b')
+ax1.tick_params(axis='y', labelcolor='b')
+ax1.set_xticklabels(tokens, rotation=45, ha="right")
+
+# Line plot for kurtosis
+ax2 = ax1.twinx()
+ax2.axhline(word_kurtosis, color='r', linestyle='dashed', label='Kurtosis')
+ax2.set_ylabel('Kurtosis', color='r')
+ax2.tick_params(axis='y', labelcolor='r')
+
+fig.tight_layout()
+plt.title("SHAP Importance & Kurtosis of Tokens (BERT)")
 plt.show()
 
-# Print kurtosis values
-for i, k in enumerate(kurtosis_values):
-    print(f"Sentence {i+1}: Kurtosis = {k:.4f}")
+# Print SHAP importance & kurtosis
+for token, importance in zip(tokens, word_importance):
+    print(f"Token: {token}, SHAP Importance: {importance:.4f}, Kurtosis: {word_kurtosis:.4f}")
