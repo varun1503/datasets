@@ -1,25 +1,14 @@
-import numpy as np
+token_shap_dict = {}
 
-def pad_shap_data_mixed(shap_data, pad_value=""):
-    """
-    Pads all arrays in shap_values.data to the maximum length with a specified pad_value.
+for i, tokens in enumerate(all_tokens):  # Iterate over each sentence
+    for token, shap_value in zip(tokens, all_travel[i]):
+        if token in token_shap_dict:
+            # Ensure we always store lists and append new values
+            if isinstance(token_shap_dict[token], list):
+                token_shap_dict[token].append(shap_value)
+            else:
+                token_shap_dict[token] = [token_shap_dict[token], shap_value]  # Convert existing float to list
+        else:
+            token_shap_dict[token] = [shap_value]  # Store first value as list
 
-    Args:
-        shap_data (list of np.ndarray): List of numpy arrays with different lengths (including strings).
-        pad_value (str, int, float): Value to use for padding (default is an empty string for mixed types).
-
-    Returns:
-        np.ndarray: A list-based NumPy array with padded values.
-    """
-    max_len = max(len(arr) for arr in shap_data)  # Find max length
-
-    # Pad each array with `pad_value`
-    padded_arrays = [np.concatenate([arr, np.full((max_len - len(arr),), pad_value, dtype=object)]) 
-                     if len(arr) < max_len else arr 
-                     for arr in shap_data]
-    
-    return np.array(padded_arrays, dtype=object)  # Ensure mixed-type support
-
-# Example usage
-padded_shap_data = pad_shap_data_mixed(shap_values.data)
-print(padded_shap_data.shape)  # Output: (5, max_len)
+print(token_shap_dict)
