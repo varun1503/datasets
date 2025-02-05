@@ -1,14 +1,20 @@
-token_shap_dict = {}
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-for i, tokens in enumerate(all_tokens):  # Iterate over each sentence
-    for token, shap_value in zip(tokens, all_travel[i]):
-        if token in token_shap_dict:
-            # Ensure we always store lists and append new values
-            if isinstance(token_shap_dict[token], list):
-                token_shap_dict[token].append(shap_value)
-            else:
-                token_shap_dict[token] = [token_shap_dict[token], shap_value]  # Convert existing float to list
-        else:
-            token_shap_dict[token] = [shap_value]  # Store first value as list
+# Load your DataFrame (assuming you have it in a CSV file)
+df = pd.read_csv("/mnt/data/file-CsxNjVLS65x3FSSTJ29Ly6")
 
-print(token_shap_dict)
+# Drop NaN values in the 'SHAP Kurtosis' column
+df = df.dropna(subset=['SHAP Kurtosis'])
+
+# Plot bar chart
+plt.figure(figsize=(12, 6))
+sns.barplot(x=df['Token'], y=df['SHAP Kurtosis'], color='blue')
+
+# Formatting
+plt.xlabel("Token")
+plt.ylabel("SHAP Kurtosis")
+plt.title("Bar Plot of SHAP Kurtosis for Tokens")
+plt.xticks(rotation=90)  # Rotate labels for better readability
+plt.show()
