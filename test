@@ -1,9 +1,24 @@
-# 📊 **Plot Kurtosis of Tokens**
-plt.figure(figsize=(12, 6))
-sns.barplot(x=shap_table["Token"][:20], y=shap_table["SHAP Kurtosis"][:20], palette="coolwarm")  # Top 20 tokens
-plt.xticks(rotation=45, ha="right")
-plt.xlabel("Token")
-plt.ylabel("SHAP Kurtosis")
-plt.title("SHAP Kurtosis for Most Important Tokens")
-plt.grid(axis="y", linestyle="--", alpha=0.7)
-plt.show()
+import numpy as np
+
+def pad_shap_values(shap_values, pad_value=0):
+    """
+    Pads all arrays in shap_values to the maximum length with a specified pad_value.
+
+    Args:
+        shap_values (list of np.ndarray): List of numpy arrays with different lengths.
+        pad_value (int, float): Value to use for padding (default is 0).
+
+    Returns:
+        np.ndarray: A single numpy array with padded values.
+    """
+    max_len = max(arr.shape[0] for arr in shap_values)  # Find max length
+
+    # Pad each array to max_len
+    padded_arrays = [np.pad(arr, ((0, max_len - arr.shape[0]), (0, 0)), mode='constant', constant_values=pad_value) 
+                     for arr in shap_values]
+    
+    return np.array(padded_arrays)
+
+# Example usage
+padded_shap_values = pad_shap_values(shap_values)
+print(padded_shap_values.shape)  # Output: (5, max_len, 3)
