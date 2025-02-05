@@ -1,24 +1,25 @@
 import numpy as np
 
-def pad_shap_values(shap_values, pad_value=0):
+def pad_shap_data_mixed(shap_data, pad_value=""):
     """
-    Pads all arrays in shap_values to the maximum length with a specified pad_value.
+    Pads all arrays in shap_values.data to the maximum length with a specified pad_value.
 
     Args:
-        shap_values (list of np.ndarray): List of numpy arrays with different lengths.
-        pad_value (int, float): Value to use for padding (default is 0).
+        shap_data (list of np.ndarray): List of numpy arrays with different lengths (including strings).
+        pad_value (str, int, float): Value to use for padding (default is an empty string for mixed types).
 
     Returns:
-        np.ndarray: A single numpy array with padded values.
+        np.ndarray: A list-based NumPy array with padded values.
     """
-    max_len = max(arr.shape[0] for arr in shap_values)  # Find max length
+    max_len = max(len(arr) for arr in shap_data)  # Find max length
 
-    # Pad each array to max_len
-    padded_arrays = [np.pad(arr, ((0, max_len - arr.shape[0]), (0, 0)), mode='constant', constant_values=pad_value) 
-                     for arr in shap_values]
+    # Pad each array with `pad_value`
+    padded_arrays = [np.concatenate([arr, np.full((max_len - len(arr),), pad_value, dtype=object)]) 
+                     if len(arr) < max_len else arr 
+                     for arr in shap_data]
     
-    return np.array(padded_arrays)
+    return np.array(padded_arrays, dtype=object)  # Ensure mixed-type support
 
 # Example usage
-padded_shap_values = pad_shap_values(shap_values)
-print(padded_shap_values.shape)  # Output: (5, max_len, 3)
+padded_shap_data = pad_shap_data_mixed(shap_values.data)
+print(padded_shap_data.shape)  # Output: (5, max_len)
