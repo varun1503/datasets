@@ -1,58 +1,40 @@
-import re
-import nltk
-import spacy
-from nltk.tokenize import word_tokenize
-from nltk.corpus import stopwords
-from nltk.stem import PorterStemmer
+import numpy as np
+import pandas as pd
+from scipy.stats import kurtosis
 
-# Download NLTK resources if not available
-nltk.download('punkt')
-nltk.download('stopwords')
+# Example dictionary with tokens as keys.
+# 'varun' has multiple tiles (rows) and multiple features (columns).
+token_shap = {
+    'varun': np.array([
+        [1, 2, 3],
+        [3, 4, 5],
+        [1, 2, 3]
+    ]),
+    # A token with a single tile (row). Not enough data for reliable kurtosis.
+    'single_token': np.array([[1, 2, 3]])
+}
 
-# Load spaCy model
-nlp = spacy.load("en_core_web_sm")
+results = []
+for token, shap_vals in token_shap.items():
+    token_result = {'token': token}
+    
+    if shap_vals.ndim == 2:
+        if shap_vals.shape[0] > 1:
+            # Compute column-wise kurtosis along axis 0.
+            col_kurt = kurtosis(shap_vals, axis=0)
+        else:
+            # With only one row, there's insufficient data to compute kurtosis reliably.
+            # Here, we assign NaN for each column.
+            col_kurt = np.full(shap_vals.shape[1], np.nan)
+    else:
+        # For a 1D array, compute the overall kurtosis.
+        col_kurt = np.array([kurtosis(shap_vals)])
+    
+    # Store the column-wise kurtosis values in the result dictionary.
+    for i, k_val in enumerate(col_kurt):
+        token_result[f'col_{i}'] = k_val
+    results.append(token_result)
 
-def preprocess_texts(texts):
-    """
-    Preprocess a list of texts by:
-    - Lowercasing
-    - Removing special characters and numbers
-    - Tokenizing
-    - Removing stopwords
-    - Applying stemming and lemmatization
-    Returns a cleaned sentence for each text.
-    """
-    stemmer = PorterStemmer()
-    stop_words = set(stopwords.words("english"))
-    processed_sentences = []
-
-    for text in texts:
-        # Lowercasing
-        text = text.lower()
-
-        # Removing special characters and numbers
-        text = re.sub(r'[^a-z\s]', '', text)
-
-        # Tokenization
-        tokens = word_tokenize(text)
-
-        # Removing stopwords
-        tokens = [word for word in tokens if word not in stop_words]
-
-        # Stemming
-        stemmed_tokens = [stemmer.stem(word) for word in tokens]
-
-        # Lemmatization
-        doc = nlp(" ".join(stemmed_tokens))
-        lemmatized_tokens = [token.lemma_ for token in doc]
-
-        # Join words back into a sentence
-        cleaned_sentence = " ".join(lemmatized_tokens)
-        processed_sentences.append(cleaned_sentence)
-
-    return processed_sentences
-
-# Example Usage
-texts = ["Running faster than before!", "The cars are driving smoothly on the road."]
-result = preprocess_texts(texts)
-print(result)
+# Create a DataFrame to display the results.
+df = pd.DataFrame(results)
+print(df)
