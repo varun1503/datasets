@@ -1,65 +1,25 @@
 import numpy as np
-import pandas as pd
-from scipy.stats import kurtosis
 
-# Example dictionary with tokens as keys.
-# 'varun' has multiple tiles (rows) and multiple features (columns).
-token_shap = {
-    'varun': np.array([
-        [1, 2, 3],
-        [3, 4, 5],
-        [1, 2, 3]
-    ]),
-    # A token with a single tile (row). Not enough data for reliable kurtosis.
-    'single_token': np.array([[1, 2, 3]])
+# Sample token SHAP values (each row represents a tile)
+token_shap_dict = {
+    "dispute": np.array([
+        [-0.00269948, 0.10008446, -0.09738498],
+        [-0.00531142, 0.03690223, -0.0315981],
+        [-0.00107645, 0.01291593, -0.01183948]
+    ])
 }
 
-results = []
-for token, shap_vals in token_shap.items():
-    token_result = {'token': token}
-    
-    if shap_vals.ndim == 2:
-        if shap_vals.shape[0] > 1:
-            # Compute column-wise kurtosis along axis 0.
-            col_kurt = kurtosis(shap_vals, axis=0)
-        else:
-            # With only one row, there's insufficient data to compute kurtosis reliably.
-            # Here, we assign NaN for each column.
-            col_kurt = np.full(shap_vals.shape[1], np.nan)
-    else:
-        # For a 1D array, compute the overall kurtosis.
-        col_kurt = np.array([kurtosis(shap_vals)])
-    
-    # Store the column-wise kurtosis values in the result dictionary.
-    for i, k_val in enumerate(col_kurt):
-        token_result[f'col_{i}'] = k_val
-    results.append(token_result)
+# Compute column-wise SHAP statistics
+shap_values = np.array(token_shap_dict['dispute'])  # Convert list to array
 
-# Create a DataFrame to display the results.
-df = pd.DataFrame(results)
-print(df)
-import numpy as np
-import pandas as pd
-from scipy.stats import kurtosis
+# Compute mean, standard deviation, and kurtosis column-wise
+mean_shap = np.mean(shap_values, axis=0)  # Mean column-wise
+std_shap = np.std(shap_values, axis=0)  # Standard deviation column-wise
+kurtosis_shap = np.apply_along_axis(
+    lambda x: (np.mean((x - np.mean(x))**4) / (np.std(x)**4)), axis=0, arr=shap_values
+)  # Kurtosis manually
 
-# Example dictionary: keys are tokens, values are SHAP values.
-token_shap = {
-    'varun': np.array([[1, 2, 3], [3, 4, 5], [1, 2, 3]]),  # Multiple tiles
-    'single_token': np.array([1, 2, 3])                     # Single tile (or one sample)
-}
-
-results = []
-for token, shap_vals in token_shap.items():
-    # Check if there are multiple rows (tiles) available:
-    if shap_vals.ndim > 1 and shap_vals.shape[0] > 1:
-        # Flatten the array if you want to compute kurtosis over all values:
-        flat_vals = shap_vals.flatten()
-        k_value = kurtosis(flat_vals)
-    else:
-        # For a single tile, choose a default (0 or np.nan)
-        k_value = 0  # or use np.nan if you prefer
-    
-    results.append({'token': token, 'kurtosis': k_value})
-
-df = pd.DataFrame(results)
-print(df)
+# Output the results
+print("Mean SHAP values column-wise:", mean_shap)
+print("Std SHAP values column-wise:", std_shap)
+print("Kurtosis SHAP values column-wise:", kurtosis_shap)
