@@ -1,47 +1,21 @@
-import numpy as np
-import pandas as pd
-from scipy.stats import kurtosis
+import re
+from nltk.stem import PorterStemmer
+from nltk.tokenize import word_tokenize
 
-# Sample token SHAP values (each row represents a tile)
-token_shap_dict = {
-    "dispute": np.array([
-        [-0.00269948, 0.10008446, -0.09738498],
-        [-0.00531142, 0.03690223, -0.0315981],
-        [-0.00107645, 0.01291593, -0.01183948]
-    ]),
-    "contract": np.array([
-        [0.00347923, -0.05683945, 0.04591234],
-        [0.00175234, 0.01592372, 0.01103877],
-        [0.00293014, -0.01720314, -0.02210987]
-    ]),
-    "settlement": np.array([
-        [-0.00113489, 0.04054519, -0.03338976],
-        [-0.00327235, 0.02089472, -0.01452792],
-        [-0.00217592, 0.03114056, -0.02264834]
-    ])
-}
-
-# Function to compute statistics for each token and store in DataFrame
-def compute_shap_statistics(shap_dict):
-    data = []
-    for token, shap_values in shap_dict.items():
-        mean_shap = np.mean(shap_values, axis=0)  # Mean column-wise
-        std_shap = np.std(shap_values, axis=0)  # Standard deviation column-wise
-        kurtosis_shap = kurtosis(shap_values, axis=0, fisher=True)  # Kurtosis using scipy
-
-        # Append results to the data list
-        data.append([token, *mean_shap, *std_shap, *kurtosis_shap])
-
-    # Create DataFrame
-    columns = ['Token', 'Mean_Column1', 'Mean_Column2', 'Mean_Column3', 
-               'Std_Column1', 'Std_Column2', 'Std_Column3', 
-               'Kurtosis_Column1', 'Kurtosis_Column2', 'Kurtosis_Column3']
+def preprocess_and_stem(sentences):
+    """Preprocess a list of sentences by lowercasing, removing punctuation, stripping spaces, and applying stemming."""
+    stemmer = PorterStemmer()
+    processed = []
     
-    df = pd.DataFrame(data, columns=columns)
-    return df
+    for sentence in sentences:
+        sentence = sentence.lower()  # Convert to lowercase
+        sentence = re.sub(r"[^\w\s]", "", sentence)  # Remove punctuation
+        words = word_tokenize(sentence)  # Tokenize sentence
+        stemmed_words = [stemmer.stem(word) for word in words]  # Apply stemming
+        processed.append(" ".join(stemmed_words))  # Join words back into a sentence
+    
+    return processed
 
-# Compute statistics and store in DataFrame
-shap_stats_df = compute_shap_statistics(token_shap_dict)
-
-# Display the DataFrame
-print(shap_stats_df)
+# Example usage:
+sentences = ["Running quickly towards the finish line!", "This is a demonstration of stemming."]
+print(preprocess_and_stem(sentences))
