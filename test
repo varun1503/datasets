@@ -1,20 +1,58 @@
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
+import re
+import nltk
+import spacy
+from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
+from nltk.stem import PorterStemmer
 
-# Load your DataFrame (assuming you have it in a CSV file)
-df = pd.read_csv("/mnt/data/file-CsxNjVLS65x3FSSTJ29Ly6")
+# Download NLTK resources if not available
+nltk.download('punkt')
+nltk.download('stopwords')
 
-# Drop NaN values in the 'SHAP Kurtosis' column
-df = df.dropna(subset=['SHAP Kurtosis'])
+# Load spaCy model
+nlp = spacy.load("en_core_web_sm")
 
-# Plot bar chart
-plt.figure(figsize=(12, 6))
-sns.barplot(x=df['Token'], y=df['SHAP Kurtosis'], color='blue')
+def preprocess_texts(texts):
+    """
+    Preprocess a list of texts by:
+    - Lowercasing
+    - Removing special characters and numbers
+    - Tokenizing
+    - Removing stopwords
+    - Applying stemming and lemmatization
+    Returns a cleaned sentence for each text.
+    """
+    stemmer = PorterStemmer()
+    stop_words = set(stopwords.words("english"))
+    processed_sentences = []
 
-# Formatting
-plt.xlabel("Token")
-plt.ylabel("SHAP Kurtosis")
-plt.title("Bar Plot of SHAP Kurtosis for Tokens")
-plt.xticks(rotation=90)  # Rotate labels for better readability
-plt.show()
+    for text in texts:
+        # Lowercasing
+        text = text.lower()
+
+        # Removing special characters and numbers
+        text = re.sub(r'[^a-z\s]', '', text)
+
+        # Tokenization
+        tokens = word_tokenize(text)
+
+        # Removing stopwords
+        tokens = [word for word in tokens if word not in stop_words]
+
+        # Stemming
+        stemmed_tokens = [stemmer.stem(word) for word in tokens]
+
+        # Lemmatization
+        doc = nlp(" ".join(stemmed_tokens))
+        lemmatized_tokens = [token.lemma_ for token in doc]
+
+        # Join words back into a sentence
+        cleaned_sentence = " ".join(lemmatized_tokens)
+        processed_sentences.append(cleaned_sentence)
+
+    return processed_sentences
+
+# Example Usage
+texts = ["Running faster than before!", "The cars are driving smoothly on the road."]
+result = preprocess_texts(texts)
+print(result)
