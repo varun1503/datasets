@@ -38,3 +38,28 @@ for token, shap_vals in token_shap.items():
 # Create a DataFrame to display the results.
 df = pd.DataFrame(results)
 print(df)
+import numpy as np
+import pandas as pd
+from scipy.stats import kurtosis
+
+# Example dictionary: keys are tokens, values are SHAP values.
+token_shap = {
+    'varun': np.array([[1, 2, 3], [3, 4, 5], [1, 2, 3]]),  # Multiple tiles
+    'single_token': np.array([1, 2, 3])                     # Single tile (or one sample)
+}
+
+results = []
+for token, shap_vals in token_shap.items():
+    # Check if there are multiple rows (tiles) available:
+    if shap_vals.ndim > 1 and shap_vals.shape[0] > 1:
+        # Flatten the array if you want to compute kurtosis over all values:
+        flat_vals = shap_vals.flatten()
+        k_value = kurtosis(flat_vals)
+    else:
+        # For a single tile, choose a default (0 or np.nan)
+        k_value = 0  # or use np.nan if you prefer
+    
+    results.append({'token': token, 'kurtosis': k_value})
+
+df = pd.DataFrame(results)
+print(df)
