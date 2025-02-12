@@ -1,63 +1,15 @@
-import numpy as np
-import pandas as pd
-from scipy import stats
-from sklearn.preprocessing import MinMaxScaler
-
-def compute_shap_statistics(shap_values, class_name):
-    """
-    Compute token-wise SHAP statistics for a given class.
+# Define baseline (all [PAD] tokens)
+    baseline_tokens = ["[PAD]"] * (input_ids.shape[1])  # Same length as input
+    baseline_encoding = tokenizer.encode_plus(
+        baseline_tokens,
+        add_special_tokens=True,
+        max_length=128,
+        return_token_type_ids=True,
+        padding='max_length',
+        truncation=True,
+        return_attention_mask=True,
+        return_tensors='pt'
+    )
     
-    Args:
-        shap_values (np.ndarray): SHAP values array of shape (n_samples, n_tokens, n_classes).
-        class_name (str): The class name corresponding to the SHAP values.
-
-    Returns:
-        pd.DataFrame: A DataFrame containing token statistics such as SHAP mean, sum, kurtosis, and normalized kurtosis.
-    """
-    # Extract SHAP values for the given class
-    shap_class_values = shap_values[:, :, class_name]
-    
-    # Assume `travel.data` contains tokenized sentences corresponding to shap_values
-    all_tokens = travel.data  # Ensure travel.data exists in the scope
-    all_shap_values = [s for s in shap_class_values]
-    
-    token_shap_dict = {}
-    
-    # Iterate over each sentence
-    for i, tokens in enumerate(all_tokens):
-        for token, shap_value in zip(tokens, all_shap_values[i]):
-            if token in token_shap_dict:
-                if isinstance(token_shap_dict[token], list):
-                    token_shap_dict[token].append(shap_value)
-                else:
-                    token_shap_dict[token] = [token_shap_dict[token], shap_value]  # Convert float to list
-            else:
-                token_shap_dict[token] = [shap_value]
-    
-    # Compute statistics
-    token_stats = {
-        "Token": [],
-        "SHAP Sum": [],
-        "SHAP Kurtosis": [],
-        "shap_mean": []
-    }
-    
-    for token, values in token_shap_dict.items():
-        token_stats["Token"].append(token)
-        token_stats["shap_mean"].append(np.mean(values))
-        token_stats["SHAP Sum"].append(np.sum(values))
-        token_stats["SHAP Kurtosis"].append(stats.kurtosis(values, axis=0))
-    
-    # Convert to DataFrame
-    shap_df = pd.DataFrame(token_stats)
-    shap_df = shap_df.dropna(subset=['SHAP Kurtosis'])
-    shap_df = shap_df[shap_df['Token'].str.len() >= 3]
-    
-    # Normalize SHAP Kurtosis
-    scaler = MinMaxScaler()
-    shap_df["normalized_kurtosis"] = scaler.fit_transform(shap_df[['SHAP Kurtosis']])
-    
-    # Sort by SHAP mean
-    shap_df = shap_df.sort_values(by="shap_mean", ascending=False)
-    
-    return shap_df
+    baseline_input_ids = baseline_encoding['input_ids'].to(device)
+    baseline_attention_mask = baseline_encoding['attention_mask'].to(device)
