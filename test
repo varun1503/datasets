@@ -1,83 +1,61 @@
-
-import os
-import json
 import torch
+import json
+import os
 import shap
-import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import scipy as sp
+import pandas as pd
 import seaborn as sns
-from torch import nn
+import matplotlib.pyplot as plt
 from scipy import stats
-from sklearn.preprocessing import MinMaxScaler
-from typing import List, Tuple, Dict, Optional, Any
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from captum.attr import LayerIntegratedGradients
+from sklearn.preprocessing import MinMaxScaler
+from transformers import PreTrainedModel, PreTrainedTokenizer
 from lime.lime_text import LimeTextExplainer
-from transformer_explain import SequenceClassificationExplainer
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+from captum.attr import visualization as viz
 
 class TextModelInterpreter:
-    """A class for interpreting text classification models using various explanation methods."""
-    
-    def __init__(self, model: nn.Module, config: Dict[str, Any]):
+    def __init__(self, model: PreTrainedModel, config: dict):
         """
-        Initialize the TextModelInterpreter.
+        Initializes the TextModelInterpreter class.
 
         Args:
-            model (nn.Module): The trained text classification model
-            config (Dict[str, Any]): Configuration dictionary containing model parameters
+            model (PreTrainedModel): The pre-trained Transformer model.
+            config (dict): Configuration dictionary containing model paths and settings.
         """
         self.config = config
         self.model = model
-        self.model.to(device)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.to(self.device)
         self.scaler = MinMaxScaler()
-        
-        # Load transformer resources
         transformer_resource = TransformerLoader(self.config['model']['pretrain_model_path'])
         self.tokenizer = transformer_resource.load_tokenizer()
-        
-        # Initialize integrated gradients
-        self.lig = LayerIntegratedGradients(self.model, self.model.bert.bert.embeddings)
-        
-        # Setup labels
-        self.labels = sorted(self.model.config.label2id, key=self.model.config.label2id.get)
+        self.lig = LayerIntegratedGradients(self.model, self.model.bert.embeddings)
+        self.labels = sorted(self.config['model']['label2id'], key=self.config['model']['label2id'].get)
+        self.model_config = self.model.config
         self.vis_data_records_ig = []
 
-    def _add_attributions_to_visualizer(self, 
-                                      attributions: torch.Tensor, 
-                                      input_ids: torch.Tensor, 
-                                      pred: torch.Tensor, 
-                                      predicted_class: int, 
-                                      delta: float) -> Dict[str, Any]:
+    def _add_attributions_to_visualizer(self, attributions: torch.Tensor, input_ids: torch.Tensor, 
+                                        pred: torch.Tensor, predicted_class: int, delta: float) -> dict:
         """
-        Process attributions and create visualization records.
+        Adds attributions to the visualizer.
 
         Args:
-            attributions (torch.Tensor): Attribution values from integrated gradients
-            input_ids (torch.Tensor): Tokenized input IDs
-            pred (torch.Tensor): Model predictions
-            predicted_class (int): Index of predicted class
-            delta (float): Convergence delta value
-
+            attributions (torch.Tensor): Computed attributions.
+            input_ids (torch.Tensor): Tokenized input IDs.
+            pred (torch.Tensor): Model predictions.
+            predicted_class (int): Predicted class index.
+            delta (float): Convergence delta from attributions.
+        
         Returns:
-            Dict[str, Any]: Dictionary containing attribution data and visualization records
+            dict: Dictionary containing attributions and visualization data.
         """
-        self.model_config = self.model.bert.config
-        
-        # Process attributions
         attributions = attributions.sum(dim=2).squeeze(0)
-        attributions = attributions / torch.norm(attributions)
+        attributions /= torch.norm(attributions)
         attributions = attributions.cpu().detach().numpy()
-        
-        # Convert tokens
         text = self.tokenizer.convert_ids_to_tokens(input_ids[0])
         
-        # Create visualization records
         self.vis_data_records_ig.append(
-            VisualizationDataRecord(
+            viz.VisualizationDataRecord(
                 attributions,
                 torch.max(pred).item(),
                 self.labels[predicted_class],
@@ -88,7 +66,7 @@ class TextModelInterpreter:
                 delta
             )
         )
-
+        
         return {
             'attributions': attributions.sum(),
             'text': text,
@@ -98,20 +76,18 @@ class TextModelInterpreter:
             'true_label': "POS",
             'attribution_label': self.labels[predicted_class]
         }
-
-    def interpreted_text(self, text: str) -> Tuple[str, Dict[str, Any]]:
+    
+    def interpret_text(self, text: str) -> tuple:
         """
-        Generate integrated gradients explanation for input text.
-
+        Computes Integrated Gradients (IG) attributions for the given text.
+        
         Args:
-            text (str): Input text to interpret
-
+            text (str): Input text for interpretation.
+        
         Returns:
-            Tuple[str, Dict[str, Any]]: HTML visualization and attribution dictionary
+            tuple: (Visualization figure, attributions dictionary)
         """
         self.model.eval()
-        
-        # Tokenize input
         encoding = self.tokenizer.encode_plus(
             text,
             add_special_tokens=True,
@@ -122,13 +98,36 @@ class TextModelInterpreter:
             return_attention_mask=True,
             return_tensors='pt'
         )
-        input_ids = encoding['input_ids'].to(device)
-        attention_mask = encoding['attention_mask'].to(device)
         
-        # Create baseline
-        baseline_tokens = ["[PAD]"] * input_ids.shape[1]
-        baseline_encoding = self.tokenizer.encode_plus(
-            baseline_tokens,
+        input_ids = encoding['input_ids'].to(self.device)
+        attention_mask = encoding['attention_mask'].to(self.device)
+        logits = self.model(input_ids=input_ids, attention_mask=attention_mask).to(self.device)
+        probabilities = torch.softmax(logits, dim=-1)
+        predicted_class = torch.argmax(probabilities, dim=-1).item()
+        
+        attributions_ig, delta = self.lig.attribute(
+            (input_ids, attention_mask),
+            target=predicted_class,
+            return_convergence_delta=True
+        )
+        
+        attributions_dict = self._add_attributions_to_visualizer(attributions_ig, input_ids, probabilities, predicted_class, delta)
+        fig = viz.visualize_text(self.vis_data_records_ig)
+        return fig, attributions_dict
+
+    def predict_shap(self, text: str) -> torch.Tensor:
+        """
+        Predicts logits for SHAP.
+        
+        Args:
+            text (str): Input text for prediction.
+        
+        Returns:
+            torch.Tensor: Model logits.
+        """
+        self.model.eval()
+        encoding = self.tokenizer.encode_plus(
+            text,
             add_special_tokens=True,
             max_length=128,
             return_token_type_ids=True,
@@ -137,29 +136,58 @@ class TextModelInterpreter:
             return_attention_mask=True,
             return_tensors='pt'
         )
-        baseline_input_ids = baseline_encoding['input_ids'].to(device)
-        baseline_attention_mask = baseline_encoding['attention_mask'].to(device)
         
-        # Compute attributions
-        logits = self.model(ids=input_ids, mask=attention_mask).to(device)
-        probabilities = torch.softmax(logits, dim=-1)
-        predicted_class = torch.argmax(probabilities, dim=-1).item()
+        input_ids = encoding['input_ids'].to(self.device)
+        attention_mask = encoding['attention_mask'].to(self.device)
         
-        attributions_ig, delta = self.lig.attribute(
-            (input_ids, attention_mask),
-            target=predicted_class,
-            baselines=(baseline_input_ids, baseline_attention_mask),
-            return_convergence_delta=True
-        )
+        with torch.no_grad():
+            logits = self.model(input_ids=input_ids, attention_mask=attention_mask).to(self.device)
         
-        # Generate visualization
-        attributions_dict = self._add_attributions_to_visualizer(
-            attributions_ig,
-            input_ids,
-            probabilities,
-            predicted_class,
-            delta
-        )
+        return logits
+
+    def shap_analysis(self, text_list: list) -> shap.Explanation:
+        """
+        Computes SHAP values for the given list of texts.
         
-        fig = visualize_text(self.vis_data_records_ig)
-        return fig._repr_html_(), attributions_dict
+        Args:
+            text_list (list): List of text inputs.
+        
+        Returns:
+            shap.Explanation: SHAP values explanation.
+        """
+        explainer_bert = shap.Explainer(self.predict_shap, self.tokenizer, output_names=self.labels)
+        shap_values = explainer_bert(text_list)
+        return shap_values
+
+    def compute_shap_statistics(self, shap_values: np.ndarray, class_name: str) -> pd.DataFrame:
+        """
+        Computes token-wise SHAP statistics for a given class.
+        
+        Args:
+            shap_values (np.ndarray): SHAP values array.
+            class_name (str): Class name for SHAP values.
+        
+        Returns:
+            pd.DataFrame: DataFrame containing SHAP statistics.
+        """
+        shap_class_values = shap_values[:, :, class_name]
+        all_tokens = shap_class_values.data
+        all_shap_values = [s for s in shap_class_values.values]
+        token_shap_dict = {}
+        
+        for tokens, values in zip(all_tokens, all_shap_values):
+            for token, shap_value in zip(tokens, values):
+                token_shap_dict.setdefault(token, []).append(shap_value)
+        
+        token_stats = {
+            "Token": list(token_shap_dict.keys()),
+            "SHAP Mean": [np.mean(v) for v in token_shap_dict.values()],
+            "SHAP Sum": [np.sum(v) for v in token_shap_dict.values()],
+            "SHAP Kurtosis": [stats.kurtosis(v) for v in token_shap_dict.values()]
+        }
+        
+        shap_df = pd.DataFrame(token_stats)
+        shap_df = shap_df.dropna(subset=['SHAP Kurtosis'])
+        shap_df = shap_df[shap_df['Token'].str.len() >= 3]
+        
+        return shap_df
