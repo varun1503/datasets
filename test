@@ -1,15 +1,165 @@
-# Define baseline (all [PAD] tokens)
-    baseline_tokens = ["[PAD]"] * (input_ids.shape[1])  # Same length as input
-    baseline_encoding = tokenizer.encode_plus(
-        baseline_tokens,
-        add_special_tokens=True,
-        max_length=128,
-        return_token_type_ids=True,
-        padding='max_length',
-        truncation=True,
-        return_attention_mask=True,
-        return_tensors='pt'
-    )
+
+import os
+import json
+import torch
+import shap
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import scipy as sp
+import seaborn as sns
+from torch import nn
+from scipy import stats
+from sklearn.preprocessing import MinMaxScaler
+from typing import List, Tuple, Dict, Optional, Any
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from captum.attr import LayerIntegratedGradients
+from lime.lime_text import LimeTextExplainer
+from transformer_explain import SequenceClassificationExplainer
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+class TextModelInterpreter:
+    """A class for interpreting text classification models using various explanation methods."""
     
-    baseline_input_ids = baseline_encoding['input_ids'].to(device)
-    baseline_attention_mask = baseline_encoding['attention_mask'].to(device)
+    def __init__(self, model: nn.Module, config: Dict[str, Any]):
+        """
+        Initialize the TextModelInterpreter.
+
+        Args:
+            model (nn.Module): The trained text classification model
+            config (Dict[str, Any]): Configuration dictionary containing model parameters
+        """
+        self.config = config
+        self.model = model
+        self.model.to(device)
+        self.scaler = MinMaxScaler()
+        
+        # Load transformer resources
+        transformer_resource = TransformerLoader(self.config['model']['pretrain_model_path'])
+        self.tokenizer = transformer_resource.load_tokenizer()
+        
+        # Initialize integrated gradients
+        self.lig = LayerIntegratedGradients(self.model, self.model.bert.bert.embeddings)
+        
+        # Setup labels
+        self.labels = sorted(self.model.config.label2id, key=self.model.config.label2id.get)
+        self.vis_data_records_ig = []
+
+    def _add_attributions_to_visualizer(self, 
+                                      attributions: torch.Tensor, 
+                                      input_ids: torch.Tensor, 
+                                      pred: torch.Tensor, 
+                                      predicted_class: int, 
+                                      delta: float) -> Dict[str, Any]:
+        """
+        Process attributions and create visualization records.
+
+        Args:
+            attributions (torch.Tensor): Attribution values from integrated gradients
+            input_ids (torch.Tensor): Tokenized input IDs
+            pred (torch.Tensor): Model predictions
+            predicted_class (int): Index of predicted class
+            delta (float): Convergence delta value
+
+        Returns:
+            Dict[str, Any]: Dictionary containing attribution data and visualization records
+        """
+        self.model_config = self.model.bert.config
+        
+        # Process attributions
+        attributions = attributions.sum(dim=2).squeeze(0)
+        attributions = attributions / torch.norm(attributions)
+        attributions = attributions.cpu().detach().numpy()
+        
+        # Convert tokens
+        text = self.tokenizer.convert_ids_to_tokens(input_ids[0])
+        
+        # Create visualization records
+        self.vis_data_records_ig.append(
+            VisualizationDataRecord(
+                attributions,
+                torch.max(pred).item(),
+                self.labels[predicted_class],
+                "pos",
+                self.labels[predicted_class],
+                attributions.sum(),
+                text,
+                delta
+            )
+        )
+
+        return {
+            'attributions': attributions.sum(),
+            'text': text,
+            'output_prob': pred.tolist(),
+            'predicted_probability': float(torch.max(pred)),
+            'predicted_label': self.labels[predicted_class],
+            'true_label': "POS",
+            'attribution_label': self.labels[predicted_class]
+        }
+
+    def interpreted_text(self, text: str) -> Tuple[str, Dict[str, Any]]:
+        """
+        Generate integrated gradients explanation for input text.
+
+        Args:
+            text (str): Input text to interpret
+
+        Returns:
+            Tuple[str, Dict[str, Any]]: HTML visualization and attribution dictionary
+        """
+        self.model.eval()
+        
+        # Tokenize input
+        encoding = self.tokenizer.encode_plus(
+            text,
+            add_special_tokens=True,
+            max_length=128,
+            return_token_type_ids=True,
+            padding='max_length',
+            truncation=True,
+            return_attention_mask=True,
+            return_tensors='pt'
+        )
+        input_ids = encoding['input_ids'].to(device)
+        attention_mask = encoding['attention_mask'].to(device)
+        
+        # Create baseline
+        baseline_tokens = ["[PAD]"] * input_ids.shape[1]
+        baseline_encoding = self.tokenizer.encode_plus(
+            baseline_tokens,
+            add_special_tokens=True,
+            max_length=128,
+            return_token_type_ids=True,
+            padding='max_length',
+            truncation=True,
+            return_attention_mask=True,
+            return_tensors='pt'
+        )
+        baseline_input_ids = baseline_encoding['input_ids'].to(device)
+        baseline_attention_mask = baseline_encoding['attention_mask'].to(device)
+        
+        # Compute attributions
+        logits = self.model(ids=input_ids, mask=attention_mask).to(device)
+        probabilities = torch.softmax(logits, dim=-1)
+        predicted_class = torch.argmax(probabilities, dim=-1).item()
+        
+        attributions_ig, delta = self.lig.attribute(
+            (input_ids, attention_mask),
+            target=predicted_class,
+            baselines=(baseline_input_ids, baseline_attention_mask),
+            return_convergence_delta=True
+        )
+        
+        # Generate visualization
+        attributions_dict = self._add_attributions_to_visualizer(
+            attributions_ig,
+            input_ids,
+            probabilities,
+            predicted_class,
+            delta
+        )
+        
+        fig = visualize_text(self.vis_data_records_ig)
+        return fig._repr_html_(), attributions_dict
