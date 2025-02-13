@@ -1,132 +1,26 @@
-import torch
-import json
 import os
-import shap
-import numpy as np
-import pandas as pd
-import seaborn as sns
+import json
+import torch
+import scipy.special as sp
 import matplotlib.pyplot as plt
-from scipy import stats
-from captum.attr import LayerIntegratedGradients
-from sklearn.preprocessing import MinMaxScaler
-from transformers import PreTrainedModel, PreTrainedTokenizer
+import seaborn as sns
+import numpy as np
+import torch.nn.functional as F
 from lime.lime_text import LimeTextExplainer
-from captum.attr import visualization as viz
+from typing import Dict, Any, Tuple
 
-class TextModelInterpreter:
-    def __init__(self, model: PreTrainedModel, config: dict):
+class ModelInterpreter:
+    def predicts_lime(self, text: str) -> np.ndarray:
         """
-        Initializes the TextModelInterpreter class.
+        Generates probability predictions using the model for LIME.
 
         Args:
-            model (PreTrainedModel): The pre-trained Transformer model.
-            config (dict): Configuration dictionary containing model paths and settings.
-        """
-        self.config = config
-        self.model = model
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model.to(self.device)
-        self.scaler = MinMaxScaler()
-        transformer_resource = TransformerLoader(self.config['model']['pretrain_model_path'])
-        self.tokenizer = transformer_resource.load_tokenizer()
-        self.lig = LayerIntegratedGradients(self.model, self.model.bert.embeddings)
-        self.labels = sorted(self.config['model']['label2id'], key=self.config['model']['label2id'].get)
-        self.model_config = self.model.config
-        self.vis_data_records_ig = []
+            text (str): The input text to be tokenized and processed.
 
-    def _add_attributions_to_visualizer(self, attributions: torch.Tensor, input_ids: torch.Tensor, 
-                                        pred: torch.Tensor, predicted_class: int, delta: float) -> dict:
-        """
-        Adds attributions to the visualizer.
-
-        Args:
-            attributions (torch.Tensor): Computed attributions.
-            input_ids (torch.Tensor): Tokenized input IDs.
-            pred (torch.Tensor): Model predictions.
-            predicted_class (int): Predicted class index.
-            delta (float): Convergence delta from attributions.
-        
         Returns:
-            dict: Dictionary containing attributions and visualization data.
+            np.ndarray: The predicted probability distribution.
         """
-        attributions = attributions.sum(dim=2).squeeze(0)
-        attributions /= torch.norm(attributions)
-        attributions = attributions.cpu().detach().numpy()
-        text = self.tokenizer.convert_ids_to_tokens(input_ids[0])
-        
-        self.vis_data_records_ig.append(
-            viz.VisualizationDataRecord(
-                attributions,
-                torch.max(pred).item(),
-                self.labels[predicted_class],
-                "pos",
-                self.labels[predicted_class],
-                attributions.sum(),
-                text,
-                delta
-            )
-        )
-        
-        return {
-            'attributions': attributions.sum(),
-            'text': text,
-            'output_prob': pred.tolist(),
-            'predicted_probability': float(torch.max(pred)),
-            'predicted_label': self.labels[predicted_class],
-            'true_label': "POS",
-            'attribution_label': self.labels[predicted_class]
-        }
-    
-    def interpret_text(self, text: str) -> tuple:
-        """
-        Computes Integrated Gradients (IG) attributions for the given text.
-        
-        Args:
-            text (str): Input text for interpretation.
-        
-        Returns:
-            tuple: (Visualization figure, attributions dictionary)
-        """
-        self.model.eval()
-        encoding = self.tokenizer.encode_plus(
-            text,
-            add_special_tokens=True,
-            max_length=128,
-            return_token_type_ids=True,
-            padding='max_length',
-            truncation=True,
-            return_attention_mask=True,
-            return_tensors='pt'
-        )
-        
-        input_ids = encoding['input_ids'].to(self.device)
-        attention_mask = encoding['attention_mask'].to(self.device)
-        logits = self.model(input_ids=input_ids, attention_mask=attention_mask).to(self.device)
-        probabilities = torch.softmax(logits, dim=-1)
-        predicted_class = torch.argmax(probabilities, dim=-1).item()
-        
-        attributions_ig, delta = self.lig.attribute(
-            (input_ids, attention_mask),
-            target=predicted_class,
-            return_convergence_delta=True
-        )
-        
-        attributions_dict = self._add_attributions_to_visualizer(attributions_ig, input_ids, probabilities, predicted_class, delta)
-        fig = viz.visualize_text(self.vis_data_records_ig)
-        return fig, attributions_dict
-
-    def predict_shap(self, text: str) -> torch.Tensor:
-        """
-        Predicts logits for SHAP.
-        
-        Args:
-            text (str): Input text for prediction.
-        
-        Returns:
-            torch.Tensor: Model logits.
-        """
-        self.model.eval()
-        encoding = self.tokenizer.encode_plus(
+        encoding = self.tokenizer(
             text,
             add_special_tokens=True,
             max_length=128,
@@ -142,52 +36,103 @@ class TextModelInterpreter:
         
         with torch.no_grad():
             logits = self.model(input_ids=input_ids, attention_mask=attention_mask).to(self.device)
+            probabilities = F.softmax(logits, dim=-1)
         
-        return logits
+        return probabilities.detach().cpu().numpy()
+    
+    def lime_bert(self, text: str) -> Tuple[Any, Dict[str, Any]]:
+        """
+        Explains the model's prediction using LIME.
 
-    def shap_analysis(self, text_list: list) -> shap.Explanation:
-        """
-        Computes SHAP values for the given list of texts.
-        
         Args:
-            text_list (list): List of text inputs.
-        
-        Returns:
-            shap.Explanation: SHAP values explanation.
-        """
-        explainer_bert = shap.Explainer(self.predict_shap, self.tokenizer, output_names=self.labels)
-        shap_values = explainer_bert(text_list)
-        return shap_values
+            text (str): The input text for explanation.
 
-    def compute_shap_statistics(self, shap_values: np.ndarray, class_name: str) -> pd.DataFrame:
-        """
-        Computes token-wise SHAP statistics for a given class.
-        
-        Args:
-            shap_values (np.ndarray): SHAP values array.
-            class_name (str): Class name for SHAP values.
-        
         Returns:
-            pd.DataFrame: DataFrame containing SHAP statistics.
+            Tuple[Any, Dict[str, Any]]: LIME explanation object and explanation data.
         """
-        shap_class_values = shap_values[:, :, class_name]
-        all_tokens = shap_class_values.data
-        all_shap_values = [s for s in shap_class_values.values]
-        token_shap_dict = {}
-        
-        for tokens, values in zip(all_tokens, all_shap_values):
-            for token, shap_value in zip(tokens, values):
-                token_shap_dict.setdefault(token, []).append(shap_value)
-        
-        token_stats = {
-            "Token": list(token_shap_dict.keys()),
-            "SHAP Mean": [np.mean(v) for v in token_shap_dict.values()],
-            "SHAP Sum": [np.sum(v) for v in token_shap_dict.values()],
-            "SHAP Kurtosis": [stats.kurtosis(v) for v in token_shap_dict.values()]
+        explainer = LimeTextExplainer(class_names=self.labels)
+        exp = explainer.explain_instance(text, self.predicts_lime, labels=(0, 1, 2))
+        lime_data = {
+            "text": text,
+            "explanation": {self.labels[label]: exp.as_list(label) for label in exp.available_labels}
         }
+        return exp, lime_data
+    
+    def ig_save_plot(self, fig: plt.Figure, save_dir: str, file_name: str) -> None:
+        """
+        Saves the given plot to a specified directory.
+
+        Args:
+            fig (plt.Figure): The figure to save.
+            save_dir (str): The directory where the figure should be saved.
+            file_name (str): The name of the saved file.
+        """
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, file_name)
+        fig.savefig(save_path)
+        plt.close(fig)
+        print(f"Visualization saved at {save_path}")
+    
+    def lime_plot(self, explainer: LimeTextExplainer, file_name: str) -> None:
+        """
+        Saves the LIME explanation plot.
+
+        Args:
+            explainer (LimeTextExplainer): The LIME explainer object.
+            file_name (str): The name of the saved file.
+        """
+        save_dir = os.path.join(self.config['results']['path'], "modelInterpreterPlot", "lime")
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, file_name)
+        explainer.save_to_file(save_path)
+        print("LIME plot is saved")
+    
+    def save_lime_json(self, lime_data: Dict[str, Any]) -> None:
+        """
+        Saves the LIME explanation data as a JSON file.
+
+        Args:
+            lime_data (Dict[str, Any]): The LIME explanation data to be saved.
+        """
+        filename = 'lime_text.json'
+        save_dir = os.path.join(self.config['results']['path'], "modelInterpreterPlot", "lime")
+        os.makedirs(save_dir, exist_ok=True)
+        save_json_path = os.path.join(save_dir, filename)
         
-        shap_df = pd.DataFrame(token_stats)
-        shap_df = shap_df.dropna(subset=['SHAP Kurtosis'])
-        shap_df = shap_df[shap_df['Token'].str.len() >= 3]
+        with open(save_json_path, 'w') as f:
+            json.dump(lime_data, f, indent=4)
+    
+    def shap_kurtosis_bar_plot(self, kurtosis_dataframe, class_name: str) -> None:
+        """
+        Plots and saves a bar plot of SHAP mean for tokens with the lowest SHAP Kurtosis.
+
+        Args:
+            kurtosis_dataframe (pd.DataFrame): DataFrame containing SHAP Kurtosis values.
+            class_name (str): The class name for the plot title and filename.
+        """
+        save_dir = os.path.join(self.config['results']['path'], "modelInterpreterPlot", "shap")
+        os.makedirs(save_dir, exist_ok=True)
+        df = kurtosis_dataframe.nsmallest(30, 'SHAP Kurtosis').sort_values(by="shap_mean", ascending=False)
         
-        return shap_df
+        sns.barplot(x=df['Token'], y=df["shap_mean"], color='blue')
+        plt.xlabel("Token")
+        plt.ylabel("SHAP Mean")
+        plt.title("Bar Plot of Top SHAP Mean for Tokens with 30 Lowest SHAP Kurtosis")
+        plt.xticks(rotation=90)
+        plt.savefig(os.path.join(save_dir, f"{class_name}_TopMeanLowKurtosisBar.png"))
+        print(f"SHAP TopMeanLowKurtosisBar for {class_name} class is saved")
+        plt.close()
+    
+    def shap_kurtosis_df(self, kurtosis_dataframe, label: str) -> None:
+        """
+        Saves the SHAP Kurtosis DataFrame as a CSV file.
+
+        Args:
+            kurtosis_dataframe (pd.DataFrame): DataFrame containing SHAP Kurtosis values.
+            label (str): Label for naming the output file.
+        """
+        save_dir = os.path.join(self.config['results']['path'], "modelInterpreterPlot", "shap")
+        file_name = f"{label}_shap_kurtosis.csv"
+        os.makedirs(save_dir, exist_ok=True)
+        file_path = os.path.join(save_dir, file_name)
+        kurtosis_dataframe.to_csv(file_path, index=False)
