@@ -1,138 +1,81 @@
 import os
-import json
-import torch
-import scipy.special as sp
-import matplotlib.pyplot as plt
-import seaborn as sns
-import numpy as np
-import torch.nn.functional as F
-from lime.lime_text import LimeTextExplainer
-from typing import Dict, Any, Tuple
+import pandas as pd
+import shap
 
 class ModelInterpreter:
-    def predicts_lime(self, text: str) -> np.ndarray:
+    def run_interpretability(self, input_text=None, labels=None, file=None):
         """
-        Generates probability predictions using the model for LIME.
-
-        Args:
-            text (str): The input text to be tokenized and processed.
-
-        Returns:
-            np.ndarray: The predicted probability distribution.
-        """
-        encoding = self.tokenizer(
-            text,
-            add_special_tokens=True,
-            max_length=128,
-            return_token_type_ids=True,
-            padding='max_length',
-            truncation=True,
-            return_attention_mask=True,
-            return_tensors='pt'
-        )
+        Runs interpretability analysis on the given text input or an uploaded file.
         
-        input_ids = encoding['input_ids'].to(self.device)
-        attention_mask = encoding['attention_mask'].to(self.device)
+        Args:
+            input_text (str, optional): The text input to analyze.
+            labels (list, optional): Class labels used for interpretation.
+            file (str, optional): Path to an Excel file containing text data.
+        """
+        text = []
         
-        with torch.no_grad():
-            logits = self.model(input_ids=input_ids, attention_mask=attention_mask).to(self.device)
-            probabilities = F.softmax(logits, dim=-1)
+        # Load text data from a file if provided
+        if file:
+            df = pd.read_excel(file)  # Read the Excel file into a DataFrame
+            df = df[:2]  # Use only the first two rows for interpretation
+            
+            for i in df.index:
+                text.append(df.iloc[i].text)  # Extract text from the DataFrame
+        else:
+            text = [[input_text]]  # Wrap input text in a list
         
-        return probabilities.detach().cpu().numpy()
-    
-    def lime_bert(self, text: str) -> Tuple[Any, Dict[str, Any]]:
-        """
-        Explains the model's prediction using LIME.
-
-        Args:
-            text (str): The input text for explanation.
-
-        Returns:
-            Tuple[Any, Dict[str, Any]]: LIME explanation object and explanation data.
-        """
-        explainer = LimeTextExplainer(class_names=self.labels)
-        exp = explainer.explain_instance(text, self.predicts_lime, labels=(0, 1, 2))
-        lime_data = {
-            "text": text,
-            "explanation": {self.labels[label]: exp.as_list(label) for label in exp.available_labels}
-        }
-        return exp, lime_data
-    
-    def ig_save_plot(self, fig: plt.Figure, save_dir: str, file_name: str) -> None:
-        """
-        Saves the given plot to a specified directory.
-
-        Args:
-            fig (plt.Figure): The figure to save.
-            save_dir (str): The directory where the figure should be saved.
-            file_name (str): The name of the saved file.
-        """
-        os.makedirs(save_dir, exist_ok=True)
-        save_path = os.path.join(save_dir, file_name)
-        fig.savefig(save_path)
-        plt.close(fig)
-        print(f"Visualization saved at {save_path}")
-    
-    def lime_plot(self, explainer: LimeTextExplainer, file_name: str) -> None:
-        """
-        Saves the LIME explanation plot.
-
-        Args:
-            explainer (LimeTextExplainer): The LIME explainer object.
-            file_name (str): The name of the saved file.
-        """
-        save_dir = os.path.join(self.config['results']['path'], "modelInterpreterPlot", "lime")
-        os.makedirs(save_dir, exist_ok=True)
-        save_path = os.path.join(save_dir, file_name)
-        explainer.save_to_file(save_path)
-        print("LIME plot is saved")
-    
-    def save_lime_json(self, lime_data: Dict[str, Any]) -> None:
-        """
-        Saves the LIME explanation data as a JSON file.
-
-        Args:
-            lime_data (Dict[str, Any]): The LIME explanation data to be saved.
-        """
-        filename = 'lime_text.json'
-        save_dir = os.path.join(self.config['results']['path'], "modelInterpreterPlot", "lime")
-        os.makedirs(save_dir, exist_ok=True)
-        save_json_path = os.path.join(save_dir, filename)
+        # Preprocess text (lemmatization, cleaning, etc.)
+        text = preprocess_and_lemmatize(text)
         
-        with open(save_json_path, 'w') as f:
-            json.dump(lime_data, f, indent=4)
-    
-    def shap_kurtosis_bar_plot(self, kurtosis_dataframe, class_name: str) -> None:
-        """
-        Plots and saves a bar plot of SHAP mean for tokens with the lowest SHAP Kurtosis.
-
-        Args:
-            kurtosis_dataframe (pd.DataFrame): DataFrame containing SHAP Kurtosis values.
-            class_name (str): The class name for the plot title and filename.
-        """
-        save_dir = os.path.join(self.config['results']['path'], "modelInterpreterPlot", "shap")
-        os.makedirs(save_dir, exist_ok=True)
-        df = kurtosis_dataframe.nsmallest(30, 'SHAP Kurtosis').sort_values(by="shap_mean", ascending=False)
+        # Compute SHAP values for interpretability
+        self.shap_values = self.shap(text)
         
-        sns.barplot(x=df['Token'], y=df["shap_mean"], color='blue')
-        plt.xlabel("Token")
-        plt.ylabel("SHAP Mean")
-        plt.title("Bar Plot of Top SHAP Mean for Tokens with 30 Lowest SHAP Kurtosis")
-        plt.xticks(rotation=90)
-        plt.savefig(os.path.join(save_dir, f"{class_name}_TopMeanLowKurtosisBar.png"))
-        print(f"SHAP TopMeanLowKurtosisBar for {class_name} class is saved")
-        plt.close()
-    
-    def shap_kurtosis_df(self, kurtosis_dataframe, label: str) -> None:
-        """
-        Saves the SHAP Kurtosis DataFrame as a CSV file.
-
-        Args:
-            kurtosis_dataframe (pd.DataFrame): DataFrame containing SHAP Kurtosis values.
-            label (str): Label for naming the output file.
-        """
-        save_dir = os.path.join(self.config['results']['path'], "modelInterpreterPlot", "shap")
-        file_name = f"{label}_shap_kurtosis.csv"
-        os.makedirs(save_dir, exist_ok=True)
-        file_path = os.path.join(save_dir, file_name)
-        kurtosis_dataframe.to_csv(file_path, index=False)
+        # Generate SHAP text plot
+        self.shap_text_plot(self.shap_values)
+        
+        # Compute statistics (e.g., kurtosis) for each class label
+        for i in range(len(self.labels)):
+            self.compute_shap_statistics(shap_values=self.shap_values, class_name=self.labels[i])
+            self.shap_save_plot(self.shap_values, class_name=self.labels[i])
+        
+        # Define directories for saving interpretability results
+        save_dir = os.path.join(self.config['results']['path'], "modelInterpreterPlot")
+        captum_dir = os.path.join(save_dir, "captum")
+        trans_dir = os.path.join(save_dir, "transformer_inter")
+        
+        attributions_dicts = []  # Store attribution results
+        explanations = []  # Store LIME explanations
+        
+        # Generate interpretability plots for each text sample
+        for i in range(len(text)):
+            
+            # Generate attribution visualization using Integrated Gradients
+            fig, self.attributions_dict = self.interpreted_text(text=str(cleanData(text[i])))
+            file_name = f"lg{i}.html"
+            self.ig_save_plot(fig, captum_dir, file_name)
+            
+            # Generate Transformer-based interpretability visualization
+            fig, word_imp_df = self.transformers_visual(text=str(text[i]))
+            file_name = f"transformer_int{i}.png"
+            self.word_imp_df(word_imp_df, trans_dir, file_name)
+            
+            # Store word importance values in a dictionary
+            word_imp_df_dict = dict(zip(word_imp_df['word'], word_imp_df['Importance']))
+            self.attributions_dict["word importance"] = word_imp_df_dict
+            
+            attributions_dicts.append(self.attributions_dict)
+            
+            # Save Transformer visualization as an HTML file
+            file_name = f"transformer_int{i}.html"
+            self.ig_save_plot(fig, trans_dir, file_name)
+            
+            # Apply LIME for interpretability
+            self.lime_value, limedata = self.lime_bert(str(cleanData(text[i])))
+            explanations.append(limedata)
+            
+            # Save LIME visualization
+            file_name = f"limetest{i}.html"
+            self.lime_plot(self.lime_value, file_name)
+        
+        # Save all attributions as a JSON file for later analysis
+        self.save_mi_json(attributions_json=attributions_dicts)
