@@ -52,7 +52,75 @@ class ModelInterpreter:
             # Generate attribution visualization using Integrated Gradients
             fig, self.attributions_dict = self.interpreted_text(text=str(cleanData(text[i])))
             file_name = f"lg{i}.html"
-            self.ig_save_plot(fig, captum_dir, file_name)
+            selfHere’s a one-pager document for your sprint review:
+
+
+---
+
+GLEAM GenAl Project – EA Playbook Sprint Review
+
+Overview
+
+As part of the GLEAM GenAl Project, an Enterprise Architecture (EA) Playbook has been created to provide a comprehensive solution overview. This document serves as a structured reference for key architectural aspects, ensuring alignment with business goals and technical requirements.
+
+EA Playbook Components
+
+1. Business Architecture
+
+Defines business goals, value propositions, and key stakeholders.
+
+Outlines how the GLEAM solution aligns with organizational strategy.
+
+
+
+2. Detailed Design
+
+Specifies technical stack, architecture diagrams, and workflows.
+
+Covers key components, data flow, and integration points.
+
+
+
+3. Information Architecture
+
+Details data models, schemas, and governance policies.
+
+Ensures efficient data storage, retrieval, and processing.
+
+
+
+4. Operational Architecture
+
+Defines deployment strategy, scalability, and performance considerations.
+
+Includes monitoring, logging, and incident management.
+
+
+
+5. Security Architecture
+
+Identifies security frameworks, access controls, and compliance standards.
+
+Covers data protection, encryption, and risk mitigation strategies.
+
+
+
+
+Next Steps
+
+Upload to Git Repository: The documentation is prepared for CTO review.
+
+Sprint Alignment: This update is included in the detailed sprint review for visibility and feedback.
+
+Feedback Incorporation: Any insights from the CTO and stakeholders will be integrated into the next iteration.
+
+
+
+---
+
+Would you like any modifications or additional details?
+
+.ig_save_plot(fig, captum_dir, file_name)
             
             # Generate Transformer-based interpretability visualization
             fig, word_imp_df = self.transformers_visual(text=str(text[i]))
