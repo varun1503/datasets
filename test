@@ -1,149 +1,45 @@
 import os
-import pandas as pd
-import shap
+import logging
+from typing import Dict, List, Any
+from exceptions.loader import DataLoaderError  # Ensure correct import for exceptions
 
-class ModelInterpreter:
-    def run_interpretability(self, input_text=None, labels=None, file=None):
-        """
-        Runs interpretability analysis on the given text input or an uploaded file.
-        
-        Args:
-            input_text (str, optional): The text input to analyze.
-            labels (list, optional): Class labels used for interpretation.
-            file (str, optional): Path to an Excel file containing text data.
-        """
-        text = []
-        
-        # Load text data from a file if provided
-        if file:
-            df = pd.read_excel(file)  # Read the Excel file into a DataFrame
-            df = df[:2]  # Use only the first two rows for interpretation
-            
-            for i in df.index:
-                text.append(df.iloc[i].text)  # Extract text from the DataFrame
+logger = logging.getLogger(__name__)
+
+def load_document(path: str) -> Dict[str, List[Any]]:
+    """Load documents from a specified path (file or folder)."""
+    if not path:
+        logger.error("Data path is not specified.")
+        raise DataLoaderError("Data path must be provided.")
+
+    data = {}
+
+    try:
+        if os.path.isdir(path):  # If the path is a folder
+            logger.info(f"Loading documents from folder: {path}")
+            for filename in sorted(os.listdir(path), reverse=True):
+                file_path = os.path.join(path, filename)
+                if filename.endswith(".pdf"):
+                    data[filename] = _load_pdf(file_path)
+
+        elif os.path.isfile(path) and path.endswith(".pdf"):  # If the path is a file
+            logger.info(f"Loading single document: {path}")
+            data[os.path.basename(path)] = _load_pdf(path)
+
         else:
-            text = [[input_text]]  # Wrap input text in a list
-        
-        # Preprocess text (lemmatization, cleaning, etc.)
-        text = preprocess_and_lemmatize(text)
-        
-        # Compute SHAP values for interpretability
-        self.shap_values = self.shap(text)
-        
-        # Generate SHAP text plot
-        self.shap_text_plot(self.shap_values)
-        
-        # Compute statistics (e.g., kurtosis) for each class label
-        for i in range(len(self.labels)):
-            self.compute_shap_statistics(shap_values=self.shap_values, class_name=self.labels[i])
-            self.shap_save_plot(self.shap_values, class_name=self.labels[i])
-        
-        # Define directories for saving interpretability results
-        save_dir = os.path.join(self.config['results']['path'], "modelInterpreterPlot")
-        captum_dir = os.path.join(save_dir, "captum")
-        trans_dir = os.path.join(save_dir, "transformer_inter")
-        
-        attributions_dicts = []  # Store attribution results
-        explanations = []  # Store LIME explanations
-        
-        # Generate interpretability plots for each text sample
-        for i in range(len(text)):
-            
-            # Generate attribution visualization using Integrated Gradients
-            fig, self.attributions_dict = self.interpreted_text(text=str(cleanData(text[i])))
-            file_name = f"lg{i}.html"
-            selfHere’s a one-pager document for your sprint review:
+            logger.warning(f"Unsupported file type or invalid path: {path}")
 
+        return data
 
----
+    except Exception as e:
+        logger.error(f"Error in document loading: {e}")
+        raise DataLoaderError(f"Failed to load documents: {str(e)}")
 
-GLEAM GenAl Project – EA Playbook Sprint Review
-
-Overview
-
-As part of the GLEAM GenAl Project, an Enterprise Architecture (EA) Playbook has been created to provide a comprehensive solution overview. This document serves as a structured reference for key architectural aspects, ensuring alignment with business goals and technical requirements.
-
-EA Playbook Components
-
-1. Business Architecture
-
-Defines business goals, value propositions, and key stakeholders.
-
-Outlines how the GLEAM solution aligns with organizational strategy.
-
-
-
-2. Detailed Design
-
-Specifies technical stack, architecture diagrams, and workflows.
-
-Covers key components, data flow, and integration points.
-
-
-
-3. Information Architecture
-
-Details data models, schemas, and governance policies.
-
-Ensures efficient data storage, retrieval, and processing.
-
-
-
-4. Operational Architecture
-
-Defines deployment strategy, scalability, and performance considerations.
-
-Includes monitoring, logging, and incident management.
-
-
-
-5. Security Architecture
-
-Identifies security frameworks, access controls, and compliance standards.
-
-Covers data protection, encryption, and risk mitigation strategies.
-
-
-
-
-Next Steps
-
-Upload to Git Repository: The documentation is prepared for CTO review.
-
-Sprint Alignment: This update is included in the detailed sprint review for visibility and feedback.
-
-Feedback Incorporation: Any insights from the CTO and stakeholders will be integrated into the next iteration.
-
-
-
----
-
-Would you like any modifications or additional details?
-
-.ig_save_plot(fig, captum_dir, file_name)
-            
-            # Generate Transformer-based interpretability visualization
-            fig, word_imp_df = self.transformers_visual(text=str(text[i]))
-            file_name = f"transformer_int{i}.png"
-            self.word_imp_df(word_imp_df, trans_dir, file_name)
-            
-            # Store word importance values in a dictionary
-            word_imp_df_dict = dict(zip(word_imp_df['word'], word_imp_df['Importance']))
-            self.attributions_dict["word importance"] = word_imp_df_dict
-            
-            attributions_dicts.append(self.attributions_dict)
-            
-            # Save Transformer visualization as an HTML file
-            file_name = f"transformer_int{i}.html"
-            self.ig_save_plot(fig, trans_dir, file_name)
-            
-            # Apply LIME for interpretability
-            self.lime_value, limedata = self.lime_bert(str(cleanData(text[i])))
-            explanations.append(limedata)
-            
-            # Save LIME visualization
-            file_name = f"limetest{i}.html"
-            self.lime_plot(self.lime_value, file_name)
-        
-        # Save all attributions as a JSON file for later analysis
-        self.save_mi_json(attributions_json=attributions_dicts)
+def _load_pdf(file_path: str) -> List[str]:
+    """Load a PDF file and return its pages as a list of text (dummy implementation)."""
+    try:
+        logger.info(f"Processing PDF: {file_path}")
+        # Placeholder logic for PDF extraction
+        return [f"Page {i+1} content of {file_path}" for i in range(3)]  # Mocking 3 pages
+    except Exception as e:
+        logger.error(f"Failed to load PDF {file_path}: {e}")
+        raise DataLoaderError(f"Error processing PDF: {file_path}")
