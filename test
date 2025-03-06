@@ -1,35 +1,102 @@
-from typing import List, Dict, Any
 import logging
+import faiss
+import pickle
+import os
+import uuid
+from typing import List, Dict, Any, Optional, Tuple
+from langchain_community.vectorstores.faiss import FAISS
+from langchain_community.docstore.in_memory import InMemoryDocstore
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from safechain.lcel.model import model
+from app.exceptions.exceptions_vectorstore import IndexCreationError, IndexLoadError
+import json
+import nest_asyncio
+
+nest_asyncio.apply()
 
 logger = logging.getLogger(__name__)
 
-class RecursiveChunker(BaseChunker):
-    """Implements recursive text splitting strategy for a list of documents."""
+class DocumentManager:
+    """Manages document vectorization and storage."""
 
-    def __init__(self, chunk_size: int = 1024, chunk_overlap: int = 256):
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
-        self.splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap
-        )
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
+        self.embeddings = model("4")  # Ensure this model supports embedding generation
+        self.vector_db = None
+        self.docstore = None
+        self.RETRIEVER_TYPE = ['Vanilla', 'Auto_merging'][1]
+        self._initialize_vector_store()
 
-    def create_chunks(self, documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Splits each document's content into chunks and retains metadata."""
-        all_chunks = []
+    def _embedding(self, text: str) -> List[float]:
+        """Generate embedding for a given text."""
+        embedding = self.embeddings._get_len_safe_embeddings([text], engine="text-embedding")
+        return embedding[0]  # Ensure we return a single embedding instead of a list of lists
+
+    def _initialize_vector_store(self) -> None:
+        """Initialize the vector store."""
         try:
-            for doc in documents:
-                text = doc.get("page_content", "")
-                metadata = doc.get("metadata", {})
-                chunks = self.splitter.split_text(text)
-                
-                for chunk in chunks:
-                    all_chunks.append({
-                        "content": chunk,
-                        "metadata": {**metadata, "chunk_size": self.chunk_size}
-                    })
+            embed_test = self._embedding("test the embedding model")
+            self.index = faiss.IndexFlatL2(len(embed_test))
+            self.vector_db = FAISS(
+                embedding_function=self._embedding,
+                index=self.index,
+                docstore=InMemoryDocstore(),
+                index_to_docstore_id={}
+            )
+            logger.info("Vector store initialized successfully")
         except Exception as e:
-            logger.error(f"Error in recursive chunking: {e}")
+            logger.error(f"Error initializing vector store: {e}")
+            raise IndexCreationError("Failed to initialize vector store")
+
+    def format_data(self, docs: List[Dict[str, Any]]) -> Tuple[List[str], List[Dict[str, Any]], List[str]]:
+        """Format data before adding to the vector store."""
+        ids = [doc.get('id', str(uuid.uuid4())) for doc in docs]
+        texts = [doc['content'] for doc in docs if 'content' in doc]
+        metas = [doc['metadata'] for doc in docs if 'metadata' in doc]
+
+        # Debugging: Ensure all lists have the same length
+        print(f"Texts count: {len(texts)}, Metadatas count: {len(metas)}, IDs count: {len(ids)}")
+
+        if len(texts) != len(metas) or len(texts) != len(ids):
+            raise ValueError(f"Mismatch in document data: texts={len(texts)}, metas={len(metas)}, ids={len(ids)}")
+
+        return texts, metas, ids
+
+    def add_docs(self, docs: List[Dict[str, Any]], embeddings: Optional[List[Any]] = None) -> None:
+        """Add documents to the vector store."""
+        try:
+            store_type = self.config['vectorstore']['storename']
+
+            # Validate documents
+            for doc in docs:
+                if 'content' not in doc or 'metadata' not in doc:
+                    raise ValueError(f"Invalid document format: {doc}")
+
+            if embeddings is None:
+                embeddings = [self._embedding(doc["content"]) for doc in docs]
+
+            texts, metas, ids = self.format_data(docs)
+
+            if store_type == 'faiss':
+                self._add_to_faiss(texts, metas, ids, embeddings)
+            elif store_type == 'datastax':
+                self._add_to_datastax(docs, embeddings)
+
+            logger.info(f"Successfully added {len(docs)} documents to {store_type}")
+
+        except Exception as e:
+            logger.error(f"Error adding documents to vector store: {e}")
             raise
 
-        return all_chunks
+    def _add_to_faiss(self, texts: List[str], metas: List[Dict[str, Any]], ids: List[str], embeddings: List[Any]) -> None:
+        """Add documents to FAISS vector store."""
+        try:
+            self.vector_db.add_embeddings(
+                text_embeddings=list(zip(texts, embeddings)),
+                metadatas=metas,
+                ids=ids
+            )
+            logger.info(f"Successfully added {len(texts)} documents to FAISS")
+        except Exception as e:
+            logger.error(f"Error adding documents to FAISS: {e}")
+            raise
