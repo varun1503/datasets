@@ -1,54 +1,133 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-from typing import List
-from langchain.schema import Document
+Enhancing FAISS Persistence for Reuse
 
-app = FastAPI()
+Your requirement is:
 
-# Simulated document retrieval function (Replace with actual retrieval logic)
-def retrieve_documents(query: str, top_k: int) -> List[Document]:
-    """
-    Retrieve relevant documents based on the query.
-    Replace this with actual retrieval logic.
-    """
-    return [
-        Document(
-            metadata={"source": "rag_data.pdf", "page": 9, "file_path": "C:\\Users\\vvaishy\\Documents\\hpt_rasa\\data\\rag_data.pdf"},
-            page_content="Certainty around visa rules into the future, which I think is a benefit..."
-        ),
-        Document(
-            metadata={"source": "rag_data.pdf", "page": 10, "file_path": "C:\\Users\\vvaishy\\Documents\\hpt_rasa\\data\\rag_data.pdf"},
-            page_content="Barclays Emerging Payments Forum provides insights on..."
-        )
-    ][:top_k]  # Return only the top-K documents
+1. Reuse the FAISS index if it already exists (i.e., don't reinitialize it every time).
 
-# Define Pydantic Response Model
-class DocumentModel(BaseModel):
-    source: str
-    page: int
-    file_path: str
-    content: str
 
-class RetrieveResponse(BaseModel):
-    retrieved_documents: List[DocumentModel]
+2. Allow uploading new documents dynamically while keeping the old ones.
 
-@app.post("/retrieve", response_model=RetrieveResponse)
-def retrieve_endpoint(query: str, top_k: int = 5):
-    """
-    API endpoint to retrieve relevant documents based on a query.
-    """
-    # Get retrieved documents
-    documents = retrieve_documents(query, top_k)
 
-    # Format documents into response structure
-    formatted_documents = [
-        DocumentModel(
-            source=doc.metadata.get("source", "Unknown"),
-            page=doc.metadata.get("page", -1),
-            file_path=doc.metadata.get("file_path", ""),
-            content=doc.page_content
-        )
-        for doc in documents
-    ]
+3. Enable API calls to use previously stored data without losing it.
 
-    return RetrieveResponse(retrieved_documents=formatted_documents)
+
+
+
+---
+
+🔹 Changes Applied
+
+✅ Load FAISS index from disk if it exists
+✅ Save FAISS index after adding new documents
+✅ Allow API to use the previously stored FAISS data
+✅ Ensure thread safety using a Singleton Pattern
+
+
+---
+
+🔹 Updated index.py
+
+import os
+import uuid
+import faiss
+import pickle
+import logging
+from typing import List, Dict, Any, Tuple, Optional
+from langchain.vectorstores import FAISS
+from langchain.docstore import InMemoryDocstore
+
+logger = logging.getLogger(__name__)
+
+FAISS_INDEX_PATH = "faiss_index.bin"  # Path to save/load FAISS index
+METADATA_PATH = "faiss_metadata.pkl"  # Path to save/load document metadata
+
+class DocumentManager:
+    """Manages document vectorization and storage."""
+
+    _instance = None  # Singleton instance of FAISS index
+
+    def __new__(cls, config: Dict[str, Any]):
+        if cls._instance is None:
+            cls._instance = super(DocumentManager, cls).__new__(cls)
+            cls._instance._initialize(config)
+        return cls._instance
+
+    def _initialize(self, config: Dict[str, Any]):
+        self.config = config
+        self.embeddings = model("4")  # Ensure this model supports embedding generation
+        self.vector_db = None
+        self.docstore = InMemoryDocstore()
+        self.index_to_docstore_id = {}
+
+        # Load existing FAISS index if available
+        self._load_faiss_index()
+
+    def _embedding(self, text: str) -> List[float]:
+        """Generate embeddings for a given text."""
+        try:
+            embedding = self.embeddings._get_len_safe_embeddings([text], engine="text-embedding")
+            return embedding[0]  # Ensure returning a single embedding
+        except Exception as e:
+            logger.error(f"Error generating embeddings: {e}")
+            raise RuntimeError("Failed to generate embeddings")
+
+    def _load_faiss_index(self):
+        """Load FAISS index and metadata if they exist, otherwise initialize a new index."""
+        if os.path.exists(FAISS_INDEX_PATH) and os.path.exists(METADATA_PATH):
+            try:
+                self.index = faiss.read_index(FAISS_INDEX_PATH)
+                with open(METADATA_PATH, "rb") as f:
+                    metadata = pickle.load(f)
+                self.index_to_docstore_id = metadata.get("index_to_docstore_id", {})
+                self.docstore = metadata.get("docstore", InMemoryDocstore())
+
+                self.vector_db = FAISS(
+                    embedding_function=self._embedding,
+                    index=self.index,
+                    docstore=self.docstore,
+                    index_to_docstore_id=self.index_to_docstore_id
+                )
+                logger.info("Loaded existing FAISS index from disk.")
+
+            except Exception as e:
+                logger.error(f"Error loading FAISS index: {e}")
+                self._initialize_new_faiss()
+        else:
+            self._initialize_new_faiss()
+
+    def _initialize_new_faiss(self):
+        """Initialize a new FAISS index."""
+        try:
+            embed_test = self._embedding("test the embedding model")
+            self.index = faiss.IndexFlatL2(len(embed_test))
+
+            self.vector_db = FAISS(
+                embedding_function=self._embedding,
+                index=self.index,
+                docstore=self.docstore,
+                index_to_docstore_id=self.index_to_docstore_id
+            )
+            logger.info("Initialized new FAISS vector store.")
+
+        except Exception as e:
+            logger.error(f"Error initializing FAISS vector store: {e}")
+            raise RuntimeError("Failed to initialize FAISS vector store")
+
+    def _save_faiss_index(self):
+        """Save the FAISS index and metadata to disk."""
+        try:
+            faiss.write_index(self.index, FAISS_INDEX_PATH)
+            metadata = {
+                "index_to_docstore_id": self.index_to_docstore_id,
+                "docstore": self.docstore
+            }
+            with open(METADATA_PATH, "wb") as f:
+                pickle.dump(metadata, f)
+            logger.info("FAISS index and metadata saved successfully.")
+        except Exception as e:
+            logger.error(f"Error saving FAISS index: {e}")
+
+    def format_data(self, docs: List[Dict[str, Any]]) -> Tuple[List[str], List[Dict[str, Any]], List[str]]:
+        """Format data before adding to the vector store."""
+        ids = [doc.get
+
