@@ -17,7 +17,7 @@ Your requirement is:
 
 🔹 Changes Applied
 
-✅ Load FAISS index from disk if it exists
+✅ Load FAISS index from isk if it exists
 ✅ Save FAISS index after adding new documents
 ✅ Allow API to use the previously stored FAISS data
 ✅ Ensure thread safety using a Singleton Pattern
