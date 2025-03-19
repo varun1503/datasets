@@ -1,133 +1,83 @@
-Enhancing FAISS Persistence for Reuse
-
-Your requirement is:
-
-1. Reuse the FAISS index if it already exists (i.e., don't reinitialize it every time).
+If you want to remove "page" from the metadata and ensure all metadata is the same across chunks, you can modify the create_chunks method like this:
 
 
-2. Allow uploading new documents dynamically while keeping the old ones.
+---
+
+Updated create_chunks Method (Without "page" in Metadata)
+
+def create_chunks(self, documents: List[dict]) -> List[dict]:
+    """Concatenates all text and applies semantic chunking while ensuring uniform metadata."""
+    all_chunks = []
+    chunking_type = "semantic_chunking"
+
+    # Append all page content into one large text
+    full_text = " ".join(doc.get("page_content", "") for doc in documents)
+
+    # Merge metadata, excluding 'page' if it exists
+    combined_metadata = {}
+    for doc in documents:
+        metadata = doc.get("metadata", {})
+        filtered_metadata = {k: v for k, v in metadata.items() if k != "page"}  # Remove 'page' key
+        combined_metadata.update(filtered_metadata)  # Merge remaining metadata
+
+    # Perform semantic chunking on the entire text
+    chunks = self.semantic_splitter(full_text)
+
+    # Store chunks with uniform metadata
+    for chunk in chunks:
+        all_chunks.append({
+            "content": chunk,
+            "metadata": {**combined_metadata, "threshold": self.threshold, "chunking_type": chunking_type}
+        })
+
+    return all_chunks
 
 
-3. Enable API calls to use previously stored data without losing it.
+---
+
+Key Fixes
+
+1. Removes "page" from metadata using {k: v for k, v in metadata.items() if k != "page"}
+
+
+2. Ensures all chunks have uniform metadata
+
+
+3. Concatenates all text and performs chunking on it
 
 
 
 
 ---
 
-🔹 Changes Applied
+Usage Example
 
-✅ Load FAISS index from isk if it exists
-✅ Save FAISS index after adding new documents
-✅ Allow API to use the previously stored FAISS data
-✅ Ensure thread safety using a Singleton Pattern
+documents = [
+    {"page_content": "This is the first document.", "metadata": {"source": "doc1", "page": 1}},
+    {"page_content": "This is the second document.", "metadata": {"source": "doc2", "page": 2}}
+]
+
+chunks = chunker.create_chunks(documents)
+
+for chunk in chunks:
+    print(chunk)
 
 
 ---
 
-🔹 Updated index.py
+Expected Output (Example)
 
-import os
-import uuid
-import faiss
-import pickle
-import logging
-from typing import List, Dict, Any, Tuple, Optional
-from langchain.vectorstores import FAISS
-from langchain.docstore import InMemoryDocstore
+{
+    "content": "This is the first document.",
+    "metadata": {"source": "doc1", "source": "doc2", "threshold": 90, "chunking_type": "semantic_chunking"}
+}
+{
+    "content": "This is the second document.",
+    "metadata": {"source": "doc1", "source": "doc2", "threshold": 90, "chunking_type": "semantic_chunking"}
+}
 
-logger = logging.getLogger(__name__)
 
-FAISS_INDEX_PATH = "faiss_index.bin"  # Path to save/load FAISS index
-METADATA_PATH = "faiss_metadata.pkl"  # Path to save/load document metadata
+---
 
-class DocumentManager:
-    """Manages document vectorization and storage."""
-
-    _instance = None  # Singleton instance of FAISS index
-
-    def __new__(cls, config: Dict[str, Any]):
-        if cls._instance is None:
-            cls._instance = super(DocumentManager, cls).__new__(cls)
-            cls._instance._initialize(config)
-        return cls._instance
-
-    def _initialize(self, config: Dict[str, Any]):
-        self.config = config
-        self.embeddings = model("4")  # Ensure this model supports embedding generation
-        self.vector_db = None
-        self.docstore = InMemoryDocstore()
-        self.index_to_docstore_id = {}
-
-        # Load existing FAISS index if available
-        self._load_faiss_index()
-
-    def _embedding(self, text: str) -> List[float]:
-        """Generate embeddings for a given text."""
-        try:
-            embedding = self.embeddings._get_len_safe_embeddings([text], engine="text-embedding")
-            return embedding[0]  # Ensure returning a single embedding
-        except Exception as e:
-            logger.error(f"Error generating embeddings: {e}")
-            raise RuntimeError("Failed to generate embeddings")
-
-    def _load_faiss_index(self):
-        """Load FAISS index and metadata if they exist, otherwise initialize a new index."""
-        if os.path.exists(FAISS_INDEX_PATH) and os.path.exists(METADATA_PATH):
-            try:
-                self.index = faiss.read_index(FAISS_INDEX_PATH)
-                with open(METADATA_PATH, "rb") as f:
-                    metadata = pickle.load(f)
-                self.index_to_docstore_id = metadata.get("index_to_docstore_id", {})
-                self.docstore = metadata.get("docstore", InMemoryDocstore())
-
-                self.vector_db = FAISS(
-                    embedding_function=self._embedding,
-                    index=self.index,
-                    docstore=self.docstore,
-                    index_to_docstore_id=self.index_to_docstore_id
-                )
-                logger.info("Loaded existing FAISS index from disk.")
-
-            except Exception as e:
-                logger.error(f"Error loading FAISS index: {e}")
-                self._initialize_new_faiss()
-        else:
-            self._initialize_new_faiss()
-
-    def _initialize_new_faiss(self):
-        """Initialize a new FAISS index."""
-        try:
-            embed_test = self._embedding("test the embedding model")
-            self.index = faiss.IndexFlatL2(len(embed_test))
-
-            self.vector_db = FAISS(
-                embedding_function=self._embedding,
-                index=self.index,
-                docstore=self.docstore,
-                index_to_docstore_id=self.index_to_docstore_id
-            )
-            logger.info("Initialized new FAISS vector store.")
-
-        except Exception as e:
-            logger.error(f"Error initializing FAISS vector store: {e}")
-            raise RuntimeError("Failed to initialize FAISS vector store")
-
-    def _save_faiss_index(self):
-        """Save the FAISS index and metadata to disk."""
-        try:
-            faiss.write_index(self.index, FAISS_INDEX_PATH)
-            metadata = {
-                "index_to_docstore_id": self.index_to_docstore_id,
-                "docstore": self.docstore
-            }
-            with open(METADATA_PATH, "wb") as f:
-                pickle.dump(metadata, f)
-            logger.info("FAISS index and metadata saved successfully.")
-        except Exception as e:
-            logger.error(f"Error saving FAISS index: {e}")
-
-    def format_data(self, docs: List[Dict[str, Any]]) -> Tuple[List[str], List[Dict[str, Any]], List[str]]:
-        """Format data before adding to the vector store."""
-        ids = [doc.get
+Now, all metadata is uniform, and "page" is removed from it. Let me know if you need any more adjustments!
 
