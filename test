@@ -1,20 +1,31 @@
 import pandas as pd
+import random
 
-# Load the main dataset
-main_df = pd.read_excel("main_data.xlsx")
+# Load Excel file
+file_path = "/mnt/data/file-FfeaY9wapGwwm7rFpQczec"  # Update if needed
+df = pd.read_excel(file_path)
 
-# Ensure we have at least 200 rows
-if len(main_df) < 200:
-    raise ValueError("Not enough rows in main_data.xlsx. At least 200 required.")
+# Define words for perturbation
+perturb_words = ['flight', 'luxury', 'credit card', 'bus']
 
-# Randomly sample 100 rows for reference data
-reference_df = main_df.sample(n=100, random_state=42)
+# Function to inject words into text
+def perturb_text(text, num_words=1):
+    words = text.split()  # Split text into words
+    if len(words) < 2:
+        return text  # Skip short text
 
-# Select another 100 rows that are not in reference data
-current_df = main_df.drop(reference_df.index).sample(n=100, random_state=42)
+    for _ in range(num_words):
+        insert_idx = random.randint(0, len(words) - 1)  # Choose random position
+        new_word = random.choice(perturb_words)  # Choose random perturb word
+        words.insert(insert_idx, new_word)  # Insert word at random position
 
-# Save to new Excel files
-reference_df.to_excel("reference_data.xlsx", index=False)
-current_df.to_excel("current_data.xlsx", index=False)
+    return " ".join(words)  # Reconstruct text
 
-print("Files saved successfully.")
+# Apply perturbation
+df["perturbed_text"] = df["text"].apply(lambda x: perturb_text(str(x), num_words=2))
+
+# Save to a new Excel file
+output_path = "/mnt/data/perturbed_data.xlsx"
+df.to_excel(output_path, index=False)
+
+print(f"Perturbed data saved to {output_path}")
