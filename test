@@ -1,32 +1,92 @@
-Understanding Cohen's H in Feature Drift Analysis
+Understanding Your Code: Isolation Forest for Drift Detection
 
-Cohen's H is a statistical measure that quantifies the difference between two proportions. It is often used in NLP and machine learning to detect feature drift, where the distribution of features (such as words in text data) changes over time.
+Your code is using Isolation Forest to detect outliers (potential drift) in text embeddings and TF-IDF to analyze keyword importance for the detected outliers.
 
-Formula for Cohen’s H
+Key Components of the Code
 
-h = 2 \times (\arcsin(\sqrt{P}) - \arcsin(\sqrt{Q}))
+1. isolationForestInstance(self)
 
-Where:
+Initializes an Isolation Forest model with 20% contamination (contamination=0.2), meaning it assumes 20% of the data points could be outliers.
 
- is the proportion of a keyword in the test dataset
-
- is the proportion of a keyword in the training dataset
+random_state=42 ensures reproducibility.
 
 
-Interpreting Cohen’s H Values
 
-Cohen’s H follows a standard scale to determine drift significance:
+2. isolationforest(self, reference_embedding, current_embedding)
 
-In your implementation, drift is marked "Yes" if , meaning there is a noticeable shift in keyword distribution between the training and test datasets.
+Trains the Isolation Forest on reference embeddings (assumed to be from training data).
 
-How to Use Cohen’s H for TF-IDF Feature Drift?
+Uses the trained model to predict outliers in the current embeddings (test data).
 
-If Cohen's H is low (<0.2), the keyword appears with similar frequency in both training and test data, meaning no significant drift.
+Stores predictions:
 
-If Cohen's H is high (>0.2), the keyword is used differently in test data compared to training data, indicating a drift.
+1 (blue) → Normal instance
 
-The confidence interval helps quantify the uncertainty in the Cohen's H estimation.
+-1 (red) → Outlier (possible drift)
 
 
-Would you like help fixing the syntax errors in your code?
+
+
+3. outliers_sentance(self)
+
+Finds indices of outliers using np.where(self.prediction == -1).
+
+Retrieves the corresponding sentences from the current dataset (self.current_data).
+
+Returns a DataFrame containing outlier indices and sentences.
+
+
+
+4. outlier_sentance_tfidf(self)
+
+Extracts TF-IDF values for each detected outlier sentence.
+
+Retrieves important words (features) using self.tfidf_vectorizer.get_feature_names_out().
+
+Sorts words by TF-IDF values (importance) to highlight what contributes to drift.
+
+
+
+
+
+---
+
+How Does This Detect Drift?
+
+1. Using Isolation Forest for Anomaly Detection
+
+Isolation Forest works by randomly splitting data and isolating points that behave differently (e.g., rare word patterns in test data).
+
+If a sentence has unusual embeddings (different structure, vocabulary, or context), it is labeled as an outlier (-1).
+
+
+2. Using TF-IDF to Analyze Drifted Features
+
+Once outlier sentences are found, their TF-IDF values are analyzed.
+
+High TF-IDF scores indicate new or dominant words in outlier sentences.
+
+If the important words in outliers do not match training data, it suggests drift in topic, terminology, or style.
+
+
+
+---
+
+Example Scenario
+
+Imagine your training dataset (reference) contains business news, while your test dataset (current) has entertainment news.
+
+Step 1: Isolation Forest finds some sentences from the test set that are significantly different from training data (e.g., "movie," "celebrity").
+
+Step 2: TF-IDF shows that new words like "actor," "box office," and "film" have high importance.
+
+Step 3: You confirm that these words did not appear in training data, indicating a topic shift (drift).
+
+
+
+---
+
+Improvements Needed in Your Code
+
+Your code has syntax errors (e.g., incorrect assignments, missing parentheses, and incorrect operators). Would you like me to fix it and optimize it for better performance?
 
