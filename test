@@ -8,24 +8,27 @@ df = pd.read_excel(file_path)
 # Define words for perturbation
 perturb_words = ['flight', 'luxury', 'credit card', 'bus']
 
-# Function to inject words into text
-def perturb_text(text, num_words=1):
+# Function to inject words based on percentage
+def perturb_text(text, perc=50):
     words = text.split()  # Split text into words
     if len(words) < 2:
         return text  # Skip short text
 
-    for _ in range(num_words):
+    num_words_to_add = max(1, int(len(words) * (perc / 100.0)))  # Compute words to add
+
+    for _ in range(num_words_to_add):
         insert_idx = random.randint(0, len(words) - 1)  # Choose random position
         new_word = random.choice(perturb_words)  # Choose random perturb word
         words.insert(insert_idx, new_word)  # Insert word at random position
 
     return " ".join(words)  # Reconstruct text
 
-# Apply perturbation
-df["perturbed_text"] = df["text"].apply(lambda x: perturb_text(str(x), num_words=2))
+# Apply 50% perturbation
+perturbation_percent = 50  # Set to 50% perturbation
+df["perturbed_text"] = df["text"].apply(lambda x: perturb_text(str(x), perc=perturbation_percent))
 
 # Save to a new Excel file
-output_path = "/mnt/data/perturbed_data.xlsx"
+output_path = "/mnt/data/perturbed_data_50percent.xlsx"
 df.to_excel(output_path, index=False)
 
 print(f"Perturbed data saved to {output_path}")
