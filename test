@@ -1,34 +1,32 @@
-import pandas as pd
-import random
+Understanding Cohen's H in Feature Drift Analysis
 
-# Load Excel file
-file_path = "/mnt/data/file-FfeaY9wapGwwm7rFpQczec"  # Update if needed
-df = pd.read_excel(file_path)
+Cohen's H is a statistical measure that quantifies the difference between two proportions. It is often used in NLP and machine learning to detect feature drift, where the distribution of features (such as words in text data) changes over time.
 
-# Custom words for perturbation (Replace these with your words)
-perturb_words = ['apple', 'banana', 'chocolate', 'laptop', 'holiday']  # Change these words
+Formula for Cohen’s H
 
-# Function to inject multiple different words based on percentage
-def perturb_text(text, perc=50):
-    words = text.split()  # Split text into words
-    if len(words) < 2:
-        return text  # Skip short text
+h = 2 \times (\arcsin(\sqrt{P}) - \arcsin(\sqrt{Q}))
 
-    num_words_to_add = max(1, int(len(words) * (perc / 100.0)))  # Compute words to add
-    words_to_insert = random.choices(perturb_words, k=num_words_to_add)  # Choose multiple random words
+Where:
 
-    for new_word in words_to_insert:
-        insert_idx = random.randint(0, len(words))  # Choose random position
-        words.insert(insert_idx, new_word)  # Insert word at random position
+ is the proportion of a keyword in the test dataset
 
-    return " ".join(words)  # Reconstruct text
+ is the proportion of a keyword in the training dataset
 
-# Apply 50% perturbation (Change percentage if needed)
-perturbation_percent = 50
-df["perturbed_text"] = df["text"].apply(lambda x: perturb_text(str(x), perc=perturbation_percent))
 
-# Save to a new Excel file
-output_path = "/mnt/data/perturbed_data_50percent.xlsx"
-df.to_excel(output_path, index=False)
+Interpreting Cohen’s H Values
 
-print(f"Perturbed data saved to {output_path}")
+Cohen’s H follows a standard scale to determine drift significance:
+
+In your implementation, drift is marked "Yes" if , meaning there is a noticeable shift in keyword distribution between the training and test datasets.
+
+How to Use Cohen’s H for TF-IDF Feature Drift?
+
+If Cohen's H is low (<0.2), the keyword appears with similar frequency in both training and test data, meaning no significant drift.
+
+If Cohen's H is high (>0.2), the keyword is used differently in test data compared to training data, indicating a drift.
+
+The confidence interval helps quantify the uncertainty in the Cohen's H estimation.
+
+
+Would you like help fixing the syntax errors in your code?
+
