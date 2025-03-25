@@ -5,26 +5,26 @@ import random
 file_path = "/mnt/data/file-FfeaY9wapGwwm7rFpQczec"  # Update if needed
 df = pd.read_excel(file_path)
 
-# Define words for perturbation
-perturb_words = ['flight', 'luxury', 'credit card', 'bus']
+# Custom words for perturbation (Replace these with your words)
+perturb_words = ['apple', 'banana', 'chocolate', 'laptop', 'holiday']  # Change these words
 
-# Function to inject words based on percentage
+# Function to inject multiple different words based on percentage
 def perturb_text(text, perc=50):
     words = text.split()  # Split text into words
     if len(words) < 2:
         return text  # Skip short text
 
     num_words_to_add = max(1, int(len(words) * (perc / 100.0)))  # Compute words to add
+    words_to_insert = random.choices(perturb_words, k=num_words_to_add)  # Choose multiple random words
 
-    for _ in range(num_words_to_add):
-        insert_idx = random.randint(0, len(words) - 1)  # Choose random position
-        new_word = random.choice(perturb_words)  # Choose random perturb word
+    for new_word in words_to_insert:
+        insert_idx = random.randint(0, len(words))  # Choose random position
         words.insert(insert_idx, new_word)  # Insert word at random position
 
     return " ".join(words)  # Reconstruct text
 
-# Apply 50% perturbation
-perturbation_percent = 50  # Set to 50% perturbation
+# Apply 50% perturbation (Change percentage if needed)
+perturbation_percent = 50
 df["perturbed_text"] = df["text"].apply(lambda x: perturb_text(str(x), perc=perturbation_percent))
 
 # Save to a new Excel file
