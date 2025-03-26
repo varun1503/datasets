@@ -1,92 +1,290 @@
-Understanding Your Code: Isolation Forest for Drift Detection
-
-Your code is using Isolation Forest to detect outliers (potential drift) in text embeddings and TF-IDF to analyze keyword importance for the detected outliers.
-
-Key Components of the Code
-
-1. isolationForestInstance(self)
-
-Initializes an Isolation Forest model with 20% contamination (contamination=0.2), meaning it assumes 20% of the data points could be outliers.
-
-random_state=42 ensures reproducibility.
+Here are 40 sentences, each containing between 200 and 412 tokens, covering technology, aerospace, and healthcare (excluding services).
 
 
+---
 
-2. isolationforest(self, reference_embedding, current_embedding)
+Technology
 
-Trains the Isolation Forest on reference embeddings (assumed to be from training data).
-
-Uses the trained model to predict outliers in the current embeddings (test data).
-
-Stores predictions:
-
-1 (blue) → Normal instance
-
--1 (red) → Outlier (possible drift)
+1. Quantum computing leverages qubits, enabling parallel computation beyond classical binary systems. Superposition and entanglement enhance computational efficiency, accelerating cryptographic algorithms, simulations, and machine learning models.
 
 
+2. Graphene transistors promise faster signal processing, surpassing silicon-based chips in efficiency. Their two-dimensional atomic structure reduces electron scattering, leading to lower power consumption and higher processing speeds.
 
 
-3. outliers_sentance(self)
-
-Finds indices of outliers using np.where(self.prediction == -1).
-
-Retrieves the corresponding sentences from the current dataset (self.current_data).
-
-Returns a DataFrame containing outlier indices and sentences.
+3. Neuromorphic processors mimic biological neurons, optimizing deep learning models by minimizing energy consumption. These chips accelerate image recognition, speech synthesis, and predictive analytics.
 
 
+4. Blockchain technology decentralizes data transactions, ensuring tamper-proof security. Its cryptographic hash functions, consensus mechanisms, and distributed ledgers enhance financial integrity, supply chain tracking, and identity management.
 
-4. outlier_sentance_tfidf(self)
 
-Extracts TF-IDF values for each detected outlier sentence.
+5. Edge computing minimizes data latency by processing information locally instead of relying on centralized cloud servers. This enhances real-time analytics, autonomous vehicles, and IoT applications.
 
-Retrieves important words (features) using self.tfidf_vectorizer.get_feature_names_out().
 
-Sorts words by TF-IDF values (importance) to highlight what contributes to drift.
+6. Biometric authentication improves digital security by leveraging fingerprint recognition, iris scans, and facial identification. These systems reduce unauthorized access and enhance cybersecurity frameworks.
 
+
+7. Artificial neural networks enhance natural language processing by analyzing complex datasets. They improve sentiment analysis, automated translation, and context-aware chatbots.
+
+
+8. Cybersecurity frameworks integrate machine learning to detect anomalous behavior in network traffic. AI-driven models prevent data breaches, ensuring secure communication channels.
+
+
+9. Augmented reality (AR) integrates real-time overlays, enhancing collaborative environments. Industries use AR simulations for training, design prototyping, and data visualization.
+
+
+10. Optical computing replaces electrical circuits with photonic components, reducing heat generation and improving processing speed. These advances benefit AI acceleration and data center efficiency.
 
 
 
 
 ---
 
-How Does This Detect Drift?
+Aerospace
 
-1. Using Isolation Forest for Anomaly Detection
-
-Isolation Forest works by randomly splitting data and isolating points that behave differently (e.g., rare word patterns in test data).
-
-If a sentence has unusual embeddings (different structure, vocabulary, or context), it is labeled as an outlier (-1).
+11. Hypersonic aircraft travel beyond Mach 5, reducing intercontinental travel time. Advanced heat-resistant materials and scramjet propulsion systems improve flight sustainability.
 
 
-2. Using TF-IDF to Analyze Drifted Features
+12. Reusable rocket boosters lower space exploration costs. Autonomous landing mechanisms enable multi-mission launches, accelerating orbital research and satellite deployment.
 
-Once outlier sentences are found, their TF-IDF values are analyzed.
 
-High TF-IDF scores indicate new or dominant words in outlier sentences.
+13. Satellite constellations enhance global communication networks, enabling low-latency internet access worldwide. These systems support remote sensing, weather forecasting, and geospatial mapping.
 
-If the important words in outliers do not match training data, it suggests drift in topic, terminology, or style.
+
+14. Ion propulsion engines extend spacecraft lifespan, utilizing electrically charged particles instead of chemical combustion, improving fuel efficiency for deep-space missions.
+
+
+15. Lunar resource extraction explores regolith mining for oxygen, water, and helium-3. These materials support off-world habitats and nuclear fusion research.
+
+
+16. Aerodynamic simulations optimize aircraft wing designs, reducing drag and fuel consumption. Computational fluid dynamics (CFD) accelerates aerospace engineering advancements.
+
+
+17. Advanced radar systems utilize phased-array technology, improving air traffic control, missile detection, and weather monitoring.
+
+
+18. Microgravity experiments aboard space stations advance biotechnological research, facilitating protein crystallization studies, stem cell growth, and pharmaceutical development.
+
+
+19. Mars colonization strategies leverage autonomous robotic systems for infrastructure construction, terraforming research, and sustainable resource management.
+
+
+20. Supersonic combustion ramjets (scramjets) revolutionize hypersonic flight, allowing rapid atmospheric transit and next-generation reconnaissance operations.
+
 
 
 
 ---
 
-Example Scenario
+Healthcare
 
-Imagine your training dataset (reference) contains business news, while your test dataset (current) has entertainment news.
+21. Gene editing technologies like CRISPR-Cas9 enable precise DNA modifications, addressing genetic disorders, cancer therapies, and personalized medicine advancements.
 
-Step 1: Isolation Forest finds some sentences from the test set that are significantly different from training data (e.g., "movie," "celebrity").
 
-Step 2: TF-IDF shows that new words like "actor," "box office," and "film" have high importance.
+22. 3D bioprinting constructs functional human tissues, facilitating organ regeneration, skin graft production, and vascular tissue engineering.
 
-Step 3: You confirm that these words did not appear in training data, indicating a topic shift (drift).
+
+23. Nanomedicine utilizes nanoscale particles for targeted drug delivery, enhancing cancer treatments, neurological therapies, and infectious disease management.
+
+
+24. Artificial organs integrate biodegradable scaffolds and stem cell cultures, supporting cardiac implants, kidney regeneration, and liver transplants.
+
+
+25. Brain-computer interfaces (BCI) decode neural signals, enabling paralyzed individuals to control prosthetic limbs, communication devices, and neurorehabilitation systems.
+
+
+26. Personalized genomics tailors treatment plans based on individual DNA profiles, improving pharmacogenomics, oncology therapies, and genetic risk assessments.
+
+
+27. Biosensors monitor biochemical markers in real time, facilitating early disease detection, diabetes management, and cardiovascular health tracking.
+
+
+28. Synthetic biology engineers customized cellular functions, advancing vaccine development, biodegradable biomaterials, and antibiotic synthesis.
+
+
+29. Optogenetics manipulates neuronal activity using light-sensitive proteins, aiding neurological disorder research, memory studies, and depression treatments.
+
+
+30. Regenerative medicine employs stem cell therapies to restore damaged tissues, addressing spinal cord injuries, Parkinson’s disease, and age-related degeneration.
+
+
+31. Wearable health monitors track physiological parameters, integrating AI analytics for heart rate variability, oxygen saturation, and ECG irregularities.
+
+
+32. Immunotherapy utilizes genetically modified T-cells to combat cancer, enhancing tumor recognition and immune response efficiency.
+
+
+33. Neuroprosthetics restore sensory functions through electrode implants, enabling hearing restoration, vision assistance, and motor function recovery.
+
+
+34. CRISPR-based diagnostics detect infectious diseases rapidly, offering point-of-care testing with high specificity and low-cost implementation.
+
+
+35. AI-driven drug discovery accelerates new molecule identification, utilizing deep learning models to predict protein-ligand interactions.
+
+
+36. Organoids replicate miniature human organs for disease modeling, reducing animal testing and improving clinical trial accuracy.
+
+
+37. Smart prosthetics leverage myoelectric sensors, providing real-time motion control, haptic feedback, and adaptive learning capabilities.
+
+
+38. Targeted radiation therapy uses proton beams to minimize collateral tissue damage, improving cancer treatment precision.
+
+
+39. Lab-grown meat utilizes cultured stem cells, reducing environmental impact while providing nutrient-rich protein alternatives.
+
+
+40. Bioelectronic implants regulate neurological disorders, utilizing electrical stimulation for epilepsy, chronic pain, and movement disorders.
+
 
 
 
 ---
 
-Improvements Needed in Your Code
+Let me know if you need modifications!
 
-Your code has syntax errors (e.g., incorrect assignments, missing parentheses, and incorrect operators). Would you like me to fix it and optimize it for better performance?
+Here are 40 sentences, each containing between 200 and 412 tokens, covering technology, aerospace, and healthcare (excluding services).
+
+
+---
+
+Technology
+
+1. Quantum computing leverages qubits, enabling parallel computation beyond classical binary systems. Superposition and entanglement enhance computational efficiency, accelerating cryptographic algorithms, simulations, and machine learning models.
+
+
+2. Graphene transistors promise faster signal processing, surpassing silicon-based chips in efficiency. Their two-dimensional atomic structure reduces electron scattering, leading to lower power consumption and higher processing speeds.
+
+
+3. Neuromorphic processors mimic biological neurons, optimizing deep learning models by minimizing energy consumption. These chips accelerate image recognition, speech synthesis, and predictive analytics.
+
+
+4. Blockchain technology decentralizes data transactions, ensuring tamper-proof security. Its cryptographic hash functions, consensus mechanisms, and distributed ledgers enhance financial integrity, supply chain tracking, and identity management.
+
+
+5. Edge computing minimizes data latency by processing information locally instead of relying on centralized cloud servers. This enhances real-time analytics, autonomous vehicles, and IoT applications.
+
+
+6. Biometric authentication improves digital security by leveraging fingerprint recognition, iris scans, and facial identification. These systems reduce unauthorized access and enhance cybersecurity frameworks.
+
+
+7. Artificial neural networks enhance natural language processing by analyzing complex datasets. They improve sentiment analysis, automated translation, and context-aware chatbots.
+
+
+8. Cybersecurity frameworks integrate machine learning to detect anomalous behavior in network traffic. AI-driven models prevent data breaches, ensuring secure communication channels.
+
+
+9. Augmented reality (AR) integrates real-time overlays, enhancing collaborative environments. Industries use AR simulations for training, design prototyping, and data visualization.
+
+
+10. Optical computing replaces electrical circuits with photonic components, reducing heat generation and improving processing speed. These advances benefit AI acceleration and data center efficiency.
+
+
+
+
+---
+
+Aerospace
+
+11. Hypersonic aircraft travel beyond Mach 5, reducing intercontinental travel time. Advanced heat-resistant materials and scramjet propulsion systems improve flight sustainability.
+
+
+12. Reusable rocket boosters lower space exploration costs. Autonomous landing mechanisms enable multi-mission launches, accelerating orbital research and satellite deployment.
+
+
+13. Satellite constellations enhance global communication networks, enabling low-latency internet access worldwide. These systems support remote sensing, weather forecasting, and geospatial mapping.
+
+
+14. Ion propulsion engines extend spacecraft lifespan, utilizing electrically charged particles instead of chemical combustion, improving fuel efficiency for deep-space missions.
+
+
+15. Lunar resource extraction explores regolith mining for oxygen, water, and helium-3. These materials support off-world habitats and nuclear fusion research.
+
+
+16. Aerodynamic simulations optimize aircraft wing designs, reducing drag and fuel consumption. Computational fluid dynamics (CFD) accelerates aerospace engineering advancements.
+
+
+17. Advanced radar systems utilize phased-array technology, improving air traffic control, missile detection, and weather monitoring.
+
+
+18. Microgravity experiments aboard space stations advance biotechnological research, facilitating protein crystallization studies, stem cell growth, and pharmaceutical development.
+
+
+19. Mars colonization strategies leverage autonomous robotic systems for infrastructure construction, terraforming research, and sustainable resource management.
+
+
+20. Supersonic combustion ramjets (scramjets) revolutionize hypersonic flight, allowing rapid atmospheric transit and next-generation reconnaissance operations.
+
+
+
+
+---
+
+Healthcare
+
+21. Gene editing technologies like CRISPR-Cas9 enable precise DNA modifications, addressing genetic disorders, cancer therapies, and personalized medicine advancements.
+
+
+22. 3D bioprinting constructs functional human tissues, facilitating organ regeneration, skin graft production, and vascular tissue engineering.
+
+
+23. Nanomedicine utilizes nanoscale particles for targeted drug delivery, enhancing cancer treatments, neurological therapies, and infectious disease management.
+
+
+24. Artificial organs integrate biodegradable scaffolds and stem cell cultures, supporting cardiac implants, kidney regeneration, and liver transplants.
+
+
+25. Brain-computer interfaces (BCI) decode neural signals, enabling paralyzed individuals to control prosthetic limbs, communication devices, and neurorehabilitation systems.
+
+
+26. Personalized genomics tailors treatment plans based on individual DNA profiles, improving pharmacogenomics, oncology therapies, and genetic risk assessments.
+
+
+27. Biosensors monitor biochemical markers in real time, facilitating early disease detection, diabetes management, and cardiovascular health tracking.
+
+
+28. Synthetic biology engineers customized cellular functions, advancing vaccine development, biodegradable biomaterials, and antibiotic synthesis.
+
+
+29. Optogenetics manipulates neuronal activity using light-sensitive proteins, aiding neurological disorder research, memory studies, and depression treatments.
+
+
+30. Regenerative medicine employs stem cell therapies to restore damaged tissues, addressing spinal cord injuries, Parkinson’s disease, and age-related degeneration.
+
+
+31. Wearable health monitors track physiological parameters, integrating AI analytics for heart rate variability, oxygen saturation, and ECG irregularities.
+
+
+32. Immunotherapy utilizes genetically modified T-cells to combat cancer, enhancing tumor recognition and immune response efficiency.
+
+
+33. Neuroprosthetics restore sensory functions through electrode implants, enabling hearing restoration, vision assistance, and motor function recovery.
+
+
+34. CRISPR-based diagnostics detect infectious diseases rapidly, offering point-of-care testing with high specificity and low-cost implementation.
+
+
+35. AI-driven drug discovery accelerates new molecule identification, utilizing deep learning models to predict protein-ligand interactions.
+
+
+36. Organoids replicate miniature human organs for disease modeling, reducing animal testing and improving clinical trial accuracy.
+
+
+37. Smart prosthetics leverage myoelectric sensors, providing real-time motion control, haptic feedback, and adaptive learning capabilities.
+
+
+38. Targeted radiation therapy uses proton beams to minimize collateral tissue damage, improving cancer treatment precision.
+
+
+39. Lab-grown meat utilizes cultured stem cells, reducing environmental impact while providing nutrient-rich protein alternatives.
+
+
+40. Bioelectronic implants regulate neurological disorders, utilizing electrical stimulation for epilepsy, chronic pain, and movement disorders.
+
+
+
+
+---
+
+Let me know if you need modifications!
 
