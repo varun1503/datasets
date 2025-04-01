@@ -10,31 +10,37 @@ class KnowledgeGraphRequest(BaseModel):
     user_query: str
 
 class KnowledgeGraphResponse(BaseModel):
-    retrieved_nodes: List[Any]
+    intent: str
     best_community: str
-    best_community_graph: Any
+    retrieved_nodes: List[Any]
     answer_plan: str
     final_answer: str
+    best_community_graph: Any
     selected_nodes_matching_with_intent: List[Any]
 
 @router.post(
     "/knowledgegraph/retrieve",
+    response_model=KnowledgeGraphResponse,
     description="Retrieve semantic chunks and pass to LLM",
     operation_id="knowledgeGraph"
 )
 async def kg_rag(request: KnowledgeGraphRequest) -> KnowledgeGraphResponse:
     kg = KnowledgeGraph(dir_path=request.dir_path, query=request.user_query)
-    result = kg.load_data()  
+    result = kg.load_data()  # Expecting a list with 7 elements
 
-    # Ensure result matches the expected response structure
+    # Ensure the result is a valid list with exactly 7 elements
+    if not isinstance(result, list) or len(result) != 7:
+        raise ValueError("Unexpected response format. Expected a list of 7 elements.")
+
+    # Unpack the list into the response model
     response_data = KnowledgeGraphResponse(
-        retrieved_nodes=result.get("retrieved_nodes", []),
-        best_community=result.get("best_community", ""),
-        best_community_graph=result.get("best_community_graph", {}),
-        answer_plan=result.get("answer_plan", ""),
-        final_answer=result.get("final_answer", ""),
-        selected_nodes_matching_with_intent=result.get("selected_nodes_matching_with_intent", [])
+        intent=result[0],
+        best_community=result[1],
+        retrieved_nodes=result[2],
+        answer_plan=result[3],
+        final_answer=result[4],
+        best_community_graph=result[5],
+        selected_nodes_matching_with_intent=result[6]
     )
 
-    return response_dataLIME is designed to make predictions, but in the presence of noisy data, it shows that a token's contribution to the prediction is not significant.
-
+    return response_data
