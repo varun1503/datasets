@@ -1,2 +1,40 @@
-LIME is designed to make predictions, but in the presence of noisy data, it shows that a token's contribution to the prediction is not significant.
+from fastapi import APIRouter
+from pydantic import BaseModel
+from typing import List, Any
+from some_module import KnowledgeGraph  # Ensure this import is correct
+
+router = APIRouter()
+
+class KnowledgeGraphRequest(BaseModel):
+    dir_path: str
+    user_query: str
+
+class KnowledgeGraphResponse(BaseModel):
+    retrieved_nodes: List[Any]
+    best_community: str
+    best_community_graph: Any
+    answer_plan: str
+    final_answer: str
+    selected_nodes_matching_with_intent: List[Any]
+
+@router.post(
+    "/knowledgegraph/retrieve",
+    description="Retrieve semantic chunks and pass to LLM",
+    operation_id="knowledgeGraph"
+)
+async def kg_rag(request: KnowledgeGraphRequest) -> KnowledgeGraphResponse:
+    kg = KnowledgeGraph(dir_path=request.dir_path, query=request.user_query)
+    result = kg.load_data()  
+
+    # Ensure result matches the expected response structure
+    response_data = KnowledgeGraphResponse(
+        retrieved_nodes=result.get("retrieved_nodes", []),
+        best_community=result.get("best_community", ""),
+        best_community_graph=result.get("best_community_graph", {}),
+        answer_plan=result.get("answer_plan", ""),
+        final_answer=result.get("final_answer", ""),
+        selected_nodes_matching_with_intent=result.get("selected_nodes_matching_with_intent", [])
+    )
+
+    return response_dataLIME is designed to make predictions, but in the presence of noisy data, it shows that a token's contribution to the prediction is not significant.
 
