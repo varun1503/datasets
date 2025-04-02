@@ -1,46 +1,129 @@
-from fastapi import APIRouter
-from pydantic import BaseModel
-from typing import List, Any
-from some_module import KnowledgeGraph  # Ensure this import is correct
+The image appears to be a screenshot of a presentation slide discussing user interfaces for a SQL generation tool called Gleam. Here are the key details about Screen 1 as shown in the image:
 
-router = APIRouter()
+Screen 1 Details:
 
-class KnowledgeGraphRequest(BaseModel):
-    dir_path: str
-    user_query: str
+It is the opening page where the user can ask questions related to SQL generation after logging in.
 
-class KnowledgeGraphResponse(BaseModel):
-    intent: str
-    best_community: str
-    retrieved_nodes: List[Any]
-    answer_plan: str
-    final_answer: str
-    best_community_graph: Any
-    selected_nodes_matching_with_intent: List[Any]
+The interface displays:
 
-@router.post(
-    "/knowledgegraph/retrieve",
-    response_model=KnowledgeGraphResponse,
-    description="Retrieve semantic chunks and pass to LLM",
-    operation_id="knowledgeGraph"
-)
-async def kg_rag(request: KnowledgeGraphRequest) -> KnowledgeGraphResponse:
-    kg = KnowledgeGraph(dir_path=request.dir_path, query=request.user_query)
-    result = kg.load_data()  # Expecting a list with 7 elements
+A sidebar on the left with options:
 
-    # Ensure the result is a valid list with exactly 7 elements
-    if not isinstance(result, list) or len(result) != 7:
-        raise ValueError("Unexpected response format. Expected a list of 7 elements.")
+SQL Generation
 
-    # Unpack the list into the response model
-    response_data = KnowledgeGraphResponse(
-        intent=result[0],
-        best_community=result[1],
-        retrieved_nodes=result[2],
-        answer_plan=result[3],
-        final_answer=result[4],
-        best_community_graph=result[5],
-        selected_nodes_matching_with_intent=result[6]
-    )
+Configuration
 
-    return response_data
+
+A welcome message: "Welcome to Gleam!"
+
+A text input field at the bottom with a prompt: "Ask follow-up questions..."
+
+
+
+Screen 2 (Partially Visible) Details:
+
+After a user asks a question and gets a response, the system asks the user to verify the response.
+
+
+The screenshot also indicates that Varun Vaishy is talking in a meeting, with 2 people in the huddle, and there is an option to stop sharing the screen.
+
+Would you like a more structured breakdown of the UI elements or any specific details?
+
+Screen 3 Details:
+
+This screen is part of the Gleam SQL Generation Configuration process, where the system asks the user to select tables and columns from the schema.
+
+Key Elements on the Screen:
+
+1. User Query & Refinement:
+
+The system has identified a query that retrieves the obligor ID and obligor name for obligors with a rating of B-.
+
+It also asks for the current card utilization, calculated using the average of the last 3 or 12 months.
+
+The text is highlighted in gray, with an option for the user to confirm or refine it:
+
+"Yes, I mean this" (blue button)
+
+"No, I mean something else" (red button)
+
+
+
+
+2. Table Selection Section:
+
+Users can review and adjust the automatically selected tables and columns.
+
+Dropdown menus allow the user to select tables:
+
+Selected Tables: Cornerstone
+
+Selected Tables: CRU
+
+
+
+
+3. User Confirmation:
+
+After adjusting the table selection, the user can confirm their selection.
+
+
+
+
+Purpose of This Screen:
+
+This step ensures that the correct database tables are chosen to generate an SQL query that meets the user's intent. The interface provides a way to refine the query and customize the selection before proceeding.
+
+Would you like further breakdowns or insights?
+Screen Details:
+
+This screen is part of the Gleam SQL Generation Configuration process, where the user is refining the selected tables and columns for query generation.
+
+Key Elements on the Screen:
+
+1. Table Selection & Customization:
+
+The user is in the process of selecting and modifying tables and columns for query generation.
+
+The selected table is "Cornerstone", with an entry "table1".
+
+A table description field is present with the value "table_description1".
+
+
+
+2. Column Selection:
+
+The interface displays a list of columns associated with table1.
+
+Two columns are selected:
+
+Column 1: "column1" with description "column_description1"
+
+Column 2: "column2" with description "column_description2"
+
+
+Each column has a delete (trash bin) icon, allowing removal.
+
+
+
+3. Additional Table Selection:
+
+Below, there is an option to select another table from the CRU dataset, but no table is chosen yet.
+
+
+
+4. User Confirmation:
+
+The top right corner has a "Yes, I mean this" button for the user to confirm the selection.
+
+
+
+
+Purpose of This Screen:
+
+This step allows the user to review and adjust the tables and columns that will be used in the SQL query.
+
+Users can add, remove, or modify their selections before proceeding.
+
+
+Would you like any additional details or further breakdown?
+
