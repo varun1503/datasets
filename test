@@ -1,49 +1,16 @@
-import sys
-import logging
+import os
 from pathlib import Path
-from glob import glob
-from recipescli.cli.create import create
-from recipescli.cli.utils import wrapped_cleanup
 
-# Debugging print
-print("This script is running")  
+print("🔍 CWD:", os.getcwd())  # Where the script is executed from
+print("🔍 __file__:", __file__)  # Where the script is located
+print("🔍 Resolved __file__:", Path(__file__).resolve())
 
-# Setup logging if DEBUG mode is enabled
-if "DEBUG" in sys.argv:
-    logging.basicConfig(level=logging.DEBUG)
+# Now get the common path correctly
+script_path = Path(__file__).resolve()  
+base_path = script_path.parent.parent.parent  # Adjust as per your structure
+common_path = base_path / 'common'
 
-# Set INSTALL_ROOT to the current working directory
-INSTALL_ROOT = Path.cwd()
-COMMON_PATH = INSTALL_ROOT / "common"
-RECIPES_PATH = INSTALL_ROOT / "recipes"
+print("✅ Corrected common_path:", common_path)
 
-# Handle case where common path does not exist
-if not COMMON_PATH.exists():
-    try:
-        INSTALL_ROOT = Path(glob(str(INSTALL_ROOT / "*.data"))[0]) / "data"
-        COMMON_PATH = INSTALL_ROOT / "common"
-        RECIPES_PATH = INSTALL_ROOT / "recipes"
-    except IndexError:
-        print("Error: Could not find a valid data directory.")
-        sys.exit(1)  # Exit if the path setup fails
-
-def run():
-    print("Inside run() function")  # Debugging print
-    should_replay = "--replay" in sys.argv
-    extra_context = {
-        "": {
-            "common_path": str(COMMON_PATH)
-        }
-    }
-    wrapped_cleanup(
-        lambda: create(
-            template_path=str(RECIPES_PATH),
-            replay=should_replay,
-            extra_context=extra_context
-        )
-    )
-
-# Ensure run() executes when script is run directly
-if __name__ == "__main__":
-    print("Calling run()")  # Debugging print
-    run()
+# Set environment variable
+os.environ.setdefault('CLI_COMMON_PATH', str(common_path))
