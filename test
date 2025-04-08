@@ -2,25 +2,48 @@ import streamlit as st
 import requests
 import os
 
-API_BASE_URL = "http://127.0.0.1:8080"  # Change to your actual API
+API_BASE_URL = "http://127.0.0.1:8080"  # Your FastAPI endpoint
 
 st.set_page_config(page_title="RAG App", layout="wide")
 st.markdown("<h1 style='text-align: center;'>RAG Chat Interface</h1>", unsafe_allow_html=True)
 
-# Initialize chat history
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# ----------------------------------
-# LAYOUT: Three Columns
-# ----------------------------------
 col1, col2, col3 = st.columns([1, 2, 1])
 
-# ------------
-# LEFT PANEL
-# ------------
+# -----------------------
+# LEFT PANEL - col1
+# -----------------------
 with col1:
-    st.subheader("Settings")
+    st.subheader("1. Upload Document")
+
+    uploaded_file = st.file_uploader("Upload a file (pdf, txt, docx)", type=["pdf", "txt", "docx"])
+    chunking_type = st.selectbox("Select Chunking Type", ["recursive", "semantic", "automerger"])
+    index_id_upload = st.text_input("Index ID for Upload", value="df101")
+    
+    if uploaded_file:
+        with open(uploaded_file.name, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        document_path = os.path.abspath(uploaded_file.name)
+
+        if st.button("Upload and Chunk"):
+            payload = {
+                "document_path": document_path,
+                "chunking_type": chunking_type,
+                "index_id": index_id_upload
+            }
+            try:
+                response = requests.post(f"{API_BASE_URL}/upload/documents", json=payload)
+                if response.status_code == 200:
+                    st.success("Document uploaded and chunked successfully!")
+                else:
+                    st.error(f"Upload failed: {response.text}")
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    st.markdown("---")
+    st.subheader("2. Settings")
 
     faiss_index_id = st.text_input("Faiss Index ID", value="df101")
 
@@ -29,20 +52,18 @@ with col1:
         "3": {"name": "OpenAI GPT-4.0", "logo": "https://upload.wikimedia.org/wikipedia/commons/0/04/OpenAI_Logo.svg"},
         "1": {"name": "Other Model", "logo": "https://via.placeholder.com/40x40.png?text=AI"}
     }
-    selected_model_id = st.selectbox("Model ID", options=list(model_options.keys()), format_func=lambda x: model_options[x]["name"])
 
+    selected_model_id = st.selectbox("Model ID", options=list(model_options.keys()), format_func=lambda x: model_options[x]["name"])
     st.image(model_options[selected_model_id]["logo"], width=50, caption=model_options[selected_model_id]["name"])
 
     top_k = st.slider("Top K Docs", 1, 10, 5)
 
-# ------------
-# CENTER PANEL (CHAT)
-# ------------
+# -----------------------
+# CENTER PANEL - col2
+# -----------------------
 with col2:
     st.subheader("Chat")
 
-    # Dummy buttons
-    st.markdown("##### Ask a question")
     dummy_qs = ["Which tools do you have access to?", "Tell me about yourself", "What's your special skill?"]
     selected_q = st.selectbox("Quick prompts", options=dummy_qs)
 
@@ -65,7 +86,6 @@ with col2:
                 answer = result.get("generated_response", "No response.")
                 st.session_state.messages.append({"role": "assistant", "content": answer})
 
-                # Store retrieved docs for display
                 st.session_state.retrieved_docs = result.get("retrieved_documents", [])
 
             else:
@@ -74,18 +94,18 @@ with col2:
         except Exception as e:
             st.error(f"Request failed: {e}")
 
-    # Display chat
     for msg in st.session_state.messages:
         if msg["role"] == "user":
             st.markdown(f"**You:** {msg['content']}")
         else:
             st.markdown(f"**Assistant:** {msg['content']}")
 
-# ------------
-# RIGHT PANEL (DOCS)
-# ------------
+# -----------------------
+# RIGHT PANEL - col3
+# -----------------------
 with col3:
     st.subheader("Retrieved Documents")
+
     if "retrieved_docs" in st.session_state:
         for doc in st.session_state.retrieved_docs:
             st.markdown(f"**Page {doc['page']} | Source: {doc['source']}**")
