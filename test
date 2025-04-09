@@ -1,25 +1,41 @@
-# RIGHT PANEL
 with col3:
     st.subheader("Retrieved Documents")
 
     if "retrieved_docs" in st.session_state and st.session_state.retrieved_docs:
         for doc in st.session_state.retrieved_docs:
             st.markdown(f"""
-                <div style="border: 1px solid #ccc; border-radius: 10px; padding: 10px; margin-bottom: 15px; background-color: #f9f9f9;">
-
-                    <div style="background-color: #e8f0fe; padding: 5px 10px; border-radius: 5px; margin-bottom: 5px;">
+                <div style="
+                    border: 1px solid var(--secondary-background-color);
+                    border-radius: 10px;
+                    padding: 12px;
+                    margin-bottom: 15px;
+                    background-color: var(--secondary-background-color);
+                    color: var(--text-color);
+                ">
+                    <div style="
+                        background-color: rgba(33, 150, 243, 0.1);
+                        padding: 8px 12px;
+                        border-radius: 5px;
+                        margin-bottom: 5px;
+                    ">
                         <strong>Page:</strong> {doc.get('page', 'N/A')}
                     </div>
-
-                    <div style="background-color: #e0f7fa; padding: 5px 10px; border-radius: 5px; margin-bottom: 5px;">
+                    <div style="
+                        background-color: rgba(76, 175, 80, 0.1);
+                        padding: 8px 12px;
+                        border-radius: 5px;
+                        margin-bottom: 5px;
+                    ">
                         <strong>Source:</strong> {doc.get('source', 'N/A')}
                     </div>
-
-                    <div style="background-color: #fff3e0; padding: 10px; border-radius: 5px;">
+                    <div style="
+                        background-color: rgba(255, 235, 59, 0.1);
+                        padding: 12px;
+                        border-radius: 5px;
+                    ">
                         {doc.get('content', 'No content available')}
                     </div>
-
                 </div>
             """, unsafe_allow_html=True)
     else:
-        st.info("No retrieved documents to display.")
+        st.info("No retrieved documents available.")
