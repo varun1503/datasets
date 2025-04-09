@@ -1,18 +1,5 @@
-import streamlit as st
-
-# Set page layout
-st.set_page_config(page_title="RAG App", layout="wide")
-
-# Load SVG logo
-with open("amex.svg", "r") as svg_file:
-    svg_logo = svg_file.read()
-
-# Display header with SVG and title side-by-side
-st.markdown(f"""
-    <div style='display: flex; align-items: center; background-color: #0077c8; padding: 15px 25px; border-radius: 10px; margin-bottom: 20px;'>
-        <div style='width: 60px; height: 60px; margin-right: 20px;'>
-            {svg_logo}
-        </div>
-        <h1 style='color: white; font-family: "Segoe UI", sans-serif; margin: 0;'>RAG Chat Interface</h1>
-    </div>
+st.markdown("""
+    <h3 style='color: black; font-family: "Segoe UI", sans-serif; margin-bottom: 10px;'>
+        1. Upload Document
+    </h3>
 """, unsafe_allow_html=True)
