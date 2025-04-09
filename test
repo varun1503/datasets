@@ -2,21 +2,24 @@
 with col3:
     st.subheader("Retrieved Documents")
 
-    if st.session_state.retrieved_docs:
+    if "retrieved_docs" in st.session_state and st.session_state.retrieved_docs:
         for doc in st.session_state.retrieved_docs:
             st.markdown(f"""
                 <div style="border: 1px solid #ccc; border-radius: 10px; padding: 10px; margin-bottom: 15px; background-color: #f9f9f9;">
-                    
+
                     <div style="background-color: #e8f0fe; padding: 5px 10px; border-radius: 5px; margin-bottom: 5px;">
-                        <strong>Page:</strong> {doc['page']}
+                        <strong>Page:</strong> {doc.get('page', 'N/A')}
                     </div>
 
                     <div style="background-color: #e0f7fa; padding: 5px 10px; border-radius: 5px; margin-bottom: 5px;">
-                        <strong>Source:</strong> {doc['source']}
+                        <strong>Source:</strong> {doc.get('source', 'N/A')}
                     </div>
 
                     <div style="background-color: #fff3e0; padding: 10px; border-radius: 5px;">
-                        {doc['content']}
+                        {doc.get('content', 'No content available')}
                     </div>
+
                 </div>
             """, unsafe_allow_html=True)
+    else:
+        st.info("No retrieved documents to display.")
