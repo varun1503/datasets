@@ -1,45 +1,42 @@
-# ---------- Column 2: Chat Area ----------
 with col2:
     st.subheader("Chat")
-    dummy_questions = ["What's your special skill?", "Tell me about yourself", "Which tools do you have access to?"]
-    for q in dummy_questions:
-        if st.button(q, key=q):
-            st.session_state.user_query = q
 
-    # Display chat history (from top to bottom)
-    for entry in st.session_state.chat_history:
-        st.markdown(f"**You:** {entry['query']}")
-        st.markdown(f"**GPT-4.0:** {entry['response']}")
-        st.markdown("---")
+    # Initialize message history if not exists
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
 
-    # Input box fixed at the bottom
-    with st.form("chat_form", clear_on_submit=True):
-        query = st.text_input("Ask a question", key="query_input")
-        submitted = st.form_submit_button("Send")
-        
-        if submitted and query:
-            # Send request to your API
-            request_payload = {
-                "query": query,
-                "top_k": st.session_state.top_k,
-                "index_id": st.session_state.index_id,
-                "generative_model_id": st.session_state.model_id
-            }
+    # Input box at bottom of chat
+    user_input = st.chat_input("Type your question here...")
 
+    if user_input:
+        # Append user message
+        st.session_state.messages.append({"role": "user", "content": user_input})
+
+        # Prepare request payload
+        payload = {
+            "query": user_input,
+            "top_k": st.session_state.top_k,
+            "index_id": st.session_state.index_id,
+            "generative_model_id": st.session_state.model_id
+        }
+
+        # Send request to API
+        with st.spinner("Generating response..."):
             try:
-                response = requests.post(f"{API_BASE_URL}/retrieve_and_generate", json=request_payload)
+                response = requests.post(f"{API_BASE_URL}/retrieve_and_generate", json=payload)
                 if response.status_code == 200:
                     result = response.json()
-                    # Store both query and response in chat
-                    st.session_state.chat_history.insert(0, {
-                        "query": query,
-                        "response": result.get("generated_response", "No response")
-                    })
-
-                    # Save retrieved documents for right panel
+                    answer = result.get("generated_response", "No response.")
+                    st.session_state.messages.append({"role": "assistant", "content": answer})
                     st.session_state.retrieved_docs = result.get("retrieved_documents", [])
-
                 else:
-                    st.error(f"API Error: {response.text}")
+                    st.error(f"Server error: {response.text}")
             except Exception as e:
-                st.error(f"Failed to contact API: {e}")
+                st.error(f"Request failed: {e}")
+
+    # Display chat history (latest first)
+    for msg in reversed(st.session_state.messages):
+        if msg["role"] == "user":
+            st.markdown(f"**You:** {msg['content']}")
+        else:
+            st.markdown(f"**Assistant:** {msg['content']}")
