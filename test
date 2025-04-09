@@ -1,42 +1,67 @@
 with col2:
     st.subheader("Chat")
 
-    # Initialize message history if not exists
+    # 1. Chat input is declared first so it renders visually at the bottom
+    chat_input_container = st.container()
+    chat_area = st.container()
+
+    # 2. Chat input field (bottom)
+    with chat_input_container:
+        user_input = st.chat_input("Type your question here...")
+
+    # 3. Initialize session state
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
-    # Input box at bottom of chat
-    user_input = st.chat_input("Type your question here...")
+    if "retrieved_docs" not in st.session_state:
+        st.session_state.retrieved_docs = []
 
+    # 4. Handle user input
     if user_input:
-        # Append user message
         st.session_state.messages.append({"role": "user", "content": user_input})
+        st.session_state.messages.append({"role": "assistant", "content": "_Waiting for response..._"})
 
-        # Prepare request payload
         payload = {
             "query": user_input,
-            "top_k": st.session_state.top_k,
-            "index_id": st.session_state.index_id,
-            "generative_model_id": st.session_state.model_id
+            "top_k": top_k,
+            "index_id": faiss_index_id,
+            "generative_model_id": selected_model_id
         }
 
-        # Send request to API
         with st.spinner("Generating response..."):
             try:
                 response = requests.post(f"{API_BASE_URL}/retrieve_and_generate", json=payload)
+
                 if response.status_code == 200:
                     result = response.json()
                     answer = result.get("generated_response", "No response.")
-                    st.session_state.messages.append({"role": "assistant", "content": answer})
+                    st.session_state.messages[-1]["content"] = answer
                     st.session_state.retrieved_docs = result.get("retrieved_documents", [])
                 else:
-                    st.error(f"Server error: {response.text}")
+                    st.session_state.messages[-1]["content"] = f"**Error:** {response.text}"
             except Exception as e:
-                st.error(f"Request failed: {e}")
+                st.session_state.messages[-1]["content"] = f"**Exception:** {str(e)}"
 
-    # Display chat history (latest first)
-    for msg in reversed(st.session_state.messages):
-        if msg["role"] == "user":
-            st.markdown(f"**You:** {msg['content']}")
-        else:
-            st.markdown(f"**Assistant:** {msg['content']}")
+    # 5. Display messages (latest on top)
+    with chat_area:
+        for msg in reversed(st.session_state.messages):
+            if msg["role"] == "user":
+                st.markdown(
+                    f"""
+                    <div style='text-align: right; margin: 5px 0;'>
+                        <div style='display: inline-block; background-color: #DCF8C6; padding: 10px 15px; border-radius: 15px; max-width: 80%;'>
+                            <strong>You:</strong> {msg['content']}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True
+                )
+            else:
+                st.markdown(
+                    f"""
+                    <div style='text-align: left; margin: 5px 0;'>
+                        <div style='display: inline-block; background-color: #F1F0F0; padding: 10px 15px; border-radius: 15px; max-width: 80%;'>
+                            <strong>Assistant:</strong> {msg['content']}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True
+                )
