@@ -1,27 +1,32 @@
-import streamlit as st
-import os
+def get_generation(self):
+    best_community = self.find_best_community(community_names_list, community_summary_list)
+    best_community_graph = community_graph_list[best_community[1][0]]
 
-# Path to your image file (replace with your actual filename if needed)
-cwd = os.getcwd()
-image_path = os.path.join(cwd, "amex.png")  # Adjust filename as needed
+    intent = self.intent_extract_func(self.query)
 
-# Read and display header section
-st.markdown(f"""
-    <div style="display: flex; align-items: center; background-color: #1c1c1c; padding: 20px; border-radius: 12px; margin-bottom: 20px;">
-        <img src="data:image/png;base64,{st.image(image_path, output_format='PNG', use_column_width=False).image_to_base64(image_path)}" alt="Logo" style="width: 60px; height: 60px; margin-right: 20px;" />
-        <h1 style="color: white; font-family: 'Segoe UI', sans-serif; margin: 0;">recipes_cli</h1>
-    </div>
-""", unsafe_allow_html=True)
+    selected_nodes_matching_with_intent = self.intent_matching(best_community_graph, intent, 0.4)
+    retrieved_nodes = self.select_subgraph(best_community_graph, selected_nodes_matching_with_intent)
 
-# Description section
-st.markdown("""
-    <div style="background-color: #f0f2f6; padding: 20px; border-radius: 10px; color: #333;">
-        <p style="font-size: 16px; line-height: 1.6;">
-            This repo is a <b>command-line tool</b> to quickly bootstrap Generative AI applications. It helps teams build robust, consistent, and reusable GenAI apps aligned with the “Amex Way” and GenAI principles. 
-            The tool reduces boilerplate code and lets you focus on <b>business logic</b>.
-        </p>
-        <p>
-            <a href="https://your-link-here.com" style="color: #0077c8; text-decoration: none;"><b>Simple "Guided Journey" demo quick-start Guide</b></a>
-        </p>
-    </div>
-""", unsafe_allow_html=True)
+    result = self.answer_generation(retrieved_nodes)
+    answer_plan = self.reasoning_generation(best_community_graph, self.query, result.content)
+    final_answer = self.final_answer_generation(answer_plan)
+
+    # Build retrieved subgraph tree
+    retrieved_sub_tree = nx.DiGraph()
+    for node in selected_nodes_matching_with_intent:
+        dfs_tree = nx.dfs_tree(best_community_graph, source=node, depth_limit=3)
+        retrieved_sub_tree = nx.compose(retrieved_sub_tree, dfs_tree)
+
+    # Visualize and convert to base64
+    fig_image_base64 = self.visualize_retrieved_tree(best_community_graph, retrieved_sub_tree)
+
+    # Return only serializable data
+    return {
+        "intent": str(intent),
+        "best_community": str(best_community[0]),
+        "retrieved_nodes": [str(node) for node in retrieved_nodes],
+        "answer_plan": answer_plan.content,
+        "final_answer": final_answer.content,
+        "selected_nodes_matching_with_intent": [str(node) for node in selected_nodes_matching_with_intent],
+        "fig_image_base64": fig_image_base64
+    }
