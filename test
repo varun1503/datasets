@@ -1,7 +1,27 @@
+import streamlit as st
+import os
+
+# Path to your image file (replace with your actual filename if needed)
+cwd = os.getcwd()
+image_path = os.path.join(cwd, "amex.png")  # Adjust filename as needed
+
+# Read and display header section
+st.markdown(f"""
+    <div style="display: flex; align-items: center; background-color: #1c1c1c; padding: 20px; border-radius: 12px; margin-bottom: 20px;">
+        <img src="data:image/png;base64,{st.image(image_path, output_format='PNG', use_column_width=False).image_to_base64(image_path)}" alt="Logo" style="width: 60px; height: 60px; margin-right: 20px;" />
+        <h1 style="color: white; font-family: 'Segoe UI', sans-serif; margin: 0;">recipes_cli</h1>
+    </div>
+""", unsafe_allow_html=True)
+
+# Description section
 st.markdown("""
-    <div style='background-color: black; padding: 10px 15px; border-radius: 8px; margin-bottom: 15px;'>
-        <h3 style='color: white; font-family: "Segoe UI", sans-serif; margin: 0;'>
-            1. Upload Document
-        </h3>
+    <div style="background-color: #f0f2f6; padding: 20px; border-radius: 10px; color: #333;">
+        <p style="font-size: 16px; line-height: 1.6;">
+            This repo is a <b>command-line tool</b> to quickly bootstrap Generative AI applications. It helps teams build robust, consistent, and reusable GenAI apps aligned with the “Amex Way” and GenAI principles. 
+            The tool reduces boilerplate code and lets you focus on <b>business logic</b>.
+        </p>
+        <p>
+            <a href="https://your-link-here.com" style="color: #0077c8; text-decoration: none;"><b>Simple "Guided Journey" demo quick-start Guide</b></a>
+        </p>
     </div>
 """, unsafe_allow_html=True)
