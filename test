@@ -1,24 +1,40 @@
-import matplotlib.pyplot as plt
-import networkx as nx
+def display_graph_simple(self, graph):
+    try:
+        # Access the internal NetworkX graph
+        graph_data = graph._graph  # Undocumented but works for CompiledGraph
 
-# Suppose this is your LangGraph workflow
-from langgraph.graph import StateGraph
+        G = nx.DiGraph()
+        nodes = set()
+        edges = []
 
-def dummy_func(state): return state
+        for edge in graph_data.edges:
+            nodes.add(edge[0])
+            nodes.add(edge[1])
+            edges.append((edge[0], edge[1]))
 
-builder = StateGraph(dict)
-builder.add_node("start", dummy_func)
-builder.add_node("middle", dummy_func)
-builder.add_node("end", dummy_func)
-builder.add_edge("start", "middle")
-builder.add_edge("middle", "end")
+        G.add_nodes_from(nodes)
+        G.add_edges_from(edges)
 
-graph = builder.get_graph()
+        plt.figure(figsize=(10, 6))
+        pos = nx.kamada_kawai_layout(G)
 
-# Now plot using networkx
-G = graph.get_graph()  # networkx.DiGraph
+        nx.draw_networkx_nodes(G, pos, node_color='lightblue', node_size=500)
+        nx.draw_networkx_edges(G, pos, edge_color="gray", arrows=True, arrowsize=15)
+        nx.draw_networkx_labels(G, pos)
 
-pos = nx.spring_layout(G)
-nx.draw(G, pos, with_labels=True, node_color='lightblue', edge_color='gray', node_size=2000, font_size=10)
-plt.title("LangGraph Workflow")
-plt.show()
+        plt.title("Graph Workflow")
+        plt.axis('off')
+
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', bbox_inches='tight')
+        buf.seek(0)
+
+        img_bytes = buf.read()
+        encoded = base64.b64encode(img_bytes).decode('utf-8')
+        plt.close()
+
+        return encoded
+
+    except Exception as e:
+        print(f"Visualization error: {e}")
+        return None
