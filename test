@@ -1,4 +1,14 @@
-import os
+#!/bin/bash
 
-base_dir = os.path.dirname(__file__)
-logo_path = os.path.join(base_dir, "app", "svg", "icons8-chatgpt.svg")
+# Load port from YAML config via Python
+
+PORT=$(python3 -c "from app.utils.config_management import load_config; print(load_config()['fastapi_ports']['QNA'])")
+
+if [ -z "$PORT" ]; then
+  echo "Failed to load PORT from config. Exiting."
+  exit 1
+fi
+
+echo "Starting server on port $PORT..."
+
+uvicorn app.main:app --reload --host 127.0.0.1 --port $PORT
