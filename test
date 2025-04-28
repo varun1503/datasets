@@ -1,14 +1,39 @@
-#!/bin/bash
+import os
+import shutil
+import streamlit as st
 
-# Load port from YAML config via Python
+with tab1col1:
+    st.subheader("Upload Pickle File")
 
-PORT=$(python3 -c "from app.utils.config_management import load_config; print(load_config()['fastapi_ports']['QNA'])")
+    filepath = st.file_uploader(
+        "Upload a Gpickle file (pdf, txt, docx)",
+        type=["gpickle", "json"],
+        key="tab1col1_us",
+        accept_multiple_files=True
+    )
 
-if [ -z "$PORT" ]; then
-  echo "Failed to load PORT from config. Exiting."
-  exit 1
-fi
+    print("filepath", filepath)
 
-echo "Starting server on port $PORT..."
+    if filepath:
+        # Create a temp directory to store uploaded files
+        temp_dir = os.path.join(os.getcwd(), "temp_uploads")
+        
+        # If temp_dir already exists, delete it and recreate (clean old uploads)
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+        os.makedirs(temp_dir, exist_ok=True)
 
-uvicorn app.main:app --reload --host 127.0.0.1 --port $PORT
+        # Get the first uploaded file
+        first_file = filepath[0]
+
+        # Save it to the temp directory
+        temp_file_path = os.path.join(temp_dir, first_file.name)
+        with open(temp_file_path, "wb") as f:
+            f.write(first_file.getbuffer())
+
+        # Get the folder path
+        folder_path = os.path.dirname(temp_file_path)
+
+        if folder_path and os.path.isdir(folder_path):
+            st.success(f"Valid folder path! {folder_path}")
+            st.session_state.folder_path_unstructured = folder_path
