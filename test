@@ -1,39 +1,32 @@
-import os
-import shutil
-import streamlit as st
+import pandas as pd
 
-with tab1col1:
-    st.subheader("Upload Pickle File")
-
-    filepath = st.file_uploader(
-        "Upload a Gpickle file (pdf, txt, docx)",
-        type=["gpickle", "json"],
-        key="tab1col1_us",
-        accept_multiple_files=True
-    )
-
-    print("filepath", filepath)
-
-    if filepath:
-        # Create a temp directory to store uploaded files
-        temp_dir = os.path.join(os.getcwd(), "temp_uploads")
+def modify_foreign_df(df_foreign: pd.DataFrame) -> pd.DataFrame:
+    """
+    Dynamically modify all table columns in the foreign dataframe.
+    
+    Args:
+        df_foreign (pd.DataFrame): Input DataFrame with table columns (like table1, table2, etc.)
         
-        # If temp_dir already exists, delete it and recreate (clean old uploads)
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-        os.makedirs(temp_dir, exist_ok=True)
+    Returns:
+        pd.DataFrame: Modified DataFrame.
+    """
+    # Collect all table columns
+    table_columns = df_foreign.columns.tolist()
+    
+    # Dictionary to hold modified tables
+    modified_tables = {}
 
-        # Get the first uploaded file
-        first_file = filepath[0]
+    # Create modified names
+    for table_col in table_columns:
+        table_names = df_foreign[table_col]
+        modified_names = [name.split('.')[1] for name in table_names]
+        modified_tables[table_col] = modified_names
 
-        # Save it to the temp directory
-        temp_file_path = os.path.join(temp_dir, first_file.name)
-        with open(temp_file_path, "wb") as f:
-            f.write(first_file.getbuffer())
+    # Drop original table columns
+    df_foreign_modified = df_foreign.drop(columns=table_columns, axis=1)
 
-        # Get the folder path
-        folder_path = os.path.dirname(temp_file_path)
+    # Add modified tables
+    for table_col, modified_names in modified_tables.items():
+        df_foreign_modified[table_col] = modified_names
 
-        if folder_path and os.path.isdir(folder_path):
-            st.success(f"Valid folder path! {folder_path}")
-            st.session_state.folder_path_unstructured = folder_path
+    return df_foreign_modified
