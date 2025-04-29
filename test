@@ -1,7 +1,7 @@
-triplets = [
-    ("Alice", "works_at", "Google"),
-    ("Bob", "lives_in", "New York"),
-    ("Charlie", "graduated_from", "MIT"),
-    ("Alice", "lives_in", "San Francisco"),
-    ("Google", "located_in", "California")
-]
+query = f"""
+CREATE KEYSPACE IF NOT EXISTS {keyspace}
+WITH REPLICATION = {{
+    'class': 'SimpleStrategy',
+    'replication_factor': {replication_factor}
+}};
+"""
