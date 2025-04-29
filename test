@@ -1,32 +1,7 @@
-import pandas as pd
-
-def modify_foreign_df(df_foreign: pd.DataFrame) -> pd.DataFrame:
-    """
-    Dynamically modify all table columns in the foreign dataframe.
-    
-    Args:
-        df_foreign (pd.DataFrame): Input DataFrame with table columns (like table1, table2, etc.)
-        
-    Returns:
-        pd.DataFrame: Modified DataFrame.
-    """
-    # Collect all table columns
-    table_columns = df_foreign.columns.tolist()
-    
-    # Dictionary to hold modified tables
-    modified_tables = {}
-
-    # Create modified names
-    for table_col in table_columns:
-        table_names = df_foreign[table_col]
-        modified_names = [name.split('.')[1] for name in table_names]
-        modified_tables[table_col] = modified_names
-
-    # Drop original table columns
-    df_foreign_modified = df_foreign.drop(columns=table_columns, axis=1)
-
-    # Add modified tables
-    for table_col, modified_names in modified_tables.items():
-        df_foreign_modified[table_col] = modified_names
-
-    return df_foreign_modified
+triplets = [
+    ("Alice", "works_at", "Google"),
+    ("Bob", "lives_in", "New York"),
+    ("Charlie", "graduated_from", "MIT"),
+    ("Alice", "lives_in", "San Francisco"),
+    ("Google", "located_in", "California")
+]
