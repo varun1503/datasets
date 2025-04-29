@@ -1,7 +1,57 @@
-query = f"""
-CREATE KEYSPACE IF NOT EXISTS {keyspace}
-WITH REPLICATION = {{
-    'class': 'SimpleStrategy',
-    'replication_factor': {replication_factor}
-}};
-"""
+from cassandra.cluster import Cluster
+
+def get_table_schema_details(keyspace_name, table_name, host='127.0.0.1'):
+    """
+    Retrieves schema details for a specified table in a Cassandra keyspace.
+
+    Args:
+        keyspace_name (str): The name of the keyspace.
+        table_name (str): The name of the table.
+        host (str): The IP address of the Cassandra host (default is '127.0.0.1').
+
+    Returns:
+        dict: A dictionary containing table schema details.
+    """
+    try:
+        # Connect to the Cassandra cluster
+        cluster = Cluster([host])
+        session = cluster.connect()
+
+        # Access the metadata
+        metadata = cluster.metadata
+
+        # Retrieve keyspace metadata
+        keyspace_metadata = metadata.keyspaces.get(keyspace_name)
+        if not keyspace_metadata:
+            print(f"Keyspace '{keyspace_name}' does not exist.")
+            return None
+
+        # Retrieve table metadata
+        table_metadata = keyspace_metadata.tables.get(table_name)
+        if not table_metadata:
+            print(f"Table '{table_name}' does not exist in keyspace '{keyspace_name}'.")
+            return None
+
+        # Extract schema details
+        columns = {col.name: col.cql_type for col in table_metadata.columns.values()}
+        partition_keys = [col.name for col in table_metadata.partition_key]
+        clustering_keys = [col.name for col in table_metadata.clustering_key]
+        primary_keys = [col.name for col in table_metadata.primary_key]
+        options = table_metadata.options
+
+        # Shutdown the session and cluster
+        session.shutdown()
+        cluster.shutdown()
+
+        # Return schema details
+        return {
+            'columns': columns,
+            'partition_keys': partition_keys,
+            'clustering_keys': clustering_keys,
+            'primary_keys': primary_keys,
+            'options': options
+        }
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return None
