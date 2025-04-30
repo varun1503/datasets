@@ -1,4 +1,6 @@
-def create_dynamic_cluster_table(keyspace, table, host='127.0.0.1', username=None, password=None):
+import uuid
+
+def insert_dynamic_clusters(keyspace, table, cluster_triple_final, host='127.0.0.1', username=None, password=None):
     from cassandra.cluster import Cluster
     from cassandra.auth import PlainTextAuthProvider
 
@@ -7,13 +9,15 @@ def create_dynamic_cluster_table(keyspace, table, host='127.0.0.1', username=Non
     session = cluster.connect()
     session.set_keyspace(keyspace)
 
-    query = f"""
-    CREATE TABLE IF NOT EXISTS {table} (
-        id UUID PRIMARY KEY,
-        clusters map<text, list<text>>
-    );
+    # Convert list of clusters to a map
+    cluster_map = {f"cluster{i+1}": cluster for i, cluster in enumerate(cluster_triple_final)}
+
+    insert_query = f"""
+    INSERT INTO {table} (id, clusters)
+    VALUES (%s, %s)
     """
-    session.execute(query)
+    session.execute(insert_query, (uuid.uuid4(), cluster_map))
+
     session.shutdown()
     cluster.shutdown()
-    print(f"Dynamic cluster table '{table}' created.")
+    print("Dynamic cluster data inserted.")
