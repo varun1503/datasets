@@ -1,33 +1,19 @@
-from cassandra.cluster import Cluster
+def create_dynamic_cluster_table(keyspace, table, host='127.0.0.1', username=None, password=None):
+    from cassandra.cluster import Cluster
+    from cassandra.auth import PlainTextAuthProvider
 
-def view_table_data(keyspace_name, table_name, host='127.0.0.1', limit=100):
+    auth = PlainTextAuthProvider(username, password) if username else None
+    cluster = Cluster([host], auth_provider=auth) if auth else Cluster([host])
+    session = cluster.connect()
+    session.set_keyspace(keyspace)
+
+    query = f"""
+    CREATE TABLE IF NOT EXISTS {table} (
+        id UUID PRIMARY KEY,
+        clusters map<text, list<text>>
+    );
     """
-    Retrieves and prints data from a given Cassandra table.
-
-    Args:
-        keyspace_name (str): The keyspace name.
-        table_name (str): The table name.
-        host (str): Cassandra host IP (default is localhost).
-        limit (int): Max number of rows to fetch (default is 100).
-    """
-    try:
-        # Connect to the Cassandra cluster
-        cluster = Cluster([host])
-        session = cluster.connect()
-        session.set_keyspace(keyspace_name)
-
-        # Run query
-        query = f"SELECT * FROM {table_name} LIMIT {limit};"
-        rows = session.execute(query)
-
-        # Print fetched rows
-        print(f"\nData from {keyspace_name}.{table_name}:\n")
-        for row in rows:
-            print(row)
-
-        # Clean up
-        session.shutdown()
-        cluster.shutdown()
-
-    except Exception as e:
-        print(f"Error retrieving data: {e}")
+    session.execute(query)
+    session.shutdown()
+    cluster.shutdown()
+    print(f"Dynamic cluster table '{table}' created.")
