@@ -1,6 +1,4 @@
-import uuid
-
-def insert_cluster_triplets(keyspace, table, file_name, cluster_data, host='127.0.0.1', username=None, password=None):
+def get_cluster_triplets_by_file(keyspace, table, file_name, host='127.0.0.1', username=None, password=None):
     from cassandra.cluster import Cluster
     from cassandra.auth import PlainTextAuthProvider
 
@@ -9,19 +7,26 @@ def insert_cluster_triplets(keyspace, table, file_name, cluster_data, host='127.
     session = cluster.connect()
     session.set_keyspace(keyspace)
 
-    # Prepare column names and placeholders dynamically
-    cluster_columns = [f"cluster{i+1}" for i in range(len(cluster_data))]
-    column_names = ", ".join(["id", "file_name"] + cluster_columns)
-    placeholders = ", ".join(["%s"] * (2 + len(cluster_data)))
-
+    # Retrieve all columns for the given file_name
     query = f"""
-    INSERT INTO {table} ({column_names})
-    VALUES ({placeholders});
+    SELECT * FROM {table}
+    WHERE file_name = %s ALLOW FILTERING;
     """
 
-    values = [uuid.uuid4(), file_name] + cluster_data
-    session.execute(query, values)
+    result = session.execute(query, (file_name,))
+    data = result.one()
 
     session.shutdown()
     cluster.shutdown()
-    print(f"Inserted triplets for file '{file_name}' into table '{table}'.")
+
+    if not data:
+        print(f"No data found for file: {file_name}")
+        return {}
+
+    # Extract cluster triplets
+    triplets = {}
+    for col in data._fields:
+        if col.startswith("cluster") and isinstance(getattr(data, col), list):
+            triplets[col] = getattr(data, col)
+
+    return triplets
