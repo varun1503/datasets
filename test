@@ -1,23 +1,33 @@
-import uuid
+Got it! Here’s the revised and clearer version of your task list with point 7 corrected:
 
-def insert_dynamic_clusters(keyspace, table, cluster_triple_final, host='127.0.0.1', username=None, password=None):
-    from cassandra.cluster import Cluster
-    from cassandra.auth import PlainTextAuthProvider
+1. Enhance the recipe CLI code by adding three new recipes:
 
-    auth = PlainTextAuthProvider(username, password) if username else None
-    cluster = Cluster([host], auth_provider=auth) if auth else Cluster([host])
-    session = cluster.connect()
-    session.set_keyspace(keyspace)
+langgraph
 
-    # Convert list of clusters to a map
-    cluster_map = {f"cluster{i+1}": cluster for i, cluster in enumerate(cluster_triple_final)}
+knowledgegraph
 
-    insert_query = f"""
-    INSERT INTO {table} (id, clusters)
-    VALUES (%s, %s)
-    """
-    session.execute(insert_query, (uuid.uuid4(), cluster_map))
+advanced_rag
 
-    session.shutdown()
-    cluster.shutdown()
-    print("Dynamic cluster data inserted.")
+
+
+2. Extend the advanced_rag recipe to include a new chunking method: semantic chunking.
+
+
+3. Convert the knowledgegraph notebook into Python scripts to retrieve data from a .gpickle file.
+
+
+4. Create a script for generating a knowledge graph from PDF files.
+
+
+5. Develop a UI for all three recipes, incorporating features as per the requirements.
+
+
+6. Test and debug the codebase, ensuring functionality, and push the finalized code to Git.
+
+
+7. Create a script to upload knowledge graph triples into DataStax (without changing their format).
+
+
+
+Would you like me to help scaffold or write code for any specific point on this list?
+
