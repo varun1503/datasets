@@ -1,4 +1,6 @@
-def create_cluster_columns_table(keyspace, table, cluster_names, host='127.0.0.1', username=None, password=None):
+import uuid
+
+def insert_cluster_triplets(keyspace, table, file_name, cluster_data, host='127.0.0.1', username=None, password=None):
     from cassandra.cluster import Cluster
     from cassandra.auth import PlainTextAuthProvider
 
@@ -7,18 +9,19 @@ def create_cluster_columns_table(keyspace, table, cluster_names, host='127.0.0.1
     session = cluster.connect()
     session.set_keyspace(keyspace)
 
-    # Build dynamic columns
-    cluster_columns = ",\n".join([f"{name} list<text>" for name in cluster_names])
-    
+    # Prepare column names and placeholders dynamically
+    cluster_columns = [f"cluster{i+1}" for i in range(len(cluster_data))]
+    column_names = ", ".join(["id", "file_name"] + cluster_columns)
+    placeholders = ", ".join(["%s"] * (2 + len(cluster_data)))
+
     query = f"""
-    CREATE TABLE IF NOT EXISTS {table} (
-        id UUID PRIMARY KEY,
-        file_name text,
-        {cluster_columns}
-    );
+    INSERT INTO {table} ({column_names})
+    VALUES ({placeholders});
     """
-    
-    session.execute(query)
+
+    values = [uuid.uuid4(), file_name] + cluster_data
+    session.execute(query, values)
+
     session.shutdown()
     cluster.shutdown()
-    print(f"Table '{table}' with dynamic cluster columns created.")
+    print(f"Inserted triplets for file '{file_name}' into table '{table}'.")
