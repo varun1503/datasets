@@ -1,62 +1,26 @@
 from cassandra.cluster import Cluster
 from cassandra.auth import PlainTextAuthProvider
-from uuid import uuid1
-from datetime import datetime
 
-def insert_triplets_with_metadata(
-    keyspace,
-    table,
-    file_name,
-    community_triplets,
-    use_case_id=None,
-    use_case_nm=None,
-    base_metadata=None,
-    vector_lookup=None,
-    host='127.0.0.1',
-    username=None,
-    password=None
-):
-    # Setup Cassandra session
+def create_final_triplet_table(keyspace, table_name="triplet_store", host='127.0.0.1', username=None, password=None):
     auth = PlainTextAuthProvider(username, password) if username else None
     cluster = Cluster([host], auth_provider=auth) if auth else Cluster([host])
     session = cluster.connect()
     session.set_keyspace(keyspace)
 
-    # Prepare insert query
-    query = f"""
-    INSERT INTO {table} (
-        row_id, file_name, community_id, subject, predicate, object,
-        creat_ts, mtda_val_tx, use_case_id, use_case_nm, vector
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    create_query = f"""
+    CREATE TABLE IF NOT EXISTS {table_name} (
+        row_id timeuuid,
+        bdy_blob_tx text,
+        creat_ts timestamp,
+        mtda_val_tx map<text, text>,
+        use_case_id int,
+        use_case_nm text,
+        vector vector<float, 1024>,
+        PRIMARY KEY (row_id)
+    );
     """
 
-    for community_id, community in enumerate(community_triplets, start=1):
-        for triple in community:
-            parts = triple.strip().split("|")
-            if len(parts) != 3:
-                continue  # Skip malformed triplet
-
-            subject, predicate, object_ = parts
-            vector = vector_lookup.get(triple) if vector_lookup else None
-
-            # Merge metadata with community_id
-            metadata = dict(base_metadata or {})
-            metadata["community_id"] = str(community_id)
-
-            session.execute(query, (
-                uuid1(),
-                file_name,
-                community_id,
-                subject,
-                predicate,
-                object_,
-                datetime.utcnow(),
-                metadata,
-                use_case_id,
-                use_case_nm,
-                vector
-            ))
-
+    session.execute(create_query)
     session.shutdown()
     cluster.shutdown()
-    print("Triplets inserted with metadata including community ID.")
+    print(f"Final triplet table '{table_name}' created in keyspace '{keyspace}'.")
