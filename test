@@ -1,46 +1,28 @@
 from cassandra.cluster import Cluster
 from cassandra.auth import PlainTextAuthProvider
-from cassandra.query import SimpleStatement
-from uuid import uuid1
-from datetime import datetime
 
-def insert_triplet_with_metadata(keyspace, table, subject, predicate, object_, community, triplet_list,
-                                 use_case_id=101, use_case_nm="Earnings Call Analysis",
-                                 host='127.0.0.1', username=None, password=None):
+def create_simplified_triplet_table(keyspace, table_name="triplet_store", host='127.0.0.1', username=None, password=None):
     auth = PlainTextAuthProvider(username, password) if username else None
     cluster = Cluster([host], auth_provider=auth) if auth else Cluster([host])
     session = cluster.connect()
     session.set_keyspace(keyspace)
 
-    # Prepare metadata map
-    mtda_val_tx = {
-        "community": community,
-        "triplets": "; ".join(triplet_list)  # Convert list to semicolon-separated string
-    }
-
-    insert_query = f"""
-    INSERT INTO {table} (
-        row_id, subject, predicate, object, creat_ts, mtda_val_tx,
-        use_case_id, use_case_nm, vector
-    )
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    create_query = f"""
+    CREATE TABLE IF NOT EXISTS {table_name} (
+        row_id timeuuid,
+        subject text,
+        predicate text,
+        object text,
+        creat_ts timestamp,
+        mtda_val_tx map<text, text>,
+        use_case_id int,
+        use_case_nm text,
+        vector vector<float, 1024>,
+        PRIMARY KEY (row_id)
+    );
     """
 
-    session.execute(
-        insert_query,
-        (
-            uuid1(),               # row_id
-            subject,
-            predicate,
-            object_,
-            datetime.utcnow(),     # creat_ts
-            mtda_val_tx,
-            use_case_id,
-            use_case_nm,
-            None                   # vector (can be added later)
-        )
-    )
-
+    session.execute(create_query)
     session.shutdown()
     cluster.shutdown()
-    print(f"Inserted triplet: ({subject}, {predicate}, {object_}) with community: {community}")
+    print(f"Simplified table '{table_name}' created successfully in keyspace '{keyspace}'.")
