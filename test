@@ -1,32 +1,62 @@
-def get_cluster_triplets_by_file(keyspace, table, file_name, host='127.0.0.1', username=None, password=None):
-    from cassandra.cluster import Cluster
-    from cassandra.auth import PlainTextAuthProvider
+from cassandra.cluster import Cluster
+from cassandra.auth import PlainTextAuthProvider
+from uuid import uuid1
+from datetime import datetime
 
+def insert_triplets_with_metadata(
+    keyspace,
+    table,
+    file_name,
+    community_triplets,
+    use_case_id=None,
+    use_case_nm=None,
+    base_metadata=None,
+    vector_lookup=None,
+    host='127.0.0.1',
+    username=None,
+    password=None
+):
+    # Setup Cassandra session
     auth = PlainTextAuthProvider(username, password) if username else None
     cluster = Cluster([host], auth_provider=auth) if auth else Cluster([host])
     session = cluster.connect()
     session.set_keyspace(keyspace)
 
-    # Retrieve all columns for the given file_name
+    # Prepare insert query
     query = f"""
-    SELECT * FROM {table}
-    WHERE file_name = %s ALLOW FILTERING;
+    INSERT INTO {table} (
+        row_id, file_name, community_id, subject, predicate, object,
+        creat_ts, mtda_val_tx, use_case_id, use_case_nm, vector
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
 
-    result = session.execute(query, (file_name,))
-    data = result.one()
+    for community_id, community in enumerate(community_triplets, start=1):
+        for triple in community:
+            parts = triple.strip().split("|")
+            if len(parts) != 3:
+                continue  # Skip malformed triplet
+
+            subject, predicate, object_ = parts
+            vector = vector_lookup.get(triple) if vector_lookup else None
+
+            # Merge metadata with community_id
+            metadata = dict(base_metadata or {})
+            metadata["community_id"] = str(community_id)
+
+            session.execute(query, (
+                uuid1(),
+                file_name,
+                community_id,
+                subject,
+                predicate,
+                object_,
+                datetime.utcnow(),
+                metadata,
+                use_case_id,
+                use_case_nm,
+                vector
+            ))
 
     session.shutdown()
     cluster.shutdown()
-
-    if not data:
-        print(f"No data found for file: {file_name}")
-        return {}
-
-    # Extract cluster triplets
-    triplets = {}
-    for col in data._fields:
-        if col.startswith("cluster") and isinstance(getattr(data, col), list):
-            triplets[col] = getattr(data, col)
-
-    return triplets
+    print("Triplets inserted with metadata including community ID.")
