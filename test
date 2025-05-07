@@ -1,28 +1,33 @@
-from cassandra.cluster import Cluster
-from cassandra.auth import PlainTextAuthProvider
+from typing import List, Tuple, Union
 
-def create_simplified_triplet_table(keyspace, table_name="triplet_store", host='127.0.0.1', username=None, password=None):
-    auth = PlainTextAuthProvider(username, password) if username else None
-    cluster = Cluster([host], auth_provider=auth) if auth else Cluster([host])
-    session = cluster.connect()
-    session.set_keyspace(keyspace)
+KG_TRIPLE_DELIMITER = "\n"  # Adjust if needed
 
-    create_query = f"""
-    CREATE TABLE IF NOT EXISTS {table_name} (
-        row_id timeuuid,
-        subject text,
-        predicate text,
-        object text,
-        creat_ts timestamp,
-        mtda_val_tx map<text, text>,
-        use_case_id int,
-        use_case_nm text,
-        vector vector<float, 1024>,
-        PRIMARY KEY (row_id)
-    );
-    """
+class CreateGpickleFile:
+    def parse_triples(self, response, delimiter=KG_TRIPLE_DELIMITER) -> List[List[str]]:
+        if not response or not response.content:
+            return []
+        # Assume each chunk is separated by two newlines
+        chunks = response.content.strip().split("\n\n")
+        return [chunk.strip().split(delimiter) for chunk in chunks]
 
-    session.execute(create_query)
-    session.shutdown()
-    cluster.shutdown()
-    print(f"Simplified table '{table_name}' created successfully in keyspace '{keyspace}'.")
+    def extract_communities(self, triplets: List[List[str]]) -> Tuple[List[List[Union[str, List[str]]]], List[List[str]]]:
+        communities = []
+        triples = []
+
+        for chunk in triplets:  # Each chunk is a list of triple strings
+            chunk_communities = []
+            chunk_triples = []
+            for entry in chunk:
+                entry = entry.strip("()")
+                parts = [p.strip() for p in entry.split(",")]
+                if len(parts) < 2:
+                    continue  # Skip malformed
+                community_raw = parts[0]
+                community_split = community_raw.split("and")
+                chunk_communities.append(community_split if len(community_split) > 1 else community_raw)
+                triple = parts[1:]
+                chunk_triples.append("|".join(triple))  # Join with '|'
+            communities.append(chunk_communities)
+            triples.append(chunk_triples)
+
+        return communities, triples
