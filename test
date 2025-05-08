@@ -1,33 +1,11 @@
-from typing import List, Tuple, Union
-
-KG_TRIPLE_DELIMITER = "\n"  # Adjust if needed
-
-class CreateGpickleFile:
-    def parse_triples(self, response, delimiter=KG_TRIPLE_DELIMITER) -> List[List[str]]:
-        if not response or not response.content:
-            return []
-        # Assume each chunk is separated by two newlines
-        chunks = response.content.strip().split("\n\n")
-        return [chunk.strip().split(delimiter) for chunk in chunks]
-
-    def extract_communities(self, triplets: List[List[str]]) -> Tuple[List[List[Union[str, List[str]]]], List[List[str]]]:
-        communities = []
-        triples = []
-
-        for chunk in triplets:  # Each chunk is a list of triple strings
-            chunk_communities = []
-            chunk_triples = []
-            for entry in chunk:
-                entry = entry.strip("()")
-                parts = [p.strip() for p in entry.split(",")]
-                if len(parts) < 2:
-                    continue  # Skip malformed
-                community_raw = parts[0]
-                community_split = community_raw.split("and")
-                chunk_communities.append(community_split if len(community_split) > 1 else community_raw)
-                triple = parts[1:]
-                chunk_triples.append("|".join(triple))  # Join with '|'
-            communities.append(chunk_communities)
-            triples.append(chunk_triples)
-
-        return communities, triples
+def process_chunk(index, chunk, gpickle):
+    try:
+        merged_graph = gpickle.get_merged_graph_cluster_single(chunk['content'])
+        quadruples = gpickle.get_qudruples_single(merged_graph)
+        community, triples = gpickle.extract_communities(quadruples)
+        chunk["community"] = community
+        chunk["triple"] = triples
+        return index, chunk
+    except Exception as e:
+        print(f"Error processing chunk at index {index}: {e}")
+        return index, None
