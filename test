@@ -1,11 +1,15 @@
-def process_chunk(index, chunk, gpickle):
-    try:
-        merged_graph = gpickle.get_merged_graph_cluster_single(chunk['content'])
-        quadruples = gpickle.get_qudruples_single(merged_graph)
-        community, triples = gpickle.extract_communities(quadruples)
-        chunk["community"] = community
-        chunk["triple"] = triples
-        return index, chunk
-    except Exception as e:
-        print(f"Error processing chunk at index {index}: {e}")
-        return index, None
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
+
+gpickle = createGpicklefile()
+
+with ThreadPoolExecutor(max_workers=10) as executor:
+    futures = [
+        executor.submit(process_chunk, idx, chunk, gpickle)
+        for idx, chunk in enumerate(chunks_data)
+    ]
+
+    for future in tqdm(as_completed(futures), total=len(chunks_data), desc="triple processing"):
+        idx, result = future.result()
+        if result:
+            chunks_data[idx] = result
