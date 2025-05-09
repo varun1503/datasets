@@ -1,37 +1,21 @@
-import concurrent.futures
-import logging
-from tqdm import tqdm  # Assuming 'tada' meant 'tqdm'
+def extract_communities(self, triplets: List[str]):
+    communities = []
+    triples = []
 
-from safechain.lcel import model
-from toda import toda  # This still seems unclear – is this a progress bar or a typo?
+    for obj in triplets:  # Each chunk is a list of triple strings
+        obj = obj.strip("()")
+        parts = [p.strip() for p in obj.split(",")]
 
-logger = logging.getLogger(__name__)
+        if len(parts) < 2:
+            continue  # Skip malformed input
 
+        community_raw = parts[0]
+        community_split = [c.strip() for c in community_raw.split("and")]
 
-class concurrent_embedding:
-    def __init__(self, model_idx: str):
-        self.embedding_model = model(model_idx)
+        # Always append strings, never nested lists
+        communities.extend(community_split)
 
-    def _get_embed(self, idx, chunk):
-        try:
-            raw_text_embeddings = self.embedding_model.embed_documents([chunk["content"]])
-            return idx, raw_text_embeddings[0]
-        except Exception as e:
-            logger.error(f"Embedding failed for index {idx}: {e}")
-            return idx, None  # Return None if failed
+        triple = parts[1:]
+        triples.append("|".join(triple))
 
-    def chunk_embedding(self, chunks_data):
-        with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
-            futures = [executor.submit(self._get_embed, idx, doc) for idx, doc in enumerate(chunks_data)]
-
-            for future in tqdm(concurrent.futures.as_completed(futures), total=len(chunks_data), desc="Futures processing"):
-                try:
-                    idx, emb = future.result()
-                    if emb is not None:
-                        chunks_data[idx]["embedding"] = emb
-                    else:
-                        logger.warning(f"No embedding returned for index {idx}")
-                except Exception as e:
-                    logger.error(f"Error processing future: {e}")
-
-        return chunks_data
+    return communities, triples
