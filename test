@@ -1,21 +1,2 @@
-def extract_communities(self, triplets: List[str]):
-    communities = []
-    triples = []
+He has efficiently taken full ownership of the Lumos project within a short period, managing several changes effectively. Given the interdependent nature of his work with the backend team, occasional communication gaps have arisen. I have advised him to focus on enhancing his communication skills to ensure smoother collaboration.
 
-    for obj in triplets:  # Each chunk is a list of triple strings
-        obj = obj.strip("()")
-        parts = [p.strip() for p in obj.split(",")]
-
-        if len(parts) < 2:
-            continue  # Skip malformed input
-
-        community_raw = parts[0]
-        community_split = [c.strip() for c in community_raw.split("and")]
-
-        # Always append strings, never nested lists
-        communities.extend(community_split)
-
-        triple = parts[1:]
-        triples.append("|".join(triple))
-
-    return communities, triples
