@@ -1,43 +1,9 @@
-from cassandra.cluster import Cluster
-from cassandra.auth import PlainTextAuthProvider
+from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 
-def retrieve_similar_chunks_cosine(
-    query_vector,
-    keyspace,
-    table,
-    top_k=5,
-    host='127.0.0.1',
-    username=None,
-    password=None
-):
-    # Cassandra setup
-    auth = PlainTextAuthProvider(username, password) if username else None
-    cluster = Cluster([host], auth_provider=auth) if auth else Cluster([host])
-    session = cluster.connect()
-    session.set_keyspace(keyspace)
-
-    # Convert vector to CQL string format
-    vector_str = "[" + ",".join(f"{v:.6f}" for v in query_vector) + "]"
-
-    # Query with ANN
-    query = f"""
-    SELECT row_id, chunks, vector
-    FROM {table}
-    ORDER BY vector ANN OF {vector_str}
-    LIMIT {top_k};
-    """
-    rows = session.execute(query)
-    
-    results = []
-    for row in rows:
-        results.append({
-            "row_id": row.row_id,
-            "chunks": row.chunks,
-            "vector": row.vector
-        })
-
-    session.shutdown()
-    cluster.shutdown()
-    
-    return results
+def compute_cosine_similarity(self, query_vector, db_vector):
+    # sklearn expects 2D arrays
+    return float(cosine_similarity(
+        np.array(query_vector).reshape(1, -1),
+        np.array(db_vector).reshape(1, -1)
+    )[0][0])
