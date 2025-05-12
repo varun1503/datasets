@@ -1,42 +1,19 @@
-results = []
+def create_ann_index_cosine(keyspace, table, vector_column='vector', host='127.0.0.1', username=None, password=None):
+    from cassandra.cluster import Cluster
+    from cassandra.auth import PlainTextAuthProvider
 
-try:
-    for row in rows:
-        print(row)
+    auth = PlainTextAuthProvider(username, password) if username else None
+    cluster = Cluster([host], auth_provider=auth) if auth else Cluster([host])
+    session = cluster.connect()
+    session.set_keyspace(keyspace)
 
-        db_vector = row.vector
-
-        if db_vector:
-            score = self.compute_cosine_similarity(query_vector, db_vector)
-
-            # Start metadata with basic file name
-            metadata = {"file_name": row.prtn_id}
-
-            if row.mtda_val_tex:
-                mdata = dict(row.mtda_val_tex)  # convert to dict if needed
-
-                # Normalize fields: parent_node, next_node, prev_node
-                for key in ["parent_node", "next_node", "prev_node"]:
-                    if key in mdata:
-                        val = mdata[key]
-                        if isinstance(val, list):
-                            val = ', '.join(str(v) for v in val)
-                        val = val.strip()
-                        metadata[key] = None if val.lower() == "na" else val
-
-                # Add remaining metadata if needed
-                metadata.update({k: v for k, v in mdata.items() if k not in metadata})
-
-            # Create the Document object
-            doc = Document(
-                page_content=row.bdy_blob_tx,
-                metadata=metadata
-            )
-            doc.id = str(row.row_id)
-
-            results.append((doc, score))
-
-    return results
-
-except Exception as e:
-    print(f"Error during retrieval: {e}")
+    index_query = f"""
+    CREATE CUSTOM INDEX IF NOT EXISTS ann_index_{vector_column}
+    ON {table}({vector_column})
+    USING 'StorageAttachedIndex'
+    WITH OPTIONS = {{ 'similarity_function': 'COSINE' }};
+    """
+    session.execute(index_query)
+    session.shutdown()
+    cluster.shutdown()
+    print(f"Vector index created on '{vector_column}' with COSINE similarity.")
