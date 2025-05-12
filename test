@@ -1,22 +1,43 @@
 from cassandra.cluster import Cluster
 from cassandra.auth import PlainTextAuthProvider
+import numpy as np
 
-def create_ann_index_cosine(keyspace, table, vector_column='vector', host='127.0.0.1', username=None, password=None):
-    # Connect to Cassandra
+def retrieve_similar_chunks_cosine(
+    query_vector,
+    keyspace,
+    table,
+    top_k=5,
+    host='127.0.0.1',
+    username=None,
+    password=None
+):
+    # Cassandra setup
     auth = PlainTextAuthProvider(username, password) if username else None
     cluster = Cluster([host], auth_provider=auth) if auth else Cluster([host])
     session = cluster.connect()
     session.set_keyspace(keyspace)
 
-    # Create the index
-    index_query = f"""
-    CREATE CUSTOM INDEX IF NOT EXISTS ann_index_{vector_column}
-    ON {table}({vector_column})
-    USING 'StorageAttachedIndex'
-    WITH OPTIONS = {{ 'similarity_function': 'COSINE' }};
+    # Convert vector to CQL string format
+    vector_str = "[" + ",".join(f"{v:.6f}" for v in query_vector) + "]"
+
+    # Query with ANN
+    query = f"""
+    SELECT row_id, chunks, vector
+    FROM {table}
+    ORDER BY vector ANN OF {vector_str}
+    LIMIT {top_k};
     """
-    session.execute(index_query)
+    rows = session.execute(query)
+    
+    results = []
+    for row in rows:
+        results.append({
+            "row_id": row.row_id,
+            "chunks": row.chunks,
+            "vector": row.vector
+        })
 
     session.shutdown()
     cluster.shutdown()
-    print(f"ANN index on '{vector_column}' using COSINE similarity created for table '{table}' in keyspace '{keyspace}'.")
+    
+    return results
