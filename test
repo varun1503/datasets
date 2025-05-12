@@ -1,2 +1,22 @@
-He has efficiently taken full ownership of the Lumos project within a short period, managing several changes effectively. Given the interdependent nature of his work with the backend team, occasional communication gaps have arisen. I have advised him to focus on enhancing his communication skills to ensure smoother collaboration.
+from cassandra.cluster import Cluster
+from cassandra.auth import PlainTextAuthProvider
 
+def create_ann_index_cosine(keyspace, table, vector_column='vector', host='127.0.0.1', username=None, password=None):
+    # Connect to Cassandra
+    auth = PlainTextAuthProvider(username, password) if username else None
+    cluster = Cluster([host], auth_provider=auth) if auth else Cluster([host])
+    session = cluster.connect()
+    session.set_keyspace(keyspace)
+
+    # Create the index
+    index_query = f"""
+    CREATE CUSTOM INDEX IF NOT EXISTS ann_index_{vector_column}
+    ON {table}({vector_column})
+    USING 'StorageAttachedIndex'
+    WITH OPTIONS = {{ 'similarity_function': 'COSINE' }};
+    """
+    session.execute(index_query)
+
+    session.shutdown()
+    cluster.shutdown()
+    print(f"ANN index on '{vector_column}' using COSINE similarity created for table '{table}' in keyspace '{keyspace}'.")
