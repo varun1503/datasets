@@ -1,20 +1,23 @@
-from langchain.schema import Document  # or adjust based on your LangChain version
+from tqdm import tqdm
 
-results = []
+for data_point in tqdm(chunk_data, total=len(chunk_data), desc="inserting data"):
+    try:
+        metadata = data_point.get("metadata", {})
+        meta_data = {
+            "parent_node": [x for x in (metadata.get("parent_node") or []) if x],
+            "prev_node": [x for x in (metadata.get("prev_node") or []) if x],
+            "child_nodes": [x for x in (metadata.get("child_nodes") or []) if x],
+            "next_node": [x for x in (metadata.get("next_node") or []) if x],
+        }
 
-for row in rows:
-    db_vector = row.vector
-    if db_vector:
-        score = self.compute_cosine_similarity(query_vector, db_vector)
-
-        # Create the Document object
-        doc = Document(
-            page_content=row.bdy_blob_tx,
-            metadata=row.mtda_val_tx or {}
+        caswr.insert_triplet(
+            data_point["content"],
+            community=data_point.get("community"),
+            triplet_list=data_point.get("triplet"),
+            text_embedding=data_point["embedding"][0],
+            file_name=file_name,
+            meta_data=meta_data
         )
-        doc.row_id = str(row.row_id)  # attach row_id as attribute
 
-        results.append((doc, score))
-        print(row.bdy_blob_tx)
-
-return results
+    except Exception as e:
+        print(f"Error inserting data: {e}")
