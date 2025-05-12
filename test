@@ -1,11 +1,42 @@
-from tqdm import tqdm
+results = []
 
-for data_point in tqdm(chunk_data, total=len(chunk_data), desc="inserting data"):
-    metadata = data_point.get("metadata", {})
+try:
+    for row in rows:
+        print(row)
 
-    meta_data = {
-        "parent_node": [metadata.get("parent_node")] if metadata.get("parent_node") is not None else ["NA"],
-        "prev_node": [metadata.get("prev_node")] if metadata.get("prev_node") is not None else ["NA"],
-        "child_nodes": metadata.get("child_nodes") if metadata.get("child_nodes") is not None else ["NA"],
-        "next_node": [metadata.get("next_node")] if metadata.get("next_node") is not None else ["NA"],
-    }
+        db_vector = row.vector
+
+        if db_vector:
+            score = self.compute_cosine_similarity(query_vector, db_vector)
+
+            # Start metadata with basic file name
+            metadata = {"file_name": row.prtn_id}
+
+            if row.mtda_val_tex:
+                mdata = dict(row.mtda_val_tex)  # convert to dict if needed
+
+                # Normalize fields: parent_node, next_node, prev_node
+                for key in ["parent_node", "next_node", "prev_node"]:
+                    if key in mdata:
+                        val = mdata[key]
+                        if isinstance(val, list):
+                            val = ', '.join(str(v) for v in val)
+                        val = val.strip()
+                        metadata[key] = None if val.lower() == "na" else val
+
+                # Add remaining metadata if needed
+                metadata.update({k: v for k, v in mdata.items() if k not in metadata})
+
+            # Create the Document object
+            doc = Document(
+                page_content=row.bdy_blob_tx,
+                metadata=metadata
+            )
+            doc.id = str(row.row_id)
+
+            results.append((doc, score))
+
+    return results
+
+except Exception as e:
+    print(f"Error during retrieval: {e}")
