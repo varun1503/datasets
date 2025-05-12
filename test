@@ -1,9 +1,20 @@
-from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
+from langchain.schema import Document  # or adjust based on your LangChain version
 
-def compute_cosine_similarity(self, query_vector, db_vector):
-    # sklearn expects 2D arrays
-    return float(cosine_similarity(
-        np.array(query_vector).reshape(1, -1),
-        np.array(db_vector).reshape(1, -1)
-    )[0][0])
+results = []
+
+for row in rows:
+    db_vector = row.vector
+    if db_vector:
+        score = self.compute_cosine_similarity(query_vector, db_vector)
+
+        # Create the Document object
+        doc = Document(
+            page_content=row.bdy_blob_tx,
+            metadata=row.mtda_val_tx or {}
+        )
+        doc.row_id = str(row.row_id)  # attach row_id as attribute
+
+        results.append((doc, score))
+        print(row.bdy_blob_tx)
+
+return results
