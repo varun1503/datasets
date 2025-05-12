@@ -1,23 +1,11 @@
 from tqdm import tqdm
 
 for data_point in tqdm(chunk_data, total=len(chunk_data), desc="inserting data"):
-    try:
-        metadata = data_point.get("metadata", {})
-        meta_data = {
-            "parent_node": [x for x in (metadata.get("parent_node") or []) if x],
-            "prev_node": [x for x in (metadata.get("prev_node") or []) if x],
-            "child_nodes": [x for x in (metadata.get("child_nodes") or []) if x],
-            "next_node": [x for x in (metadata.get("next_node") or []) if x],
-        }
+    metadata = data_point.get("metadata", {})
 
-        caswr.insert_triplet(
-            data_point["content"],
-            community=data_point.get("community"),
-            triplet_list=data_point.get("triplet"),
-            text_embedding=data_point["embedding"][0],
-            file_name=file_name,
-            meta_data=meta_data
-        )
-
-    except Exception as e:
-        print(f"Error inserting data: {e}")
+    meta_data = {
+        "parent_node": [metadata.get("parent_node")] if metadata.get("parent_node") is not None else ["NA"],
+        "prev_node": [metadata.get("prev_node")] if metadata.get("prev_node") is not None else ["NA"],
+        "child_nodes": metadata.get("child_nodes") if metadata.get("child_nodes") is not None else ["NA"],
+        "next_node": [metadata.get("next_node")] if metadata.get("next_node") is not None else ["NA"],
+    }
