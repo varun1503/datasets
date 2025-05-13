@@ -1,19 +1,12 @@
-def create_ann_index_cosine(keyspace, table, vector_column='vector', host='127.0.0.1', username=None, password=None):
-    from cassandra.cluster import Cluster
-    from cassandra.auth import PlainTextAuthProvider
+import os
+from dotenv import load_dotenv
 
-    auth = PlainTextAuthProvider(username, password) if username else None
-    cluster = Cluster([host], auth_provider=auth) if auth else Cluster([host])
-    session = cluster.connect()
-    session.set_keyspace(keyspace)
+load_dotenv()  # Load from .env
 
-    index_query = f"""
-    CREATE CUSTOM INDEX IF NOT EXISTS ann_index_{vector_column}
-    ON {table}({vector_column})
-    USING 'StorageAttachedIndex'
-    WITH OPTIONS = {{ 'similarity_function': 'COSINE' }};
-    """
-    session.execute(index_query)
-    session.shutdown()
-    cluster.shutdown()
-    print(f"Vector index created on '{vector_column}' with COSINE similarity.")
+# Convert comma-separated string to list of strings
+contact_points: list[str] = os.environ.get("cluster_nodes", "127.0.0.1").split(",")
+
+# Optional: strip whitespace
+contact_points = [ip.strip() for ip in contact_points]
+
+print("Contact Points:", contact_points)
