@@ -1,39 +1,17 @@
 from cassandra.cluster import Cluster
 
-class KeyspaceNotFoundError(Exception):
+class KeyspaceAlreadyExistsError(Exception):
     pass
 
-class TableNotFoundError(Exception):
-    def __init__(self, keyspace, missing_table, existing_tables):
-        self.message = (
-            f"Table '{missing_table}' does not exist in keyspace '{keyspace}'.\n"
-            f"Available tables: {existing_tables}"
-        )
-        super().__init__(self.message)
-
-def check_keyspace_and_table(cluster_nodes, keyspace, table):
+def raise_if_keyspace_exists(cluster_nodes, keyspace):
     cluster = Cluster(cluster_nodes)
     session = cluster.connect()
 
-    # Check if keyspace exists
     keyspaces = session.execute("SELECT keyspace_name FROM system_schema.keyspaces;")
     keyspace_names = [row.keyspace_name for row in keyspaces]
 
-    if keyspace not in keyspace_names:
-        session.shutdown()
-        cluster.shutdown()
-        raise KeyspaceNotFoundError(f"Keyspace '{keyspace}' does not exist.")
-
-    # Check tables in the keyspace
-    tables = session.execute(f"SELECT table_name FROM system_schema.tables WHERE keyspace_name = '{keyspace}';")
-    table_names = [row.table_name for row in tables]
-
-    if table not in table_names:
-        session.shutdown()
-        cluster.shutdown()
-        raise TableNotFoundError(keyspace, table, table_names)
-
-    # Both exist
     session.shutdown()
     cluster.shutdown()
-    print(f"Keyspace '{keyspace}' and table '{table}' both exist.")
+
+    if keyspace in keyspace_names:
+        raise KeyspaceAlreadyExistsError(f"Keyspace '{keyspace}' already exists.")
