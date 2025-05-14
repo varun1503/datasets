@@ -1,29 +1,33 @@
-import os
-from dotenv import load_dotenv
+from cassandra.cluster import Cluster
+from cassandra.auth import PlainTextAuthProvider
 
-load_dotenv()  # Load from .env
+def check_keyspace_and_table(cluster_nodes, keyspace, table):
+    # Connect to the Cassandra cluster
+    cluster = Cluster(cluster_nodes)
+    session = cluster.connect()
 
-# Convert comma-separated string to list of strings
-contact_points: list[str] = os.environ.get("cluster_nodes", "127.0.0.1").split(",")
+    # Fetch all keyspaces
+    keyspaces = session.execute("SELECT keyspace_name FROM system_schema.keyspaces;")
+    keyspace_names = [row.keyspace_name for row in keyspaces]
 
-# Optional: strip whitespace
-contact_points = [ip.strip() for ip in contact_points]
+    if keyspace not in keyspace_names:
+        print(f"Keyspace '{keyspace}' does not exist.")
+        session.shutdown()
+        cluster.shutdown()
+        return {"keyspace_exists": False, "table_exists": False, "tables": []}
 
-print("Contact Points:", contact_points)Sure! Here's a more polished and professional rephrasing of your message:
+    # Fetch all tables in the keyspace
+    tables = session.execute(f"SELECT table_name FROM system_schema.tables WHERE keyspace_name = '{keyspace}';")
+    table_names = [row.table_name for row in tables]
 
+    if table in table_names:
+        print(f"Keyspace '{keyspace}' and table '{table}' both exist.")
+        result = {"keyspace_exists": True, "table_exists": True, "tables": table_names}
+    else:
+        print(f"Keyspace '{keyspace}' exists, but table '{table}' does NOT.")
+        print(f"Tables in keyspace '{keyspace}': {table_names}")
+        result = {"keyspace_exists": True, "table_exists": False, "tables": table_names}
 
----
-
-Hi @Manoj Kumar, good afternoon.
-
-I've successfully created the FastAPI and it's working as expected. I also set up the project repository as you suggested. However, I noticed that the lumos-tooling repository already contains code related to recipecli, so I'm currently unable to push my changes there.
-
-Could you please advise on the next steps?
-
-Thanks!
-
-
----
-
-Let me know if you want a more formal or more casual version as well.
-
+    session.shutdown()
+    cluster.shutdown()
+    return result
