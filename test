@@ -1,33 +1,39 @@
 from cassandra.cluster import Cluster
-from cassandra.auth import PlainTextAuthProvider
+
+class KeyspaceNotFoundError(Exception):
+    pass
+
+class TableNotFoundError(Exception):
+    def __init__(self, keyspace, missing_table, existing_tables):
+        self.message = (
+            f"Table '{missing_table}' does not exist in keyspace '{keyspace}'.\n"
+            f"Available tables: {existing_tables}"
+        )
+        super().__init__(self.message)
 
 def check_keyspace_and_table(cluster_nodes, keyspace, table):
-    # Connect to the Cassandra cluster
     cluster = Cluster(cluster_nodes)
     session = cluster.connect()
 
-    # Fetch all keyspaces
+    # Check if keyspace exists
     keyspaces = session.execute("SELECT keyspace_name FROM system_schema.keyspaces;")
     keyspace_names = [row.keyspace_name for row in keyspaces]
 
     if keyspace not in keyspace_names:
-        print(f"Keyspace '{keyspace}' does not exist.")
         session.shutdown()
         cluster.shutdown()
-        return {"keyspace_exists": False, "table_exists": False, "tables": []}
+        raise KeyspaceNotFoundError(f"Keyspace '{keyspace}' does not exist.")
 
-    # Fetch all tables in the keyspace
+    # Check tables in the keyspace
     tables = session.execute(f"SELECT table_name FROM system_schema.tables WHERE keyspace_name = '{keyspace}';")
     table_names = [row.table_name for row in tables]
 
-    if table in table_names:
-        print(f"Keyspace '{keyspace}' and table '{table}' both exist.")
-        result = {"keyspace_exists": True, "table_exists": True, "tables": table_names}
-    else:
-        print(f"Keyspace '{keyspace}' exists, but table '{table}' does NOT.")
-        print(f"Tables in keyspace '{keyspace}': {table_names}")
-        result = {"keyspace_exists": True, "table_exists": False, "tables": table_names}
+    if table not in table_names:
+        session.shutdown()
+        cluster.shutdown()
+        raise TableNotFoundError(keyspace, table, table_names)
 
+    # Both exist
     session.shutdown()
     cluster.shutdown()
-    return result
+    print(f"Keyspace '{keyspace}' and table '{table}' both exist.")
