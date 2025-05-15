@@ -1,23 +1,13 @@
-from langchain.storage import InMemoryDocstore
-import os
-import pickle
+# Merge community and triplets from child nodes
+all_communities = []
+all_triplets = []
 
-index_save_path = self.config["vectorstore"]["index_save_path"]
-os.makedirs(index_save_path, exist_ok=True)
-docstore_path = os.path.join(index_save_path, "docstore.pkl")
+for child_doc, _ in parent_cur_children:
+    if "community" in child_doc.metadata:
+        all_communities.append(child_doc.metadata["community"])
+    if "triplets" in child_doc.metadata:
+        all_triplets.extend(child_doc.metadata["triplets"])
 
-# Load existing docstore if it exists
-if os.path.exists(docstore_path):
-    with open(docstore_path, 'rb') as f:
-        existing_doc_store = pickle.load(f)
-    if not isinstance(existing_doc_store, InMemoryDocstore):
-        raise TypeError("Loaded object is not an InMemoryDocstore")
-else:
-    existing_doc_store = InMemoryDocstore({})
-
-# Merge new doc_store into existing one
-existing_doc_store._dict.update(doc_store._dict)
-
-# Save updated docstore
-with open(docstore_path, 'wb') as f:
-    pickle.dump(existing_doc_store, f)
+# Remove duplicates and update parent metadata
+parent_node.metadata["community"] = list(set(all_communities))
+parent_node.metadata["triplets"] = list(set(all_triplets))
