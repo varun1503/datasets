@@ -1,6 +1,50 @@
-if ratio > self.simple_ratio_thresh:
-    # NEW: Add enriched metadata to parent
-    if community_dict[parent_node_id]:
-        parent_node.metadata["community"] = list(community_dict[parent_node_id])
-    if triplets_dict[parent_node_id]:
-        parent_node.metadata["triplets"] = triplets_dict[parent_node_id]
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
+
+def process_chunk(index, chunk, gpickle):
+    try:
+        # Step 1: Merge the graph
+        merged_graph = gpickle.get_merged_graph_cluster_single(chunk['content'])
+
+        # Step 2: Extract quadruples
+        quadruples = gpickle.get_quadruples_single(merged_graph)
+
+        # Step 3: Convert all quadruples to strings for context
+        context_texts = [str(q) for q in quadruples]
+
+        # Step 4: Generate one new chunk per quadruple
+        new_chunks = []
+        for quad in quadruples:
+            # Copy original metadata and add 'source_content'
+            metadata = dict(chunk.get('metadata', {}))  # shallow copy to avoid mutation
+            metadata['source_content'] = chunk['content']
+
+            new_chunk = {
+                'content': str(quad),        # or use custom formatting here
+                'metadata': metadata,
+                'context': context_texts     # full list of quadruples from this chunk
+            }
+            new_chunks.append(new_chunk)
+
+        return index, new_chunks
+
+    except Exception as e:
+        print(f"Error processing chunk at index {index}: {e}")
+        return index, None
+
+
+# Assume you have chunks_data (list of dicts) and a gpickle object from createGpicklefile()
+gpickle = createGpicklefile()
+final_chunks = []
+
+# Process chunks in parallel
+with ThreadPoolExecutor(max_workers=32) as executor:
+    futures = [
+        executor.submit(process_chunk, idx, chunk, gpickle)
+        for idx, chunk in enumerate(chunks_data)
+    ]
+
+    for future in tqdm(as_completed(futures), total=len(chunks_data), desc="quadruple processing"):
+        idx, result = future.result()
+        if result:
+            final_chunks.extend(result)  # Add all quadruple-based chunks to the final list
