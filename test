@@ -1,20 +1,16 @@
-def create_ann_index_cosine(keyspace: str, table: str, clusternode: list, vector_column: str) -> None:
-    index_name = f"ann_index_{vector_column}"
-    cluster = Cluster(clusternode, auth_provider=PlainTextAuthProvider(username=USER_NAME, password=PASSWORD))
+from cassandra.cluster import Cluster
+from cassandra.auth import PlainTextAuthProvider
+
+def delete_all_rows_from_table(keyspace: str, table: str, clusternode: list, username: str, password: str) -> None:
+    cluster = Cluster(clusternode, auth_provider=PlainTextAuthProvider(username=username, password=password))
     session = cluster.connect()
-    session.set_keyspace(keyspace)
-
-    index_query = f"""
-    CREATE CUSTOM INDEX IF NOT EXISTS {index_name}
-    ON {table}({vector_column})
-    USING 'StorageAttachedIndex'
-    WITH OPTIONS = {{ 'similarity_function': 'COSINE' }};
-    """
-
-    session.execute(index_query)
-    print(f"Vector index created on '{vector_column}' for {table} with COSINE similarity.")
-
-    ensure_index_created(session, keyspace, table, index_name)
-
-    session.shutdown()
-    cluster.shutdown()
+    
+    try:
+        session.set_keyspace(keyspace)
+        session.execute(f"TRUNCATE {table};")
+        print(f"All rows deleted from table '{table}' in keyspace '{keyspace}'.")
+    except Exception as e:
+        print(f"Error deleting rows from table: {e}")
+    finally:
+        session.shutdown()
+        cluster.shutdown()
