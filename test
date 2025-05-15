@@ -1,17 +1,10 @@
-from cassandra.cluster import Cluster
+def ensure_index_created(session, keyspace, table, index_name):
+    index_check_query = f"""
+    SELECT index_name FROM system_schema.indexes
+    WHERE keyspace_name = '{keyspace}' AND table_name = '{table}';
+    """
+    rows = session.execute(index_check_query)
+    existing_indexes = [row.index_name for row in rows]
 
-class KeyspaceAlreadyExistsError(Exception):
-    pass
-
-def raise_if_keyspace_exists(cluster_nodes, keyspace):
-    cluster = Cluster(cluster_nodes)
-    session = cluster.connect()
-
-    keyspaces = session.execute("SELECT keyspace_name FROM system_schema.keyspaces;")
-    keyspace_names = [row.keyspace_name for row in keyspaces]
-
-    session.shutdown()
-    cluster.shutdown()
-
-    if keyspace in keyspace_names:
-        raise KeyspaceAlreadyExistsError(f"Keyspace '{keyspace}' already exists.")
+    if index_name not in existing_indexes:
+        raise RuntimeError(f"Index '{index_name}' was not created successfully.")
