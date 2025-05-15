@@ -1,46 +1,65 @@
-import concurrent.futures
-import logging
+from cassandra.cluster import Cluster
+from cassandra.auth import PlainTextAuthProvider
+from cassandra.query import BatchStatement, SimpleStatement
 from tqdm import tqdm
-from safechain.icel import model  # Your custom model loader
+import uuid
+from datetime import datetime, timezone
 
-logger = logging.getLogger(__name__)
+# Initialize Cassandra cluster and session
+auth_provider = PlainTextAuthProvider(username=USER, password=PASSWORD)
+cluster = Cluster(cluster1_nodes, auth_provider=auth_provider)
+session = cluster.connect(keyspace)
 
-class ConcurrentEmbedding:
-    def __init__(self, model_idx: str, batch_size: int = 64):
-        self.embedding_model = model(model_idx)
-        self.batch_size = batch_size
+# Prepare the insert query
+insert_query = session.prepare(f"""
+    INSERT INTO {table} (
+        file_name,
+        row_id,
+        chunk_text,
+        created_ts,
+        metadata,
+        use_case_id,
+        use_case_name,
+        embedding
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+""")
 
-    def _get_batch_embed(self, batch_start_idx, chunk_batch):
+batch = BatchStatement()
+batch_size = 50  # Tune this based on your cluster's capacity
+
+for i, data_point in enumerate(tqdm(chunk_data[:5], total=len(chunk_data), desc="inserting data")):
+    metadata = data_point.get("metadata", {})
+    print("Raw metadata:", metadata)
+
+    meta_data = {
+        "parent_node": [metadata.get("parent_node")] if metadata.get("parent_node") else ["NA"],
+        "doc_id": [metadata.get("doc_id")],
+        "prev_node": [metadata.get("prev_node")] if metadata.get("prev_node") else ["NA"],
+        "child_nodes": metadata.get("child_nodes") if metadata.get("child_nodes") else ["NA"],
+        "next_node": [metadata.get("next_node")] if metadata.get("next_node") else ["NA"],
+        "period": [metadata.get("period")],
+        "type": [metadata.get("type")],
+        "chunking_type": [metadata.get("chunking_type")],
+        "company_name": [metadata.get("company_name")],
+        "source_content": metadata.get("source_content")
+    }
+
+    row_id = str(uuid.uuid4())
+    chunk_text = data_point["content"]
+    embedding = data_point["embedding"][0]
+    file_name = metadata.get("source", "unknown")
+    created_ts = datetime.now(timezone.utc)
+    use_case_id = 101
+    use_case_name = "Earnings Call Analysis"
+
+    batch.add(insert_query, (file_name, row_id, chunk_text, created_ts, meta_data, use_case_id, use_case_name, embedding))
+
+    if (i + 1) % batch_size == 0 or i == len(chunk_data[:5]) - 1:
         try:
-            texts = [chunk["content"] for chunk in chunk_batch]
-            batch_embeddings = self.embedding_model.embed_documents(texts)
-            return batch_start_idx, batch_embeddings
+            session.execute(batch)
+            batch.clear()
         except Exception as e:
-            logger.error(f"Batch embedding failed at index {batch_start_idx}: {e}")
-            return batch_start_idx, [None] * len(chunk_batch)
+            print(f"Error inserting batch at index {i}: {e}")
 
-    def chunk_embedding(self, chunks_data):
-        batches = [
-            (i, chunks_data[i:i + self.batch_size])
-            for i in range(0, len(chunks_data), self.batch_size)
-        ]
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            futures = [
-                executor.submit(self._get_batch_embed, start_idx, chunk_batch)
-                for start_idx, chunk_batch in batches
-            ]
-
-            for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Batch embedding"):
-                try:
-                    start_idx, embeddings = future.result()
-                    for i, emb in enumerate(embeddings):
-                        if emb is not None:
-                            chunks_data[start_idx + i]["embedding"] = emb
-                        else:
-                            logger.warning(f"No embedding for chunk {start_idx + i}")
-                except Exception as e:
-                    logger.error(f"Future processing failed: {e}")
-                    raise
-
-        return chunks_data
+# Shutdown
+cluster.shutdown()
