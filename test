@@ -1,50 +1,46 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import concurrent.futures
+import logging
 from tqdm import tqdm
+from safechain.icel import model  # Your custom model loader
 
-def process_chunk(index, chunk, gpickle):
-    try:
-        # Step 1: Merge the graph
-        merged_graph = gpickle.get_merged_graph_cluster_single(chunk['content'])
+logger = logging.getLogger(__name__)
 
-        # Step 2: Extract quadruples
-        quadruples = gpickle.get_quadruples_single(merged_graph)
+class ConcurrentEmbedding:
+    def __init__(self, model_idx: str, batch_size: int = 64):
+        self.embedding_model = model(model_idx)
+        self.batch_size = batch_size
 
-        # Step 3: Convert all quadruples to strings for context
-        context_texts = [str(q) for q in quadruples]
+    def _get_batch_embed(self, batch_start_idx, chunk_batch):
+        try:
+            texts = [chunk["content"] for chunk in chunk_batch]
+            batch_embeddings = self.embedding_model.embed_documents(texts)
+            return batch_start_idx, batch_embeddings
+        except Exception as e:
+            logger.error(f"Batch embedding failed at index {batch_start_idx}: {e}")
+            return batch_start_idx, [None] * len(chunk_batch)
 
-        # Step 4: Generate one new chunk per quadruple
-        new_chunks = []
-        for quad in quadruples:
-            # Copy original metadata and add 'source_content'
-            metadata = dict(chunk.get('metadata', {}))  # shallow copy to avoid mutation
-            metadata['source_content'] = chunk['content']
+    def chunk_embedding(self, chunks_data):
+        batches = [
+            (i, chunks_data[i:i + self.batch_size])
+            for i in range(0, len(chunks_data), self.batch_size)
+        ]
 
-            new_chunk = {
-                'content': str(quad),        # or use custom formatting here
-                'metadata': metadata,
-                'context': context_texts     # full list of quadruples from this chunk
-            }
-            new_chunks.append(new_chunk)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            futures = [
+                executor.submit(self._get_batch_embed, start_idx, chunk_batch)
+                for start_idx, chunk_batch in batches
+            ]
 
-        return index, new_chunks
+            for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Batch embedding"):
+                try:
+                    start_idx, embeddings = future.result()
+                    for i, emb in enumerate(embeddings):
+                        if emb is not None:
+                            chunks_data[start_idx + i]["embedding"] = emb
+                        else:
+                            logger.warning(f"No embedding for chunk {start_idx + i}")
+                except Exception as e:
+                    logger.error(f"Future processing failed: {e}")
+                    raise
 
-    except Exception as e:
-        print(f"Error processing chunk at index {index}: {e}")
-        return index, None
-
-
-# Assume you have chunks_data (list of dicts) and a gpickle object from createGpicklefile()
-gpickle = createGpicklefile()
-final_chunks = []
-
-# Process chunks in parallel
-with ThreadPoolExecutor(max_workers=32) as executor:
-    futures = [
-        executor.submit(process_chunk, idx, chunk, gpickle)
-        for idx, chunk in enumerate(chunks_data)
-    ]
-
-    for future in tqdm(as_completed(futures), total=len(chunks_data), desc="quadruple processing"):
-        idx, result = future.result()
-        if result:
-            final_chunks.extend(result)  # Add all quadruple-based chunks to the final list
+        return chunks_data
