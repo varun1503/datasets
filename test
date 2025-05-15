@@ -1,10 +1,20 @@
-def ensure_index_created(session, keyspace, table, index_name):
-    index_check_query = f"""
-    SELECT index_name FROM system_schema.indexes
-    WHERE keyspace_name = '{keyspace}' AND table_name = '{table}';
-    """
-    rows = session.execute(index_check_query)
-    existing_indexes = [row.index_name for row in rows]
+def create_ann_index_cosine(keyspace: str, table: str, clusternode: list, vector_column: str) -> None:
+    index_name = f"ann_index_{vector_column}"
+    cluster = Cluster(clusternode, auth_provider=PlainTextAuthProvider(username=USER_NAME, password=PASSWORD))
+    session = cluster.connect()
+    session.set_keyspace(keyspace)
 
-    if index_name not in existing_indexes:
-        raise RuntimeError(f"Index '{index_name}' was not created successfully.")
+    index_query = f"""
+    CREATE CUSTOM INDEX IF NOT EXISTS {index_name}
+    ON {table}({vector_column})
+    USING 'StorageAttachedIndex'
+    WITH OPTIONS = {{ 'similarity_function': 'COSINE' }};
+    """
+
+    session.execute(index_query)
+    print(f"Vector index created on '{vector_column}' for {table} with COSINE similarity.")
+
+    ensure_index_created(session, keyspace, table, index_name)
+
+    session.shutdown()
+    cluster.shutdown()
