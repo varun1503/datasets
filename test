@@ -1,13 +1,6 @@
-# Merge community and triplets from child nodes
-all_communities = []
-all_triplets = []
-
-for child_doc, _ in parent_cur_children:
-    if "community" in child_doc.metadata:
-        all_communities.append(child_doc.metadata["community"])
-    if "triplets" in child_doc.metadata:
-        all_triplets.extend(child_doc.metadata["triplets"])
-
-# Remove duplicates and update parent metadata
-parent_node.metadata["community"] = list(set(all_communities))
-parent_node.metadata["triplets"] = list(set(all_triplets))
+if ratio > self.simple_ratio_thresh:
+    # NEW: Add enriched metadata to parent
+    if community_dict[parent_node_id]:
+        parent_node.metadata["community"] = list(community_dict[parent_node_id])
+    if triplets_dict[parent_node_id]:
+        parent_node.metadata["triplets"] = triplets_dict[parent_node_id]
