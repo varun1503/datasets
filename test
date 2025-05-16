@@ -1,7 +1,22 @@
-Hi @nbose and @Manoj Kumar,
+from langchain.schema import Document
 
-After our call, @nbose and I discussed further and concluded that we will store the quadruples in the body blob, and the text content in the metadata.
+final_chunk = []
 
-For example, from a single file, around 800 chunks were generated, resulting in approximately 2900 quadruples. I've embedded those 2900 quadruples and inserted them into the table.
+for i in range(len(chunks_data)):
+    print(i)
+    
+    # Make sure 'metadata' exists
+    if 'metadata' not in chunks_data[i]:
+        chunks_data[i]['metadata'] = {}
 
-I'm currently working on the retrieval part.
+    # Move 'quadruples' into metadata
+    chunks_data[i]['metadata']['quadruples'] = chunks_data[i]['quadruples']
+
+    # Create Document and add to final_chunk
+    final_chunk.append((
+        Document(
+            page_content=chunks_data[i]['content'],
+            metadata=chunks_data[i]['metadata']
+        ), 
+        0.1
+    ))
