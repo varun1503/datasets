@@ -3,20 +3,23 @@ from langchain.schema import Document
 final_chunk = []
 
 for i in range(len(chunks_data)):
-    print(i)
-    
-    # Make sure 'metadata' exists
-    if 'metadata' not in chunks_data[i]:
-        chunks_data[i]['metadata'] = {}
+    chunk = chunks_data[i]
 
-    # Move 'quadruples' into metadata
-    chunks_data[i]['metadata']['quadruples'] = chunks_data[i]['quadruples']
+    # Safety check
+    if not isinstance(chunk, dict):
+        print(f"Skipping index {i}: not a dict ->", type(chunk))
+        continue
 
-    # Create Document and add to final_chunk
-    final_chunk.append((
-        Document(
-            page_content=chunks_data[i]['content'],
-            metadata=chunks_data[i]['metadata']
-        ), 
-        0.1
-    ))
+    if "metadata" not in chunk:
+        chunk["metadata"] = {}
+
+    # Add quadruples to metadata
+    chunk["metadata"]["quadruples"] = chunk["quadruples"]
+
+    # Create LangChain Document
+    doc = Document(
+        page_content=chunk["content"],
+        metadata=chunk["metadata"]
+    )
+
+    final_chunk.append((doc, 0.1))
