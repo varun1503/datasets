@@ -1,25 +1,25 @@
-from langchain.schema import Document
+PRUNE_KG_QUADRUPLES_PROMPT = """
+You are a financial knowledge graph cleaner. Your task is to identify and **prune weak or redundant quadruples** from a dictionary where each key represents a child node ID and its value is a list of quadruples.
 
-final_chunk = []
+Each quadruple follows the format:
+(Theme, Subject, Predicate, Object)
 
-for i in range(len(chunks_data)):
-    chunk = chunks_data[i]
+You must keep only those quadruples that:
+1. Add meaningful insights into financial performance, risk, or strategy.
+2. Are not vague, overly generic, or semantically duplicate.
+3. Offer quantifiable, directional, or strategic signals.
 
-    # Safety check
-    if not isinstance(chunk, dict):
-        print(f"Skipping index {i}: not a dict ->", type(chunk))
-        continue
+If two quadruples communicate similar meaning (e.g. one general and one more specific), prefer the more specific one.
 
-    if "metadata" not in chunk:
-        chunk["metadata"] = {}
+---
 
-    # Add quadruples to metadata
-    chunk["metadata"]["quadruples"] = chunk["quadruples"]
+Here is your input dictionary of child nodes and their quadruples:
 
-    # Create LangChain Document
-    doc = Document(
-        page_content=chunk["content"],
-        metadata=chunk["metadata"]
-    )
+{input_quadruples_dict}
 
-    final_chunk.append((doc, 0.1))
+---
+
+Output a new dictionary with **pruned** quadruples per child node ID, using the same format.
+
+Only return the pruned dictionary. Do not add explanation.
+"""
