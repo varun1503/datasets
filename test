@@ -1,25 +1,45 @@
-PRUNE_KG_QUADRUPLES_PROMPT = """
-You are a financial knowledge graph cleaner. Your task is to identify and **prune weak or redundant quadruples** from a dictionary where each key represents a child node ID and its value is a list of quadruples.
+import ast
 
-Each quadruple follows the format:
-(Theme, Subject, Predicate, Object)
+insert_chunk = []
 
-You must keep only those quadruples that:
-1. Add meaningful insights into financial performance, risk, or strategy.
-2. Are not vague, overly generic, or semantically duplicate.
-3. Offer quantifiable, directional, or strategic signals.
+for i in range(len(parent_chunk)):
+    parent_doc = parent_chunk[i][0]
+    child_list = parent_doc.metadata.get('child_nodes', [])
+    parent_q = {}
 
-If two quadruples communicate similar meaning (e.g. one general and one more specific), prefer the more specific one.
+    # Build mapping of child_id -> quadruples
+    for single_child in child_list:
+        child_qudipals = [
+            doc[0].metadata["quadruples"]
+            for doc in final_chunk
+            if single_child == doc[8].metadata.get("parent_node")
+        ]
+        # Flatten list if multiple matches
+        flattened = [item for sublist in child_qudipals for item in sublist]
+        parent_q[single_child] = flattened
 
----
+    # Prepare input node and prune
+    input_node = {"input_quadruples_dict": parent_q}
+    pruned_prompt = prompts().pruning_prompt()
+    pruned_kg = model_invoke().model_call("3", pruned_prompt, input_node)
 
-Here is your input dictionary of child nodes and their quadruples:
+    # Evaluate string to dict
+    cc = pruned_kg.content.strip().removeprefix("```python").removesuffix("```")
+    v = ast.literal_eval(cc)
 
-{input_quadruples_dict}
+    parent_doc.metadata.update({"qudipals": v})
 
----
+    # Build insert_chunk from qudipals
+    for key, value in v.items():
+        matching_docs = [
+            doc for doc in final_chunk
+            if key in doc[0].metadata.get("doc_id", "")
+        ]
 
-Output a new dictionary with **pruned** quadruples per child node ID, using the same format.
-
-Only return the pruned dictionary. Do not add explanation.
-"""
+        for doc in matching_docs:
+            each_qudipals = {
+                "metadata": dict(list(parent_doc.metadata.items())[:-1]),  # Remove last item
+                "qudipals": value[0],
+            }
+            each_qudipals["metadata"]["content"] = parent_doc.page_content
+            insert_chunk.append(each_qudipals)
