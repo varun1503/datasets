@@ -1,34 +1,24 @@
-def select_subgraph(G, selected_nodes_list):
-    import networkx as nx
+import networkx as nx
+from tqdm import tqdm
 
-    selected_tree = []
-    selected_preorder_nodes = []
-    selected_postorder_nodes = []
-    selected_labeled_edges = []
-
-    graph_nodes = set(G.nodes)
-
-    def find_related_nodes(query):
-        words = query.lower().replace("’", "'").split()
-        candidates = [node for node in graph_nodes if all(word in node.lower() for word in words)]
-        if candidates:
-            return candidates
-        # fallback: match on any one word
-        candidates = [node for node in graph_nodes if any(word in node.lower() for word in words)]
-        return candidates
-
-    for query in selected_nodes_list:
-        matched_nodes = find_related_nodes(query)
-        if not matched_nodes:
-            print(f"Warning: No match for '{query}'")
-            continue
-        for matched in matched_nodes:
-            try:
-                selected_tree.append(list(nx.dfs_tree(G, source=matched, depth_limit=3)))
-                selected_preorder_nodes.append(list(nx.dfs_preorder_nodes(G, source=matched, depth_limit=3)))
-                selected_postorder_nodes.append(list(nx.dfs_postorder_nodes(G, source=matched, depth_limit=3)))
-                selected_labeled_edges.append(list(nx.dfs_labeled_edges(G, source=matched, depth_limit=3)))
-            except Exception as e:
-                print(f"Error traversing from node '{matched}': {e}")
-
-    return selected_tree, selected_preorder_nodes, selected_postorder_nodes, selected_labeled_edges
+def create_graph_from_triplets(triplets):
+    G = nx.DiGraph()
+    
+    for triplet in tqdm(triplets, desc="Creating graph"):
+        # Handle if input is a string like: "'Visa','has','EPS']"
+        cleaned = triplet.strip("[]").strip()
+        parts = [p.strip(" '\"") for p in cleaned.split(',')]
+        
+        if len(parts) == 3:
+            subject, predicate, obj = parts
+            G.add_edge(subject, obj, label=predicate)
+        elif len(parts) > 3:
+            # Merge extra parts into obj
+            subject = parts[0]
+            predicate = parts[1]
+            obj = ','.join(parts[2:]).strip(" '\"")
+            G.add_edge(subject, obj, label=predicate)
+        else:
+            print(f"Skipping invalid triplet: {triplet}")
+    
+    return G
