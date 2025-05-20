@@ -1,29 +1,26 @@
-import ast
+import re
 
-def filter_tuples_by_theme(data_list, theme_keyword):
+def clean_and_filter_tuples(data_list, theme_keyword):
     """
-    Filters a list of stringified tuples to only those whose first element matches the theme_keyword.
+    Cleans up improperly formatted tuple-like strings and filters by the first element.
     
     Args:
-        data_list (list): List of stringified tuples.
-        theme_keyword (str): The keyword to match in the first element of each tuple.
-
+        data_list (list): List of strings that look like tuples.
+        theme_keyword (str): Theme to match (first element of each tuple).
+        
     Returns:
-        list: A list of actual tuples that match the theme_keyword.
+        list of tuples: Filtered and cleaned tuples.
     """
     cleaned_list = []
 
     for item in data_list:
-        try:
-            # Clean up stray quotes or malformed strings
-            item = item.strip(" '\"\n")
-            # Ensure it's a proper tuple before evaluating
-            if not item.startswith("("):
-                item = f"({item})"
-            tup = ast.literal_eval(item)
-            if tup[0].strip() == theme_keyword:
-                cleaned_list.append(tup)
-        except Exception as e:
-            print(f"Skipping malformed item: {item} -- Error: {e}")
-    
+        # Remove leading/trailing junk characters
+        item = item.strip().strip("',\"*()")
+
+        # Split by comma, handling potential malformed parts
+        parts = [x.strip() for x in re.split(r",\s*", item) if x.strip()]
+        
+        if parts and parts[0] == theme_keyword:
+            cleaned_list.append(tuple(parts))
+
     return cleaned_list
