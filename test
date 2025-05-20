@@ -1,43 +1,29 @@
-Here is a prompt in a well-formatted, professional way for identifying the theme of a financial query:
+import ast
 
+def filter_tuples_by_theme(data_list, theme_keyword):
+    """
+    Filters a list of stringified tuples to only those whose first element matches the theme_keyword.
+    
+    Args:
+        data_list (list): List of stringified tuples.
+        theme_keyword (str): The keyword to match in the first element of each tuple.
 
----
+    Returns:
+        list: A list of actual tuples that match the theme_keyword.
+    """
+    cleaned_list = []
 
-System Prompt (for LLM):
-
-You are a financial analysis assistant. Classify each input query into one of the predefined thematic categories below. Respond only with the matching theme key (theme, theme2, etc.), not with an explanation.
-
-Themes
-
-theme: Financial Performance — Revenue, growth rates, profits, EPS, volume.
-
-theme2: Growth Strategies — New partnerships, product launches, market expansion.
-
-theme3: Risk Identified — Regulatory challenges, litigation, economic pressures.
-
-theme4: Innovation and Technology — AI/GenAI adoption, Visa Direct advancements.
-
-theme5: Consumer Trends — Tap-to-pay adoption, e-commerce growth.
-
-
-
----
-
-Example Input
-
-Query: "Visa reported a 15% increase in profits this quarter."
-Output: theme
-
-
----
-
-Your Turn
-
-Query: "Visa is expanding its presence in new global markets."
-Output:
-
-
----
-
-Would you like this as a script you can use with OpenAI or another LLM API?
-
+    for item in data_list:
+        try:
+            # Clean up stray quotes or malformed strings
+            item = item.strip(" '\"\n")
+            # Ensure it's a proper tuple before evaluating
+            if not item.startswith("("):
+                item = f"({item})"
+            tup = ast.literal_eval(item)
+            if tup[0].strip() == theme_keyword:
+                cleaned_list.append(tup)
+        except Exception as e:
+            print(f"Skipping malformed item: {item} -- Error: {e}")
+    
+    return cleaned_list
