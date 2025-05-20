@@ -1,26 +1,34 @@
-import re
+def select_subgraph(G, selected_nodes_list):
+    import networkx as nx
 
-def clean_and_filter_tuples(data_list, theme_keyword):
-    """
-    Cleans up improperly formatted tuple-like strings and filters by the first element.
-    
-    Args:
-        data_list (list): List of strings that look like tuples.
-        theme_keyword (str): Theme to match (first element of each tuple).
-        
-    Returns:
-        list of tuples: Filtered and cleaned tuples.
-    """
-    cleaned_list = []
+    selected_tree = []
+    selected_preorder_nodes = []
+    selected_postorder_nodes = []
+    selected_labeled_edges = []
 
-    for item in data_list:
-        # Remove leading/trailing junk characters
-        item = item.strip().strip("',\"*()")
+    graph_nodes = set(G.nodes)
 
-        # Split by comma, handling potential malformed parts
-        parts = [x.strip() for x in re.split(r",\s*", item) if x.strip()]
-        
-        if parts and parts[0] == theme_keyword:
-            cleaned_list.append(tuple(parts))
+    def find_related_nodes(query):
+        words = query.lower().replace("’", "'").split()
+        candidates = [node for node in graph_nodes if all(word in node.lower() for word in words)]
+        if candidates:
+            return candidates
+        # fallback: match on any one word
+        candidates = [node for node in graph_nodes if any(word in node.lower() for word in words)]
+        return candidates
 
-    return cleaned_list
+    for query in selected_nodes_list:
+        matched_nodes = find_related_nodes(query)
+        if not matched_nodes:
+            print(f"Warning: No match for '{query}'")
+            continue
+        for matched in matched_nodes:
+            try:
+                selected_tree.append(list(nx.dfs_tree(G, source=matched, depth_limit=3)))
+                selected_preorder_nodes.append(list(nx.dfs_preorder_nodes(G, source=matched, depth_limit=3)))
+                selected_postorder_nodes.append(list(nx.dfs_postorder_nodes(G, source=matched, depth_limit=3)))
+                selected_labeled_edges.append(list(nx.dfs_labeled_edges(G, source=matched, depth_limit=3)))
+            except Exception as e:
+                print(f"Error traversing from node '{matched}': {e}")
+
+    return selected_tree, selected_preorder_nodes, selected_postorder_nodes, selected_labeled_edges
