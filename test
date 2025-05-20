@@ -1,43 +1,43 @@
-import ast
+Here is a prompt in a well-formatted, professional way for identifying the theme of a financial query:
 
-insert_chunk2 = []
 
-# Build a map from parent_node to its corresponding quadruples (merged from final_chunk)
-parent_to_quads = {}
-for doc in final_chunk:
-    parent = doc[0].metadata.get("parent_node")
-    if parent:
-        parent_to_quads.setdefault(parent, []).extend(doc[0].metadata.get("quadruples", []))
+---
 
-# Build a map from doc_id to index for quick lookup
-doc_id_to_index = {doc[0].metadata["doc_id"]: idx for idx, doc in enumerate(final_chunk)}
+System Prompt (for LLM):
 
-for i, parent_doc in enumerate(parent_chunk):
-    parent_node = parent_doc[0]
-    child_list = parent_node.metadata.get('child_nodes', [])
+You are a financial analysis assistant. Classify each input query into one of the predefined thematic categories below. Respond only with the matching theme key (theme, theme2, etc.), not with an explanation.
 
-    # Gather child quadruples for all children
-    parent_q = {child: parent_to_quads.get(child, []) for child in child_list}
+Themes
 
-    input_node = {"input_quadruples_dict": parent_q}
-    pruned_prompt = prompts().pruning_prompt()
-    pruned_kg = invoke().model_call("3", pruned_prompt, input_node)
+theme: Financial Performance — Revenue, growth rates, profits, EPS, volume.
 
-    cc = pruned_kg.content.strip().removeprefix("python").removesuffix(".")
-    print(cc)
+theme2: Growth Strategies — New partnerships, product launches, market expansion.
 
-    v = ast.literal_eval(cc)
-    parent_node.metadata["qudipals"] = v
+theme3: Risk Identified — Regulatory challenges, litigation, economic pressures.
 
-    # Prepare common metadata excluding 'qudipals'
-    base_metadata = dict(list(parent_node.metadata.items())[:-1])
-    base_metadata["content"] = parent_node.page_content
+theme4: Innovation and Technology — AI/GenAI adoption, Visa Direct advancements.
 
-    for key, value_list in v.items():
-        for quadruple in value_list:
-            idx = doc_id_to_index.get(key)
-            if idx is not None:
-                insert_chunk2.append({
-                    "metadata": base_metadata.copy(),
-                    "quadruples": quadruple
-                })
+theme5: Consumer Trends — Tap-to-pay adoption, e-commerce growth.
+
+
+
+---
+
+Example Input
+
+Query: "Visa reported a 15% increase in profits this quarter."
+Output: theme
+
+
+---
+
+Your Turn
+
+Query: "Visa is expanding its presence in new global markets."
+Output:
+
+
+---
+
+Would you like this as a script you can use with OpenAI or another LLM API?
+
