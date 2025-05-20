@@ -1,24 +1,15 @@
-import networkx as nx
-from tqdm import tqdm
+First, I convert the user query into an embedding and retrieve the top 100–150 relevant rows from the database. The query is also passed through an intent classification step using an LLM to determine the Query Intent.
 
-def create_graph_from_triplets(triplets):
-    G = nx.DiGraph()
-    
-    for triplet in tqdm(triplets, desc="Creating graph"):
-        # Handle if input is a string like: "'Visa','has','EPS']"
-        cleaned = triplet.strip("[]").strip()
-        parts = [p.strip(" '\"") for p in cleaned.split(',')]
-        
-        if len(parts) == 3:
-            subject, predicate, obj = parts
-            G.add_edge(subject, obj, label=predicate)
-        elif len(parts) > 3:
-            # Merge extra parts into obj
-            subject = parts[0]
-            predicate = parts[1]
-            obj = ','.join(parts[2:]).strip(" '\"")
-            G.add_edge(subject, obj, label=predicate)
-        else:
-            print(f"Skipping invalid triplet: {triplet}")
-    
-    return G
+In parallel, the query is evaluated against a predefined list of themes. The LLM is used to identify the most appropriate theme for the query. Based on this identified theme, I filter the corresponding quadruples from the full set by removing the community label.
+
+The filtered quadruples are then inserted into a graph structure.
+
+Next, I perform intent matching: for each node in the graph, I compute the cosine similarity with the query intent and select the best-matching nodes using a similarity threshold of 0.4.
+
+From these best-matching nodes, I use Depth-First Search (DFS) to explore related nodes and retrieve the most relevant subgraph, which becomes the final set of retrieved nodes.
+
+
+---
+
+Let me know if you'd like this converted into a diagram, flowchart, or code structure.
+
