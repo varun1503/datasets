@@ -1,15 +1,14 @@
-First, I convert the user query into an embedding and retrieve the top 100–150 relevant rows from the database. The query is also passed through an intent classification step using an LLM to determine the Query Intent.
+import numpy as np
 
-In parallel, the query is evaluated against a predefined list of themes. The LLM is used to identify the most appropriate theme for the query. Based on this identified theme, I filter the corresponding quadruples from the full set by removing the community label.
-
-The filtered quadruples are then inserted into a graph structure.
-
-Next, I perform intent matching: for each node in the graph, I compute the cosine similarity with the query intent and select the best-matching nodes using a similarity threshold of 0.4.
-
-From these best-matching nodes, I use Depth-First Search (DFS) to explore related nodes and retrieve the most relevant subgraph, which becomes the final set of retrieved nodes.
-
-
----
-
-Let me know if you'd like this converted into a diagram, flowchart, or code structure.
-
+def compute_cosine_similarity(embedding1: list, embedding2: list) -> float:
+    vec1 = np.array(embedding1)
+    vec2 = np.array(embedding2)
+    
+    norm1 = np.linalg.norm(vec1)
+    norm2 = np.linalg.norm(vec2)
+    
+    if norm1 == 0 or norm2 == 0:
+        return 0.0  # Avoid division by zero
+    
+    cosine_sim = np.dot(vec1, vec2) / (norm1 * norm2)
+    return float(cosine_sim)
