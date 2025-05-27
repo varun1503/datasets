@@ -1,14 +1,21 @@
-import numpy as np
+import ast
 
-def compute_cosine_similarity(embedding1: list, embedding2: list) -> float:
-    vec1 = np.array(embedding1)
-    vec2 = np.array(embedding2)
-    
-    norm1 = np.linalg.norm(vec1)
-    norm2 = np.linalg.norm(vec2)
-    
-    if norm1 == 0 or norm2 == 0:
-        return 0.0  # Avoid division by zero
-    
-    cosine_sim = np.dot(vec1, vec2) / (norm1 * norm2)
-    return float(cosine_sim)
+def safe_extract(meta_str):
+    try:
+        meta = ast.literal_eval(meta_str)
+        if 'dataset' in meta and 'table' in meta:
+            return meta['dataset'], meta['table']
+    except Exception:
+        pass
+    return None, None
+
+# Apply safe extraction
+schema_dataframe[['dataset', 'table_name']] = schema_dataframe['meta_values'].apply(
+    lambda x: pd.Series(safe_extract(x))
+)
+
+# Drop rows where either dataset or table_name is missing
+schema_dataframe = schema_dataframe.dropna(subset=['dataset', 'table_name'])
+
+# Create final modified column
+schema_dataframe['table_name_modified'] = schema_dataframe['dataset'] + '.' + schema_dataframe['table_name']
