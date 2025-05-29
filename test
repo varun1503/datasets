@@ -42,3 +42,14 @@ def select_subgraph_with_triples(self, G, selected_nodes_list):
         selected_labeled_edges,
         selected_triples  # NEW: return the actual triples
     )
+def extract_triples_from_selected_trees(G, selected_tree_list):
+    all_triples = []
+
+    for tree in selected_tree_list:
+        triples = []
+        for u, v in tree.edges():
+            relation = G.edges[u, v].get("label", "related_to")  # or your actual edge key
+            triples.append((u, relation, v))
+        all_triples.append(triples)  # one triple set per selected node's tree
+
+    return all_triples
