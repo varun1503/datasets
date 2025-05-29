@@ -1,55 +1,12 @@
-import networkx as nx
+# Step 1: Convert original_triples into a string list
+original_triples_list = [",".join(j for j in tuple_triple) for tuple_triple in original_triples]
 
-def select_subgraph_with_triples(self, G, selected_nodes_list):
-    selected_tree = []
-    selected_preorder_nodes = []
-    selected_postorder_nodes = []
-    selected_labeled_edges = []
-    selected_triples = []
+# Step 2: Build a dictionary from retrieved_quadruples using row_id as key
+retrieved_quadruples_dict = {i.row_id: i for i in retrieved_quadruples}
 
-    for node in selected_nodes_list:
-        try:
-            # 1. DFS Tree
-            tree = nx.dfs_tree(G, source=node, depth_limit=3)
-            selected_tree.append(tree)
-
-            # 2. DFS node orderings
-            preorder = list(nx.dfs_preorder_nodes(G, source=node, depth_limit=3))
-            postorder = list(nx.dfs_postorder_nodes(G, source=node, depth_limit=3))
-            selected_preorder_nodes.append(preorder)
-            selected_postorder_nodes.append(postorder)
-
-            # 3. Labeled edges
-            labeled_edges = list(nx.dfs_labeled_edges(G, source=node, depth_limit=3))
-            selected_labeled_edges.append(labeled_edges)
-
-            # 4. Extract original triples from edges in the subgraph tree
-            triples = []
-            for u, v in tree.edges():
-                relation = G.edges[u, v].get("label", "related_to")  # default if no label
-                triples.append((u, relation, v))
-
-            selected_triples.append(triples)
-
-        except Exception as e:
-            print(f"Error processing node {node}: {e}")
-            continue
-
-    return (
-        selected_tree,
-        selected_preorder_nodes,
-        selected_postorder_nodes,
-        selected_labeled_edges,
-        selected_triples  # NEW: return the actual triples
-    )
-def extract_triples_from_selected_trees(G, selected_tree_list):
-    all_triples = []
-
-    for tree in selected_tree_list:
-        triples = []
-        for u, v in tree.edges():
-            relation = G.edges[u, v].get("label", "related_to")  # or your actual edge key
-            triples.append((u, relation, v))
-        all_triples.append(triples)  # one triple set per selected node's tree
-
-    return all_triples
+# Step 3: Match values from triplate_dict to retrieved_quadruples_dict
+a = {
+    triplate_dict[i]: retrieved_quadruples_dict[triplate_dict[i]]
+    for i in original_triples_list
+    if i in triplate_dict and triplate_dict[i] in retrieved_quadruples_dict
+}
