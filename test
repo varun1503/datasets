@@ -1,36 +1,36 @@
-from typing import List
+def retrieve_similar_chunks_cosine(self, query_vector, top_k):
+    try:
+        # Reinitialize Cassandra connection if needed
+        if self.cluster is None or self.cluster.is_shutdown:
+            auth_provider = PlainTextAuthProvider(username=USER_NAME, password=PASSWORD)
+            self.cluster = Cluster(self.clusternode, auth_provider=auth_provider)
+        
+        if self.session is None or self.session.is_shutdown:
+            self.session = self.cluster.connect()
+            self.session.set_keyspace(self.keyspace)
 
-def preprocessing_triples(self, retrieved_quadruples: List, query):
-    # Step 1: Build a dict: body_blob_text → row_id
-    quadruples_dict = {
-        item.bdy_blob_tx.strip(): item.row_id for item in retrieved_quadruples
-    }
+        # Convert vector to string format for ANN
+        vector_str = "[" + ",".join(f"{v:.6f}" for v in query_vector) + "]"
+        
+        query = f"""
+        SELECT row_id, bdy_blob_tx, wtda_val_tx, prtn_id 
+        FROM {self.table}
+        ORDER BY vector ANN OF {vector_str} LIMIT {top_k};
+        """
 
-    # Step 2: List of all body_blob_texts
-    quadruples_list = list(quadruples_dict.keys())
+        rows = self.session.execute(query)
 
-    # Step 3: Get query community
-    query_community = self.query_community(query=query)
+        # Filter duplicate bdy_blob_tx
+        seen = set()
+        results = []
 
-    # Step 4: Filter triples that match the query community
-    triples_dict = {}
-    triples = []
+        for row in rows:
+            if row.bdy_blob_tx not in seen:
+                seen.add(row.bdy_blob_tx)
+                results.append(row)
 
-    for i in range(len(quadruples_list)):
-        triple_str = quadruples_list[i].strip()
-        parts = [x.strip().replace('(', '').replace(')', '') for x in triple_str.split(',')]
+        return results
 
-        if len(parts) < 3:
-            continue  # Skip malformed triples
-
-        subject, predicate, obj = parts[0], parts[1], parts[2]
-
-        if subject == query_community.content:
-            key = f"({predicate},{obj})"
-            triples_dict[key] = quadruples_dict.get(triple_str)  # Safe access
-            triples.append([predicate, obj])
-
-    # Step 5: Cluster triples
-    final_triples = self.return_cluster_triple(triples)
-
-    return final_triples, query_community, triples_dict
+    except Exception as e:
+        print(f"Error during retrieval: {e}")
+        return []
