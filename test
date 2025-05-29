@@ -1,21 +1,44 @@
-import ast
+import networkx as nx
 
-def safe_extract(meta_str):
-    try:
-        meta = ast.literal_eval(meta_str)
-        if 'dataset' in meta and 'table' in meta:
-            return meta['dataset'], meta['table']
-    except Exception:
-        pass
-    return None, None
+def select_subgraph_with_triples(self, G, selected_nodes_list):
+    selected_tree = []
+    selected_preorder_nodes = []
+    selected_postorder_nodes = []
+    selected_labeled_edges = []
+    selected_triples = []
 
-# Apply safe extraction
-schema_dataframe[['dataset', 'table_name']] = schema_dataframe['meta_values'].apply(
-    lambda x: pd.Series(safe_extract(x))
-)
+    for node in selected_nodes_list:
+        try:
+            # 1. DFS Tree
+            tree = nx.dfs_tree(G, source=node, depth_limit=3)
+            selected_tree.append(tree)
 
-# Drop rows where either dataset or table_name is missing
-schema_dataframe = schema_dataframe.dropna(subset=['dataset', 'table_name'])
+            # 2. DFS node orderings
+            preorder = list(nx.dfs_preorder_nodes(G, source=node, depth_limit=3))
+            postorder = list(nx.dfs_postorder_nodes(G, source=node, depth_limit=3))
+            selected_preorder_nodes.append(preorder)
+            selected_postorder_nodes.append(postorder)
 
-# Create final modified column
-schema_dataframe['table_name_modified'] = schema_dataframe['dataset'] + '.' + schema_dataframe['table_name']
+            # 3. Labeled edges
+            labeled_edges = list(nx.dfs_labeled_edges(G, source=node, depth_limit=3))
+            selected_labeled_edges.append(labeled_edges)
+
+            # 4. Extract original triples from edges in the subgraph tree
+            triples = []
+            for u, v in tree.edges():
+                relation = G.edges[u, v].get("label", "related_to")  # default if no label
+                triples.append((u, relation, v))
+
+            selected_triples.append(triples)
+
+        except Exception as e:
+            print(f"Error processing node {node}: {e}")
+            continue
+
+    return (
+        selected_tree,
+        selected_preorder_nodes,
+        selected_postorder_nodes,
+        selected_labeled_edges,
+        selected_triples  # NEW: return the actual triples
+    )
