@@ -1,12 +1,36 @@
-# Step 1: Convert original_triples into a string list
-original_triples_list = [",".join(j for j in tuple_triple) for tuple_triple in original_triples]
+from typing import List
 
-# Step 2: Build a dictionary from retrieved_quadruples using row_id as key
-retrieved_quadruples_dict = {i.row_id: i for i in retrieved_quadruples}
+def preprocessing_triples(self, retrieved_quadruples: List, query):
+    # Step 1: Build a dict: body_blob_text → row_id
+    quadruples_dict = {
+        item.bdy_blob_tx.strip(): item.row_id for item in retrieved_quadruples
+    }
 
-# Step 3: Match values from triplate_dict to retrieved_quadruples_dict
-a = {
-    triplate_dict[i]: retrieved_quadruples_dict[triplate_dict[i]]
-    for i in original_triples_list
-    if i in triplate_dict and triplate_dict[i] in retrieved_quadruples_dict
-}
+    # Step 2: List of all body_blob_texts
+    quadruples_list = list(quadruples_dict.keys())
+
+    # Step 3: Get query community
+    query_community = self.query_community(query=query)
+
+    # Step 4: Filter triples that match the query community
+    triples_dict = {}
+    triples = []
+
+    for i in range(len(quadruples_list)):
+        triple_str = quadruples_list[i].strip()
+        parts = [x.strip().replace('(', '').replace(')', '') for x in triple_str.split(',')]
+
+        if len(parts) < 3:
+            continue  # Skip malformed triples
+
+        subject, predicate, obj = parts[0], parts[1], parts[2]
+
+        if subject == query_community.content:
+            key = f"({predicate},{obj})"
+            triples_dict[key] = quadruples_dict.get(triple_str)  # Safe access
+            triples.append([predicate, obj])
+
+    # Step 5: Cluster triples
+    final_triples = self.return_cluster_triple(triples)
+
+    return final_triples, query_community, triples_dict
