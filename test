@@ -1,20 +1,39 @@
-ANSWER_GENERATION_TEMPLATE = (
-    """You will be given a query and a set of nodes and edges in the form of lists. 
-Your task is to generate an accurate and concise answer to the query using the provided information.
+import re
+from ast import literal_eval
 
-Use the following components to inform your answer:
+def split_answer_and_triplets(answer: str):
+    """
+    Splits the input answer string into:
+    1. A natural language text part
+    2. A parsed Python dictionary of triplets
 
-- Tree structure of nodes: {selected_tree}  
-- Pre-order traversal nodes: {selected_preorder_nodes}  
-- Post-order traversal nodes: {selected_postorder_nodes}  
-- Labeled edges with direction: {selected_labeled_edges}  
-- Dictionary of triples with IDs: {triplate_dict}
+    Parameters:
+        answer (str): The full output string from the model or system
 
-Query:
-{query}
+    Returns:
+        tuple: (text_part (str), triplet_dict (dict))
 
-Output:
-1. Final answer to the query using the above nodes and edges.
-2. A filtered/pruned version of the `triplate_dict` that includes only the entries used in answer generation.
-"""
-)
+    Raises:
+        ValueError: If triplet_dict is not found or fails to parse
+    """
+    try:
+        # Split on the known section header
+        text_part, dict_part = answer.split("2. **Filtered/pruned version of the `triplet_dict`**:")
+
+        # Extract the dictionary content from `triplet_dict = { ... }`
+        match = re.search(r"triplet_dict\s*=\s*({.*?})", dict_part, re.DOTALL)
+        if not match:
+            raise ValueError("Could not find triplet_dict in the answer.")
+
+        dict_str = match.group(1)
+
+        # Replace UUID(...) with quoted values
+        dict_str_cleaned = re.sub(r"UUID(.*?)", r"\1", dict_str)
+
+        # Safely evaluate to a dictionary
+        triplet_dict = literal_eval(dict_str_cleaned.strip())
+
+        return text_part.strip(), triplet_dict
+
+    except Exception as e:
+        raise ValueError(f"Failed to parse answer and triplet_dict: {e}")
