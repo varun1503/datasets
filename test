@@ -2,35 +2,21 @@ import re
 from ast import literal_eval
 
 def split_answer_and_triplets(answer: str):
-    """
-    Splits the input answer string into:
-    1. A natural language text part
-    2. A parsed Python dictionary of triplets
-
-    Parameters:
-        answer (str): The full output string from the model or system
-
-    Returns:
-        tuple: (text_part (str), triplet_dict (dict))
-
-    Raises:
-        ValueError: If triplet_dict is not found or fails to parse
-    """
     try:
         # Split on the known section header
         text_part, dict_part = answer.split("2. **Filtered/pruned version of the `triplet_dict`**:")
 
-        # Extract the dictionary content from `triplet_dict = { ... }`
+        # Extract the dictionary content
         match = re.search(r"triplet_dict\s*=\s*({.*?})", dict_part, re.DOTALL)
         if not match:
             raise ValueError("Could not find triplet_dict in the answer.")
 
         dict_str = match.group(1)
 
-        # Replace UUID(...) with quoted values
-        dict_str_cleaned = re.sub(r"UUID(.*?)", r"\1", dict_str)
+        # Fix: quote UUID values
+        dict_str_cleaned = re.sub(r"UUID(.*?)", r"'\1'", dict_str)
 
-        # Safely evaluate to a dictionary
+        # Evaluate the cleaned dictionary
         triplet_dict = literal_eval(dict_str_cleaned.strip())
 
         return text_part.strip(), triplet_dict
