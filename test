@@ -1,36 +1,20 @@
-def retrieve_similar_chunks_cosine(self, query_vector, top_k):
-    try:
-        # Reinitialize Cassandra connection if needed
-        if self.cluster is None or self.cluster.is_shutdown:
-            auth_provider = PlainTextAuthProvider(username=USER_NAME, password=PASSWORD)
-            self.cluster = Cluster(self.clusternode, auth_provider=auth_provider)
-        
-        if self.session is None or self.session.is_shutdown:
-            self.session = self.cluster.connect()
-            self.session.set_keyspace(self.keyspace)
+ANSWER_GENERATION_TEMPLATE = (
+    """You will be given a query and a set of nodes and edges in the form of lists. 
+Your task is to generate an accurate and concise answer to the query using the provided information.
 
-        # Convert vector to string format for ANN
-        vector_str = "[" + ",".join(f"{v:.6f}" for v in query_vector) + "]"
-        
-        query = f"""
-        SELECT row_id, bdy_blob_tx, wtda_val_tx, prtn_id 
-        FROM {self.table}
-        ORDER BY vector ANN OF {vector_str} LIMIT {top_k};
-        """
+Use the following components to inform your answer:
 
-        rows = self.session.execute(query)
+- Tree structure of nodes: {selected_tree}  
+- Pre-order traversal nodes: {selected_preorder_nodes}  
+- Post-order traversal nodes: {selected_postorder_nodes}  
+- Labeled edges with direction: {selected_labeled_edges}  
+- Dictionary of triples with IDs: {triplate_dict}
 
-        # Filter duplicate bdy_blob_tx
-        seen = set()
-        results = []
+Query:
+{query}
 
-        for row in rows:
-            if row.bdy_blob_tx not in seen:
-                seen.add(row.bdy_blob_tx)
-                results.append(row)
-
-        return results
-
-    except Exception as e:
-        print(f"Error during retrieval: {e}")
-        return []
+Output:
+1. Final answer to the query using the above nodes and edges.
+2. A filtered/pruned version of the `triplate_dict` that includes only the entries used in answer generation.
+"""
+)
