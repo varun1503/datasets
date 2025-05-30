@@ -1,39 +1,66 @@
-import re
-from ast import literal_eval
+from cassandra.cluster import Cluster
+from cassandra.auth import PlainTextAuthProvider
+from cassandra.query import BatchStatement, PreparedStatement
+from datetime import datetime, timezone
+import uuid
 
-def split_answer_and_triplets(answer: str):
-    """
-    Splits the input answer string into:
-    1. A natural language text part
-    2. A parsed Python dictionary of triplets
-
-    Parameters:
-        answer (str): The full output string from the model or system
-
-    Returns:
-        tuple: (text_part (str), triplet_dict (dict))
-
-    Raises:
-        ValueError: If triplet_dict is not found or fails to parse
-    """
+def insert_triplet(self, chunk_data, use_case_id=101, use_case_nm="Earnings Coll Analysis"):
     try:
-        # Split on the known section header
-        text_part, dict_part = answer.split("2. **Filtered/pruned version of the `triplet_dict`**:")
+        # Connect if not already connected
+        if self.cluster is None or self.cluster.is_shutdown:
+            self.cluster = Cluster(self.clusternode, auth_provider=PlainTextAuthProvider(username="USER_NAME", password="PASSWORD"))
 
-        # Extract the dictionary content from `triplet_dict = { ... }`
-        match = re.search(r"triplet_dict\s*=\s*({.*?})", dict_part, re.DOTALL)
-        if not match:
-            raise ValueError("Could not find triplet_dict in the answer.")
+        if self.session is None or self.session.is_shutdown:
+            self.session = self.cluster.connect()
 
-        dict_str = match.group(1)
+        # Prepare the INSERT query
+        insert_query = f"""
+        INSERT INTO {self.table} (
+            prtn_id, row_id, bdy_blob_tx, creat_ts, wtda_val_tx,
+            use_case_id, use_case_nm, vector
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        prepared: PreparedStatement = self.session.prepare(insert_query)
+        batch = BatchStatement()
 
-        # Replace UUID(...) with quoted values
-        dict_str_cleaned = re.sub(r"UUID(.*?)", r"\1", dict_str)
+        # Iterate and add each data point to the batch
+        for i, data_point in enumerate(chunk_data, start=1):
+            metadata = data_point.get("metadata", {})
 
-        # Safely evaluate to a dictionary
-        triplet_dict = literal_eval(dict_str_cleaned.strip())
+            meta_data = {
+                "parent_node": metadata.get("parent_node", "A"),
+                "doc_id": metadata.get("doc_id"),
+                "page_no": metadata.get("page"),
+                "prev_node": metadata.get("prev_node", "HA"),
+                "next_node": metadata.get("next_node", "NA"),
+                "period": metadata.get("period"),
+                "type": metadata.get("type"),
+                "chunking_type": metadata.get("chunking type"),
+                "company_name": metadata.get("company_name"),
+                "source_content": metadata.get("content")
+            }
 
-        return text_part.strip(), triplet_dict
+            row_id = str(uuid.uuid4())
+            chunk_text = data_point["quadruples"]
+            embedding = data_point["embedding"]
+            file_name = metadata.get("source", "unknown")
+            created_ts = datetime.now(timezone.utc)
+
+            # Add insert to batch
+            batch.add(prepared, (
+                file_name,
+                row_id,
+                chunk_text,
+                created_ts,
+                meta_data,
+                use_case_id,
+                use_case_nm,
+                embedding
+            ))
+
+        # Execute the batch
+        self.session.execute(batch)
+        print(f"✅ Successfully inserted {len(chunk_data)} records into Cassandra.")
 
     except Exception as e:
-        raise ValueError(f"Failed to parse answer and triplet_dict: {e}")
+        print(f"❌ Error inserting data: {e}")
