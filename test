@@ -1,24 +1,47 @@
-# Sample: List of dicts
-data_list = [
-    {
-        "triple": 1,
-        "page": 3,
-        "source": "Document A",
-        "content": "Visa's revenue in Q2 grew significantly across multiple regions."
-    },
-    {
-        "triple": 2,
-        "page": 7,
-        "source": "Document B",
-        "content": "Transaction revenue was higher due to increased payment volumes."
-    }
-]
+from cassandra.cluster import Cluster
+from cassandra.policies import RoundRobinPolicy
 
-# Inside the retrieved_document column
-with retrieved_document:
-    st.subheader("📄 Retrieved Documents")
+def create_table_with_index(session, keyspace: str, table_name: str):
+    # Use keyspace
+    session.set_keyspace(keyspace)
 
-    for idx, doc in enumerate(data_list):
-        with st.expander(f"🔗 Triple {doc['triple']} — Page {doc['page']}"):
-            st.markdown(f"**📘 Source:** `{doc['source']}`")
-            st.markdown(f"**📝 Content:**\n\n{doc['content']}")
+    # Define table creation query
+    create_table_query = f"""
+    CREATE TABLE IF NOT EXISTS {table_name} (
+        prtn_id text,
+        row_id timeuuid,
+        bdy_blob_tx text,
+        creat_ts timestamp,
+        mtda_val_tx map<text, text>,
+        smry_blob_tx text,
+        use_case_id int,
+        use_case_nm text,
+        vector vector<float, 3072>,
+        PRIMARY KEY ((prtn_id), row_id)
+    )
+    WITH compression = {{
+        'chunk_length_in_kb': 64,
+        'class': 'org.apache.cassandra.io.compress.LZ4Compressor'
+    }}
+    AND speculative_retry = '99PERCENTILE';
+    """
+
+    # Define custom index queries
+    create_entry_index = f"""
+    CREATE CUSTOM INDEX IF NOT EXISTS {table_name}_entry_sai
+    ON {table_name} (entries(mtda_val_tx))
+    USING 'StorageAttachedIndex';
+    """
+
+    create_key_index = f"""
+    CREATE CUSTOM INDEX IF NOT EXISTS {table_name}_key_sai
+    ON {table_name} (keys(mtda_val_tx))
+    USING 'StorageAttachedIndex';
+    """
+
+    # Execute queries
+    session.execute(create_table_query)
+    session.execute(create_entry_index)
+    session.execute(create_key_index)
+
+    print(f"[✓] Table `{table_name}` and indexes created successfully in keyspace `{keyspace}`.")
