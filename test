@@ -1,66 +1,24 @@
-from cassandra.cluster import Cluster
-from cassandra.auth import PlainTextAuthProvider
-from cassandra.query import BatchStatement, PreparedStatement
-from datetime import datetime, timezone
-import uuid
+# Sample: List of dicts
+data_list = [
+    {
+        "triple": 1,
+        "page": 3,
+        "source": "Document A",
+        "content": "Visa's revenue in Q2 grew significantly across multiple regions."
+    },
+    {
+        "triple": 2,
+        "page": 7,
+        "source": "Document B",
+        "content": "Transaction revenue was higher due to increased payment volumes."
+    }
+]
 
-def insert_triplet(self, chunk_data, use_case_id=101, use_case_nm="Earnings Coll Analysis"):
-    try:
-        # Connect if not already connected
-        if self.cluster is None or self.cluster.is_shutdown:
-            self.cluster = Cluster(self.clusternode, auth_provider=PlainTextAuthProvider(username="USER_NAME", password="PASSWORD"))
+# Inside the retrieved_document column
+with retrieved_document:
+    st.subheader("📄 Retrieved Documents")
 
-        if self.session is None or self.session.is_shutdown:
-            self.session = self.cluster.connect()
-
-        # Prepare the INSERT query
-        insert_query = f"""
-        INSERT INTO {self.table} (
-            prtn_id, row_id, bdy_blob_tx, creat_ts, wtda_val_tx,
-            use_case_id, use_case_nm, vector
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        """
-        prepared: PreparedStatement = self.session.prepare(insert_query)
-        batch = BatchStatement()
-
-        # Iterate and add each data point to the batch
-        for i, data_point in enumerate(chunk_data, start=1):
-            metadata = data_point.get("metadata", {})
-
-            meta_data = {
-                "parent_node": metadata.get("parent_node", "A"),
-                "doc_id": metadata.get("doc_id"),
-                "page_no": metadata.get("page"),
-                "prev_node": metadata.get("prev_node", "HA"),
-                "next_node": metadata.get("next_node", "NA"),
-                "period": metadata.get("period"),
-                "type": metadata.get("type"),
-                "chunking_type": metadata.get("chunking type"),
-                "company_name": metadata.get("company_name"),
-                "source_content": metadata.get("content")
-            }
-
-            row_id = str(uuid.uuid4())
-            chunk_text = data_point["quadruples"]
-            embedding = data_point["embedding"]
-            file_name = metadata.get("source", "unknown")
-            created_ts = datetime.now(timezone.utc)
-
-            # Add insert to batch
-            batch.add(prepared, (
-                file_name,
-                row_id,
-                chunk_text,
-                created_ts,
-                meta_data,
-                use_case_id,
-                use_case_nm,
-                embedding
-            ))
-
-        # Execute the batch
-        self.session.execute(batch)
-        print(f"✅ Successfully inserted {len(chunk_data)} records into Cassandra.")
-
-    except Exception as e:
-        print(f"❌ Error inserting data: {e}")
+    for idx, doc in enumerate(data_list):
+        with st.expander(f"🔗 Triple {doc['triple']} — Page {doc['page']}"):
+            st.markdown(f"**📘 Source:** `{doc['source']}`")
+            st.markdown(f"**📝 Content:**\n\n{doc['content']}")
