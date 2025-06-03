@@ -1,47 +1,66 @@
-from cassandra.cluster import Cluster
-from cassandra.policies import RoundRobinPolicy
+import json
+import streamlit as st
+from typing import Tuple, Union
 
-def create_table_with_index(session, keyspace: str, table_name: str):
-    # Use keyspace
-    session.set_keyspace(keyspace)
 
-    # Define table creation query
-    create_table_query = f"""
-    CREATE TABLE IF NOT EXISTS {table_name} (
-        prtn_id text,
-        row_id timeuuid,
-        bdy_blob_tx text,
-        creat_ts timestamp,
-        mtda_val_tx map<text, text>,
-        smry_blob_tx text,
-        use_case_id int,
-        use_case_nm text,
-        vector vector<float, 3072>,
-        PRIMARY KEY ((prtn_id), row_id)
-    )
-    WITH compression = {{
-        'chunk_length_in_kb': 64,
-        'class': 'org.apache.cassandra.io.compress.LZ4Compressor'
-    }}
-    AND speculative_retry = '99PERCENTILE';
-    """
+class AnswerParser:
+    def __init__(self, model_invoke_func, model_idx):
+        self.model_invoke = model_invoke_func
+        self.model_idx = model_idx
 
-    # Define custom index queries
-    create_entry_index = f"""
-    CREATE CUSTOM INDEX IF NOT EXISTS {table_name}_entry_sai
-    ON {table_name} (entries(mtda_val_tx))
-    USING 'StorageAttachedIndex';
-    """
+    def _parse_output(self, raw_output: str) -> Tuple[str, Union[str, dict], bool]:
+        """Try to split answer into text and a dictionary string or object."""
+        if "<|>" in raw_output:
+            try:
+                text_part, dict_part = raw_output.split("<|>", 1)
+                if "=" in dict_part:
+                    _, dict_str = dict_part.split("=", 1)
+                    try:
+                        parsed_dict = json.loads(dict_str.strip())  # ensure it's JSON-safe
+                        return text_part.strip(), parsed_dict, True
+                    except json.JSONDecodeError:
+                        return text_part.strip(), f"⚠️ Failed to parse dictionary JSON: {dict_str}", False
+                else:
+                    return raw_output.strip(), "⚠️ Format issue: '=' missing in dict part.", False
+            except Exception as e:
+                return raw_output.strip(), f"❌ Exception while parsing: {e}", False
+        else:
+            return raw_output.strip(), "⚠️ Format issue: '<|>' separator missing.", False
 
-    create_key_index = f"""
-    CREATE CUSTOM INDEX IF NOT EXISTS {table_name}_key_sai
-    ON {table_name} (keys(mtda_val_tx))
-    USING 'StorageAttachedIndex';
-    """
+    def _retry_with_fix_prompt(self, original_output: str):
+        """Construct retry prompt and re-call model to fix bad output."""
+        retry_prompt = ValidPromptTemplate(
+            input_variables=["original_response"],
+            template="""
+The previous response did not match the expected format.
 
-    # Execute queries
-    session.execute(create_table_query)
-    session.execute(create_entry_index)
-    session.execute(create_key_index)
+Expected format:
+<answer_text><|>result_dict={"key": "value", ...}
 
-    print(f"[✓] Table `{table_name}` and indexes created successfully in keyspace `{keyspace}`.")
+But received:
+"{original_response}"
+
+Please regenerate the correct response using the same context. Ensure the dictionary is valid JSON.
+"""
+        )
+        retry_input = {"original_response": original_output}
+        retry_result = self.model_invoke().model_call(self.model_idx, retry_prompt, retry_input)
+        return retry_result.content
+
+    def process(self, prompt_template, input_node: dict) -> Tuple[str, Union[str, dict]]:
+        """Main handler to invoke model, parse response, retry if needed."""
+        result = self.model_invoke().model_call(self.model_idx, prompt_template, input_node)
+        raw_output = result.content
+
+        text_part, dict_data, success = self._parse_output(raw_output)
+
+        if not success:
+            st.warning("⚠️ Initial output format invalid. Retrying with correction prompt.")
+            retry_output = self._retry_with_fix_prompt(raw_output)
+            text_part, dict_data, success = self._parse_output(retry_output)
+
+            if not success:
+                st.warning("⚠️ Output format could not be fixed. Showing best-effort answer.")
+                text_part += "\n\nNote: Could not parse the output into a valid dictionary."
+
+        return text_part, dict_data
