@@ -1,66 +1,31 @@
-import json
-import streamlit as st
-from typing import Tuple, Union
+Absolutely! Here's a clearer and more structured rephrased version of your original prompt, while preserving the intent and output format you want:
 
 
-class AnswerParser:
-    def __init__(self, model_invoke_func, model_idx):
-        self.model_invoke = model_invoke_func
-        self.model_idx = model_idx
+---
 
-    def _parse_output(self, raw_output: str) -> Tuple[str, Union[str, dict], bool]:
-        """Try to split answer into text and a dictionary string or object."""
-        if "<|>" in raw_output:
-            try:
-                text_part, dict_part = raw_output.split("<|>", 1)
-                if "=" in dict_part:
-                    _, dict_str = dict_part.split("=", 1)
-                    try:
-                        parsed_dict = json.loads(dict_str.strip())  # ensure it's JSON-safe
-                        return text_part.strip(), parsed_dict, True
-                    except json.JSONDecodeError:
-                        return text_part.strip(), f"⚠️ Failed to parse dictionary JSON: {dict_str}", False
-                else:
-                    return raw_output.strip(), "⚠️ Format issue: '=' missing in dict part.", False
-            except Exception as e:
-                return raw_output.strip(), f"❌ Exception while parsing: {e}", False
-        else:
-            return raw_output.strip(), "⚠️ Format issue: '<|>' separator missing.", False
+✅ Rephrased Prompt
 
-    def _retry_with_fix_prompt(self, original_output: str):
-        """Construct retry prompt and re-call model to fix bad output."""
-        retry_prompt = ValidPromptTemplate(
-            input_variables=["original_response"],
-            template="""
-The previous response did not match the expected format.
+> Using the provided nodes and edges as context, generate a detailed answer to the query. Include the answer and the relevant nodes involved.
 
-Expected format:
-<answer_text><|>result_dict={"key": "value", ...}
+After the answer, insert the delimiter "<1>".
 
-But received:
-"{original_response}"
+Then return a filtered version of the triplet_dict (in str(dict) format), which contains only those triplets that were actually used in generating the answer.
 
-Please regenerate the correct response using the same context. Ensure the dictionary is valid JSON.
-"""
-        )
-        retry_input = {"original_response": original_output}
-        retry_result = self.model_invoke().model_call(self.model_idx, retry_prompt, retry_input)
-        return retry_result.content
+Important: In the values of the triplet dictionary, do not include UUIDs or any unnecessary metadata — keep only meaningful content (subject, predicate, object).
 
-    def process(self, prompt_template, input_node: dict) -> Tuple[str, Union[str, dict]]:
-        """Main handler to invoke model, parse response, retry if needed."""
-        result = self.model_invoke().model_call(self.model_idx, prompt_template, input_node)
-        raw_output = result.content
 
-        text_part, dict_data, success = self._parse_output(raw_output)
 
-        if not success:
-            st.warning("⚠️ Initial output format invalid. Retrying with correction prompt.")
-            retry_output = self._retry_with_fix_prompt(raw_output)
-            text_part, dict_data, success = self._parse_output(retry_output)
 
-            if not success:
-                st.warning("⚠️ Output format could not be fixed. Showing best-effort answer.")
-                text_part += "\n\nNote: Could not parse the output into a valid dictionary."
+---
 
-        return text_part, dict_data
+📌 Result Format Example
+
+<Answer based on nodes and edges>
+<1>
+<Filtered triplet_dict as stringified Python dict>
+
+
+---
+
+Let me know if you'd like a variant for OpenAI, LangChain, or internal docstring usage too.
+
