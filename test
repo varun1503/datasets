@@ -1,31 +1,25 @@
-Absolutely! Here's a clearer and more structured rephrased version of your original prompt, while preserving the intent and output format you want:
+Here's a more polished version of your message that you can send to Manoj:
 
 
 ---
 
-✅ Rephrased Prompt
+Subject: Leave Request for Family Trip
 
-> Using the provided nodes and edges as context, generate a detailed answer to the query. Include the answer and the relevant nodes involved.
+Hi Manoj,
 
-After the answer, insert the delimiter "<1>".
+Hope you're doing well.
 
-Then return a filtered version of the triplet_dict (in str(dict) format), which contains only those triplets that were actually used in generating the answer.
+My parents are planning a small family trip at the end of this month, and it’s been a long time since we’ve all come together. I’d like to request 3 days of vacation to join them.
 
-Important: In the values of the triplet dictionary, do not include UUIDs or any unnecessary metadata — keep only meaningful content (subject, predicate, object).
+I will ensure that all my tasks are completed before I leave and there will be no impact on ongoing work.
 
+Let me know if you need any additional details.
 
-
-
----
-
-📌 Result Format Example
-
-<Answer based on nodes and edges>
-<1>
-<Filtered triplet_dict as stringified Python dict>
+Thanks,
+[Your Name]
 
 
 ---
 
-Let me know if you'd like a variant for OpenAI, LangChain, or internal docstring usage too.
+Let me know if you want it to sound more formal or casual.
 
