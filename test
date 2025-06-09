@@ -1,51 +1,17 @@
-from docx import Document
-from docx.enum.text import WD_BREAK
-import os
+docx_path = "your_document.docx"
+pages = extract_docx_with_structure(docx_path)
 
-def extract_docx_with_structure(file_path):
-    doc = Document(file_path)
+for i, page in enumerate(pages, 1):
+    print(f"\n--- Page {i} ---")
+    print("Paragraphs:")
+    for p in page['paragraphs']:
+        print("-", p)
 
-    content_by_page = []
-    current_page = {'paragraphs': [], 'tables': [], 'images': []}
-    image_count = 0
+    print("Tables:")
+    for t in page['tables']:
+        for row in t:
+            print(row)
 
-    for block in iter_block_items(doc):
-        if isinstance(block, str):  # Paragraph text
-            if block == '[PAGE BREAK]':
-                content_by_page.append(current_page)
-                current_page = {'paragraphs': [], 'tables': [], 'images': []}
-            else:
-                current_page['paragraphs'].append(block)
-        elif isinstance(block, list):  # Table
-            current_page['tables'].append(block)
-        elif isinstance(block, dict) and block.get("image"):
-            image_count += 1
-            label = f"Image_{image_count}"
-            current_page['images'].append(label)
-
-    # Append last page if not empty
-    if current_page['paragraphs'] or current_page['tables'] or current_page['images']:
-        content_by_page.append(current_page)
-
-    return content_by_page
-
-
-# Helper: iterate over all items in doc (paragraphs, tables, and images)
-def iter_block_items(doc):
-    for para in doc.paragraphs:
-        if any(run.break_type == WD_BREAK.PAGE for run in para.runs):
-            yield '[PAGE BREAK]'
-        if para.text.strip():
-            yield para.text.strip()
-
-    for table in doc.tables:
-        table_data = []
-        for row in table.rows:
-            table_data.append([cell.text.strip() for cell in row.cells])
-        yield table_data
-
-    # Images
-    for rel in doc.part._rels:
-        rel_obj = doc.part._rels[rel]
-        if "image" in rel_obj.target_ref:
-            yield {"image": rel_obj.target_ref}
+    print("Images:")
+    for img in page['images']:
+        print("Label:", img)
