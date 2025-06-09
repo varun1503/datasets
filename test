@@ -1,42 +1,33 @@
-import streamlit as st
+from docx import Document
 
-# Display messages in reverse order (latest on top)
-for msg in reversed(st.session_state.messagetabi):
-    if msg["role"] == "user":
-        # 👇 USER (bold question)
-        st.markdown(f"""
-        <div style="text-align: right; margin: 8px 0;">
-            <div style="
-                display: inline-block;
-                padding: 10px 14px;
-                border-radius: 18px 18px 0px 18px;
-                max-width: 75%;
-                font-family: Arial, sans-serif;
-                word-wrap: break-word;
-                font-size: 18px;
-                font-weight: bold;  /* 👈 Bold for user question */
-                line-height: 1.5;
-            ">
-                {msg['content']}
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        # 👇 ASSISTANT (normal text)
-        st.markdown(f"""
-        <div style="text-align: left; margin: 8px 0;">
-            <div style="
-                display: inline-block;
-                padding: 10px 14px;
-                border-radius: 18px 18px 18px 0px;
-                max-width: 75%;
-                font-family: Arial, sans-serif;
-                word-wrap: break-word;
-                font-size: 18px;
-                font-weight: normal;  /* 👈 Normal for assistant answer */
-                line-height: 1.5;
-            ">
-                {msg['content']}
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+def extract_from_docx(file_path):
+    doc = Document(file_path)
+
+    # Extract paragraphs
+    paragraphs = [para.text.strip() for para in doc.paragraphs if para.text.strip()]
+
+    # Extract tables
+    tables = []
+    for table in doc.tables:
+        table_data = []
+        for row in table.rows:
+            row_data = [cell.text.strip() for cell in row.cells]
+            table_data.append(row_data)
+        tables.append(table_data)
+
+    return paragraphs, tables
+
+# Example usage
+docx_path = "your_document.docx"
+paragraphs, tables = extract_from_docx(docx_path)
+
+# Output
+print("Paragraphs:")
+for p in paragraphs:
+    print("-", p)
+
+print("\nTables:")
+for idx, table in enumerate(tables):
+    print(f"\nTable {idx + 1}:")
+    for row in table:
+        print(row)
