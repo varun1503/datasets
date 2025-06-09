@@ -1,55 +1,72 @@
 from docx import Document
+from docx.oxml.ns import qn
 import os
 
-def extract_docx_content(file_path, save_images=False, image_output_dir='images'):
+def extract_ordered_docx_content(file_path, save_images=False, image_output_dir='images'):
     doc = Document(file_path)
+    body = doc._element.body
 
-    # Extract paragraphs
-    paragraphs = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+    ordered_content = []
+    image_count = 0
 
-    # Extract tables
-    tables = []
-    for table in doc.tables:
-        table_data = []
-        for row in table.rows:
-            row_data = [cell.text.strip() for cell in row.cells]
-            table_data.append(row_data)
-        tables.append(table_data)
-
-    # Extract image labels (and optionally save them)
-    images = []
+    # Optional image saving setup
     if save_images and not os.path.exists(image_output_dir):
         os.makedirs(image_output_dir)
 
-    image_count = 0
+    # Map relationship ids to image blobs
+    image_rels = {
+        rel.rId: rel.target_part.blob
+        for rel in doc.part._rels.values()
+        if "image" in rel.target_ref
+    }
+
+    for child in body.iterchildren():
+        tag = child.tag
+
+        # Paragraph
+        if tag == qn('w:p'):
+            para = Document().paragraphs[0]._element  # Dummy element for reuse
+            para.clear_content()
+            para.append(child)
+            para_text = ''.join(node.text for node in para.iter() if node.text).strip()
+            if para_text:
+                ordered_content.append(('paragraph', para_text))
+
+        # Table
+        elif tag == qn('w:tbl'):
+            tbl_doc = Document()
+            tbl_doc._body.clear_content()
+            tbl_doc._body._element.append(child)
+            table = tbl_doc.tables[0]
+            table_data = []
+            for row in table.rows:
+                table_data.append([cell.text.strip() for cell in row.cells])
+            ordered_content.append(('table', table_data))
+
+    # Images (appended at end, as we can't determine exact position with python-docx)
     for rel in doc.part._rels.values():
         if "image" in rel.target_ref:
             image_count += 1
-            label = f"Image_{image_count}"
-            images.append(label)
+            image_label = f"Image_{image_count}"
+            ordered_content.append(('image', image_label))
 
             if save_images:
                 ext = rel.target_ref.split('.')[-1]
-                image_data = rel.target_part.blob
-                filename = os.path.join(image_output_dir, f"{label}.{ext}")
-                with open(filename, "wb") as f:
-                    f.write(image_data)
+                path = os.path.join(image_output_dir, f"{image_label}.{ext}")
+                with open(path, "wb") as f:
+                    f.write(rel.target_part.blob)
 
-    return paragraphs, tables, images
+    return ordered_content
 
 file_path = 'your_file.docx'
-paragraphs, tables, images = extract_docx_content(file_path, save_images=True)
+ordered_content = extract_ordered_docx_content(file_path, save_images=True)
 
-print("📄 Paragraphs:")
-for p in paragraphs:
-    print(" -", p)
-
-print("\n📊 Tables:")
-for idx, table in enumerate(tables, 1):
-    print(f" Table {idx}:")
-    for row in table:
-        print("   ", row)
-
-print("\n🖼️ Images:")
-for img in images:
-    print(" -", img)
+for content_type, content in ordered_content:
+    if content_type == 'paragraph':
+        print("📄 Paragraph:", content)
+    elif content_type == 'table':
+        print("📊 Table:")
+        for row in content:
+            print("   ", row)
+    elif content_type == 'image':
+        print("🖼️ Image:", content)
