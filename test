@@ -36,3 +36,20 @@ def extract_docx_content(file_path, save_images=False, image_output_dir='images'
                     f.write(image_data)
 
     return paragraphs, tables, images
+
+file_path = 'your_file.docx'
+paragraphs, tables, images = extract_docx_content(file_path, save_images=True)
+
+print("📄 Paragraphs:")
+for p in paragraphs:
+    print(" -", p)
+
+print("\n📊 Tables:")
+for idx, table in enumerate(tables, 1):
+    print(f" Table {idx}:")
+    for row in table:
+        print("   ", row)
+
+print("\n🖼️ Images:")
+for img in images:
+    print(" -", img)
