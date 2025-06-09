@@ -1,42 +1,38 @@
 from docx import Document
 import os
 
-def extract_docx_with_structure(file_path):
+def extract_docx_content(file_path, save_images=False, image_output_dir='images'):
     doc = Document(file_path)
 
-    content_by_page = []
-    current_page = {'paragraphs': [], 'tables': [], 'images': []}
-    image_count = 0
-
-    for para in doc.paragraphs:
-        text = para.text.strip()
-        if not text:
-            continue
-
-        # Heuristic: Manual marker for a page break
-        if '--- PAGE BREAK ---' in text or 'Page Break' in text:
-            content_by_page.append(current_page)
-            current_page = {'paragraphs': [], 'tables': [], 'images': []}
-        else:
-            current_page['paragraphs'].append(text)
+    # Extract paragraphs
+    paragraphs = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
 
     # Extract tables
+    tables = []
     for table in doc.tables:
         table_data = []
         for row in table.rows:
             row_data = [cell.text.strip() for cell in row.cells]
             table_data.append(row_data)
-        current_page['tables'].append(table_data)
+        tables.append(table_data)
 
-    # Extract image labels
+    # Extract image labels (and optionally save them)
+    images = []
+    if save_images and not os.path.exists(image_output_dir):
+        os.makedirs(image_output_dir)
+
+    image_count = 0
     for rel in doc.part._rels.values():
         if "image" in rel.target_ref:
             image_count += 1
             label = f"Image_{image_count}"
-            current_page['images'].append(label)
+            images.append(label)
 
-    # Append last collected page
-    if current_page['paragraphs'] or current_page['tables'] or current_page['images']:
-        content_by_page.append(current_page)
+            if save_images:
+                ext = rel.target_ref.split('.')[-1]
+                image_data = rel.target_part.blob
+                filename = os.path.join(image_output_dir, f"{label}.{ext}")
+                with open(filename, "wb") as f:
+                    f.write(image_data)
 
-    return content_by_page
+    return paragraphs, tables, images
