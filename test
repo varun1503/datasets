@@ -1,33 +1,51 @@
 from docx import Document
+from docx.enum.text import WD_BREAK
+import os
 
-def extract_from_docx(file_path):
+def extract_docx_with_structure(file_path):
     doc = Document(file_path)
 
-    # Extract paragraphs
-    paragraphs = [para.text.strip() for para in doc.paragraphs if para.text.strip()]
+    content_by_page = []
+    current_page = {'paragraphs': [], 'tables': [], 'images': []}
+    image_count = 0
 
-    # Extract tables
-    tables = []
+    for block in iter_block_items(doc):
+        if isinstance(block, str):  # Paragraph text
+            if block == '[PAGE BREAK]':
+                content_by_page.append(current_page)
+                current_page = {'paragraphs': [], 'tables': [], 'images': []}
+            else:
+                current_page['paragraphs'].append(block)
+        elif isinstance(block, list):  # Table
+            current_page['tables'].append(block)
+        elif isinstance(block, dict) and block.get("image"):
+            image_count += 1
+            label = f"Image_{image_count}"
+            current_page['images'].append(label)
+
+    # Append last page if not empty
+    if current_page['paragraphs'] or current_page['tables'] or current_page['images']:
+        content_by_page.append(current_page)
+
+    return content_by_page
+
+
+# Helper: iterate over all items in doc (paragraphs, tables, and images)
+def iter_block_items(doc):
+    for para in doc.paragraphs:
+        if any(run.break_type == WD_BREAK.PAGE for run in para.runs):
+            yield '[PAGE BREAK]'
+        if para.text.strip():
+            yield para.text.strip()
+
     for table in doc.tables:
         table_data = []
         for row in table.rows:
-            row_data = [cell.text.strip() for cell in row.cells]
-            table_data.append(row_data)
-        tables.append(table_data)
+            table_data.append([cell.text.strip() for cell in row.cells])
+        yield table_data
 
-    return paragraphs, tables
-
-# Example usage
-docx_path = "your_document.docx"
-paragraphs, tables = extract_from_docx(docx_path)
-
-# Output
-print("Paragraphs:")
-for p in paragraphs:
-    print("-", p)
-
-print("\nTables:")
-for idx, table in enumerate(tables):
-    print(f"\nTable {idx + 1}:")
-    for row in table:
-        print(row)
+    # Images
+    for rel in doc.part._rels:
+        rel_obj = doc.part._rels[rel]
+        if "image" in rel_obj.target_ref:
+            yield {"image": rel_obj.target_ref}
