@@ -1,17 +1,42 @@
-docx_path = "your_document.docx"
-pages = extract_docx_with_structure(docx_path)
+from docx import Document
+import os
 
-for i, page in enumerate(pages, 1):
-    print(f"\n--- Page {i} ---")
-    print("Paragraphs:")
-    for p in page['paragraphs']:
-        print("-", p)
+def extract_docx_with_structure(file_path):
+    doc = Document(file_path)
 
-    print("Tables:")
-    for t in page['tables']:
-        for row in t:
-            print(row)
+    content_by_page = []
+    current_page = {'paragraphs': [], 'tables': [], 'images': []}
+    image_count = 0
 
-    print("Images:")
-    for img in page['images']:
-        print("Label:", img)
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if not text:
+            continue
+
+        # Heuristic: Manual marker for a page break
+        if '--- PAGE BREAK ---' in text or 'Page Break' in text:
+            content_by_page.append(current_page)
+            current_page = {'paragraphs': [], 'tables': [], 'images': []}
+        else:
+            current_page['paragraphs'].append(text)
+
+    # Extract tables
+    for table in doc.tables:
+        table_data = []
+        for row in table.rows:
+            row_data = [cell.text.strip() for cell in row.cells]
+            table_data.append(row_data)
+        current_page['tables'].append(table_data)
+
+    # Extract image labels
+    for rel in doc.part._rels.values():
+        if "image" in rel.target_ref:
+            image_count += 1
+            label = f"Image_{image_count}"
+            current_page['images'].append(label)
+
+    # Append last collected page
+    if current_page['paragraphs'] or current_page['tables'] or current_page['images']:
+        content_by_page.append(current_page)
+
+    return content_by_page
