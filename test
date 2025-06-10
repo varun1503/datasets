@@ -1,19 +1,9 @@
-file_path = "/mnt/data/file-2C5TDub4zDjZYm4DsFFX77"
-content = extract_ordered_docx_content(file_path, save_images=True)
-
-for ctype, cdata in content:
-    if ctype == "paragraph":
-        print("📄 Paragraph:", cdata)
-    elif ctype == "table":
-        print("📊 Table:")
-        for row in cdata:
-            print("   ", row)
-    elif ctype == "image":
-        print("🖼️ Image:", cdat
 from docx import Document
 from docx.oxml.ns import qn
-from docx.oxml import OxmlElement
 import os
+
+# Define WordprocessingML XML namespace
+NSMAP = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
 
 def extract_ordered_docx_content(file_path, save_images=False, image_output_dir='images'):
     doc = Document(file_path)
@@ -21,22 +11,15 @@ def extract_ordered_docx_content(file_path, save_images=False, image_output_dir=
     ordered_content = []
     image_count = 0
 
-    # Optional image saving
-    if save_images and not os.path.exists(image_output_dir):
-        os.makedirs(image_output_dir)
+    # Prepare image directory
+    if save_images:
+        os.makedirs(image_output_dir, exist_ok=True)
 
-    # Prepare image mapping
-    image_rels = {
-        rel.rId: rel.target_part.blob
-        for rel in doc.part._rels.values()
-        if "image" in rel.target_ref
-    }
-
-    # Iterate through document XML
+    # Walk through content in order
     for child in body.iterchildren():
         tag = child.tag
 
-        # Paragraph
+        # -------- Paragraph --------
         if tag == qn('w:p'):
             texts = []
             for node in child.iter():
@@ -46,23 +29,20 @@ def extract_ordered_docx_content(file_path, save_images=False, image_output_dir=
             if para_text:
                 ordered_content.append(('paragraph', para_text))
 
-        # Table
+        # -------- Table --------
         elif tag == qn('w:tbl'):
             table_data = []
-            tbl = OxmlElement("w:tbl")
-            tbl._element = child
-            rows = child.findall('.//w:tr')
+            rows = child.findall('.//w:tr', namespaces=NSMAP)
             for row in rows:
-                cells = row.findall('.//w:tc')
+                cells = row.findall('.//w:tc', namespaces=NSMAP)
                 row_data = []
                 for cell in cells:
-                    text = ''.join([t.text for t in cell.iter() if t.text])
+                    text = ''.join(t.text for t in cell.iter() if t.text)
                     row_data.append(text.strip())
                 table_data.append(row_data)
-            if table_data:
-                ordered_content.append(('table', table_data))
+            ordered_content.append(('table', table_data))
 
-    # Append image labels at the end
+    # -------- Images (handled separately) --------
     for rel in doc.part._rels.values():
         if "image" in rel.target_ref:
             image_count += 1
@@ -75,4 +55,4 @@ def extract_ordered_docx_content(file_path, save_images=False, image_output_dir=
                 with open(path, "wb") as f:
                     f.write(rel.target_part.blob)
 
-    return ordered_contenta)
+    return ordered_content
