@@ -2,34 +2,61 @@ from docx import Document
 from docx.oxml.ns import qn
 import os
 
-# Define WordprocessingML XML namespace
 NSMAP = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
 
-def extract_ordered_docx_content(file_path, save_images=False, image_output_dir='images'):
+def extract_structured_docx(file_path, save_images=False, image_output_dir="images"):
     doc = Document(file_path)
     body = doc._element.body
-    ordered_content = []
-    image_count = 0
+    structured_data = []
 
-    # Prepare image directory
+    current_heading = {"level": 0, "text": "Root", "children": []}
+
+    def add_to_heading(content):
+        current_heading["children"].append(content)
+
+    heading_stack = [current_heading]
+
     if save_images:
         os.makedirs(image_output_dir, exist_ok=True)
 
-    # Walk through content in order
+    image_counter = 0
+
     for child in body.iterchildren():
         tag = child.tag
 
-        # -------- Paragraph --------
+        # === Paragraph ===
         if tag == qn('w:p'):
-            texts = []
-            for node in child.iter():
-                if node.text:
-                    texts.append(node.text)
-            para_text = ''.join(texts).strip()
-            if para_text:
-                ordered_content.append(('paragraph', para_text))
+            p = None
+            for para in doc.paragraphs:
+                if para._element == child:
+                    p = para
+                    break
 
-        # -------- Table --------
+            if p is None:
+                continue
+
+            style = p.style.name if p.style else ''
+            text = p.text.strip()
+
+            # -- Detect heading --
+            if style.startswith("Heading"):
+                try:
+                    level = int(style.replace("Heading", "").strip())
+                except:
+                    level = 1
+
+                # Manage heading stack
+                while heading_stack and heading_stack[-1]["level"] >= level:
+                    heading_stack.pop()
+
+                new_heading = {"level": level, "text": text, "children": []}
+                heading_stack[-1]["children"].append(new_heading)
+                heading_stack.append(new_heading)
+
+            elif text:
+                add_to_heading({"type": "paragraph", "text": text})
+
+        # === Table ===
         elif tag == qn('w:tbl'):
             table_data = []
             rows = child.findall('.//w:tr', namespaces=NSMAP)
@@ -37,22 +64,21 @@ def extract_ordered_docx_content(file_path, save_images=False, image_output_dir=
                 cells = row.findall('.//w:tc', namespaces=NSMAP)
                 row_data = []
                 for cell in cells:
-                    text = ''.join(t.text for t in cell.iter() if t.text)
-                    row_data.append(text.strip())
+                    cell_text = ''.join(t.text for t in cell.iter() if t.text).strip()
+                    row_data.append(cell_text)
                 table_data.append(row_data)
-            ordered_content.append(('table', table_data))
+            add_to_heading({"type": "table", "rows": table_data})
 
-    # -------- Images (handled separately) --------
+    # === Images (use relationships) ===
     for rel in doc.part._rels.values():
         if "image" in rel.target_ref:
-            image_count += 1
-            image_label = f"Image_{image_count}"
-            ordered_content.append(('image', image_label))
-
+            image_counter += 1
+            image_label = f"Image_{image_counter}"
+            image_path = os.path.join(image_output_dir, f"{image_label}.{rel.target_ref.split('.')[-1]}")
             if save_images:
-                ext = rel.target_ref.split('.')[-1]
-                path = os.path.join(image_output_dir, f"{image_label}.{ext}")
-                with open(path, "wb") as f:
+                with open(image_path, "wb") as f:
                     f.write(rel.target_part.blob)
+            # Add image under root heading (or change to closest heading if image mapping logic improves)
+            current_heading["children"].append({"type": "image", "label": image_label, "path": image_path})
 
-    return ordered_content
+    return current_heading["children"]
