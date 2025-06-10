@@ -16,26 +16,35 @@ def extract_ordered_docx_content(file_path, save_images=False, image_output_dir=
     body = doc._element.body
     ordered_content = []
     image_count = 0
+    current_heading = None
 
     # Prepare image directory
     if save_images:
         os.makedirs(image_output_dir, exist_ok=True)
 
-    # Map XML <w:p> element to clean paragraph text
-    para_lookup = {
-        p._element: p.text.strip()
-        for p in doc.paragraphs
-        if p.text and p.text.strip()
-    }
+    # Build a mapping from XML element to paragraph
+    para_lookup = {p._element: p for p in doc.paragraphs if p.text and p.text.strip()}
 
     for child in body.iterchildren():
         tag = child.tag
 
         # -------- Paragraph --------
         if tag == qn('w:p'):
-            para_text = para_lookup.get(child, "")
-            if para_text:
-                ordered_content.append(('paragraph', para_text))
+            para = para_lookup.get(child)
+            if para:
+                text = para.text.strip()
+                style = para.style.name if para.style else ""
+
+                # Detect headings
+                if style.startswith("Heading"):
+                    current_heading = {'type': 'heading', 'text': text, 'level': style}
+                    ordered_content.append(current_heading)
+                else:
+                    ordered_content.append({
+                        'type': 'paragraph',
+                        'text': text,
+                        'under_heading': current_heading['text'] if current_heading else None
+                    })
 
         # -------- Table --------
         elif tag == qn('w:tbl'):
@@ -48,14 +57,18 @@ def extract_ordered_docx_content(file_path, save_images=False, image_output_dir=
                     clean_text = get_cell_text(cell)
                     row_data.append(clean_text)
                 table_data.append(row_data)
-            ordered_content.append(('table', table_data))
+
+            ordered_content.append({
+                'type': 'table',
+                'data': table_data,
+                'under_heading': current_heading['text'] if current_heading else None
+            })
 
     # -------- Images --------
     for rel in doc.part._rels.values():
         if "image" in rel.target_ref:
             image_count += 1
             image_label = f"Image_{image_count}"
-            ordered_content.append(('image', image_label))
 
             if save_images:
                 ext = rel.target_ref.split('.')[-1]
@@ -63,4 +76,23 @@ def extract_ordered_docx_content(file_path, save_images=False, image_output_dir=
                 with open(image_path, "wb") as f:
                     f.write(rel.target_part.blob)
 
+            ordered_content.append({
+                'type': 'image',
+                'label': image_label,
+                'under_heading': current_heading['text'] if current_heading else None
+            })
+
     return ordered_content
+content = extract_ordered_docx_content("your_file.docx", save_images=False)
+
+for item in content:
+    if item['type'] == 'heading':
+        print(f"\n[HEADING: {item['level']}] {item['text']}")
+    elif item['type'] == 'paragraph':
+        print(f"  [PARAGRAPH under: {item['under_heading']}] {item['text']}")
+    elif item['type'] == 'table':
+        print(f"  [TABLE under: {item['under_heading']}]")
+        for row in item['data']:
+            print("    ", row)
+    elif item['type'] == 'image':
+        print(f"  [IMAGE under: {item['under_heading']}] Label: {item['label']}")
