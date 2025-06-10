@@ -1,62 +1,43 @@
 from docx import Document
 from docx.oxml.ns import qn
+from docx.text.paragraph import Paragraph
 import os
 
+# WordprocessingML namespace
 NSMAP = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
 
-def extract_structured_docx(file_path, save_images=False, image_output_dir="images"):
+def get_cell_text(cell):
+    """Extracts clean text from a table cell (avoiding duplicated values)."""
+    paragraphs = [Paragraph(p, None).text.strip() for p in cell.findall('.//w:p', namespaces=NSMAP)]
+    return ' '.join(p for p in paragraphs if p)
+
+def extract_ordered_docx_content(file_path, save_images=False, image_output_dir='images'):
     doc = Document(file_path)
     body = doc._element.body
-    structured_data = []
+    ordered_content = []
+    image_count = 0
 
-    current_heading = {"level": 0, "text": "Root", "children": []}
-
-    def add_to_heading(content):
-        current_heading["children"].append(content)
-
-    heading_stack = [current_heading]
-
+    # Prepare image directory
     if save_images:
         os.makedirs(image_output_dir, exist_ok=True)
 
-    image_counter = 0
+    # Map XML <w:p> element to clean paragraph text
+    para_lookup = {
+        p._element: p.text.strip()
+        for p in doc.paragraphs
+        if p.text and p.text.strip()
+    }
 
     for child in body.iterchildren():
         tag = child.tag
 
-        # === Paragraph ===
+        # -------- Paragraph --------
         if tag == qn('w:p'):
-            p = None
-            for para in doc.paragraphs:
-                if para._element == child:
-                    p = para
-                    break
+            para_text = para_lookup.get(child, "")
+            if para_text:
+                ordered_content.append(('paragraph', para_text))
 
-            if p is None:
-                continue
-
-            style = p.style.name if p.style else ''
-            text = p.text.strip()
-
-            # -- Detect heading --
-            if style.startswith("Heading"):
-                try:
-                    level = int(style.replace("Heading", "").strip())
-                except:
-                    level = 1
-
-                # Manage heading stack
-                while heading_stack and heading_stack[-1]["level"] >= level:
-                    heading_stack.pop()
-
-                new_heading = {"level": level, "text": text, "children": []}
-                heading_stack[-1]["children"].append(new_heading)
-                heading_stack.append(new_heading)
-
-            elif text:
-                add_to_heading({"type": "paragraph", "text": text})
-
-        # === Table ===
+        # -------- Table --------
         elif tag == qn('w:tbl'):
             table_data = []
             rows = child.findall('.//w:tr', namespaces=NSMAP)
@@ -64,21 +45,22 @@ def extract_structured_docx(file_path, save_images=False, image_output_dir="imag
                 cells = row.findall('.//w:tc', namespaces=NSMAP)
                 row_data = []
                 for cell in cells:
-                    cell_text = ''.join(t.text for t in cell.iter() if t.text).strip()
-                    row_data.append(cell_text)
+                    clean_text = get_cell_text(cell)
+                    row_data.append(clean_text)
                 table_data.append(row_data)
-            add_to_heading({"type": "table", "rows": table_data})
+            ordered_content.append(('table', table_data))
 
-    # === Images (use relationships) ===
+    # -------- Images --------
     for rel in doc.part._rels.values():
         if "image" in rel.target_ref:
-            image_counter += 1
-            image_label = f"Image_{image_counter}"
-            image_path = os.path.join(image_output_dir, f"{image_label}.{rel.target_ref.split('.')[-1]}")
+            image_count += 1
+            image_label = f"Image_{image_count}"
+            ordered_content.append(('image', image_label))
+
             if save_images:
+                ext = rel.target_ref.split('.')[-1]
+                image_path = os.path.join(image_output_dir, f"{image_label}.{ext}")
                 with open(image_path, "wb") as f:
                     f.write(rel.target_part.blob)
-            # Add image under root heading (or change to closest heading if image mapping logic improves)
-            current_heading["children"].append({"type": "image", "label": image_label, "path": image_path})
 
-    return current_heading["children"]
+    return ordered_content
