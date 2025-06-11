@@ -1,158 +1,42 @@
-from docx import Document
-from docx.oxml.ns import qn
-from docx.shared import Pt
-import os
-import base64
-import uuid
+def format_structured_output(ordered_content):
+    id_to_node = {item['id']: dict(item) for item in ordered_content}
+    for node in id_to_node.values():
+        node['children'] = []
 
-NSMAP = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+    for item in ordered_content:
+        pid = item.get('parent_id')
+        if pid and pid in id_to_node:
+            id_to_node[pid]['children'].append(item)
 
-def generate_id():
-    return str(uuid.uuid4())
+    top_headings = [node for node in ordered_content if node['type'] == 'heading' and node.get('parent_id') is None]
 
-def get_cell_text(cell):
-    paras = cell.findall('.//w:p', namespaces=NSMAP)
-    texts = []
-    for p in paras:
-        texts.extend([t.text for t in p.iter() if t.text])
-    return ' '.join([t.strip() for t in texts if t.strip()])
+    formatted_lines = []
+    for heading in top_headings:
+        formatted_lines.append(f"Heading: {heading['text']}")
+        formatted_lines.extend(render_children(heading['children'], indent=1))
 
-def is_visually_heading(paragraph):
-    texts = [run.text for run in paragraph.runs if run.text.strip()]
-    bold = any(run.bold for run in paragraph.runs)
-    font_size = max((run.font.size.pt for run in paragraph.runs if run.font.size), default=0)
-    starts_like_heading = any(text.strip().startswith(tuple(str(i) for i in range(1, 10))) for text in texts)
-    return bold and font_size >= 11 and starts_like_heading
+    return "\n".join(formatted_lines)
 
-def extract_ordered_docx_content(file_path, save_images=False, image_output_dir='images'):
-    doc = Document(file_path)
-    body = doc._element.body
-    ordered_content = []
 
-    os.makedirs(image_output_dir, exist_ok=True)
-    para_lookup = {p._element: p for p in doc.paragraphs}
+def render_children(children, indent=1):
+    lines = []
+    indent_space = "    " * indent
 
-    heading_stack = []
-    id_map = {}
+    for child in children:
+        if child['type'] == 'subheading':
+            lines.append(f"{indent_space}Subheading: {child['text']}")
+            lines.extend(render_children(child.get('children', []), indent + 1))
 
-    def get_current_parent():
-        return heading_stack[-1] if heading_stack else None
+        elif child['type'] == 'paragraph':
+            lines.append(f"{indent_space}Paragraph: {child['text']}")
 
-    for child in body.iterchildren():
-        tag = child.tag
+        elif child['type'] == 'table':
+            lines.append(f"{indent_space}Table:")
+            for row in child['data']:
+                row_str = " | ".join(row)
+                lines.append(f"{indent_space}    - {row_str}")
 
-        # -------- Paragraphs / Headings --------
-        if tag == qn('w:p') and child in para_lookup:
-            para = para_lookup[child]
-            text = para.text.strip()
-            if not text:
-                continue
+        elif child['type'] == 'image':
+            lines.append(f"{indent_space}Image: {child['label']}")
 
-            if para.style and para.style.name.startswith("Heading") or is_visually_heading(para):
-                level = para.style.name if para.style else "Custom"
-                heading_id = generate_id()
-                heading_item = {
-                    'id': heading_id,
-                    'type': 'heading',
-                    'text': text,
-                    'level': level,
-                    'child_ids': []
-                }
-
-                # Parent-child nesting
-                while heading_stack and heading_stack[-1]['level'] >= level:
-                    heading_stack.pop()
-                parent = get_current_parent()
-                if parent:
-                    heading_item['parent_id'] = parent['id']
-                    parent['child_ids'].append(heading_id)
-
-                heading_stack.append(heading_item)
-                ordered_content.append(heading_item)
-                id_map[heading_id] = heading_item
-
-            else:
-                para_id = generate_id()
-                parent = get_current_parent()
-                para_item = {
-                    'id': para_id,
-                    'type': 'paragraph',
-                    'text': text,
-                    'parent_id': parent['id'] if parent else None
-                }
-                if parent:
-                    parent['child_ids'].append(para_id)
-                ordered_content.append(para_item)
-
-        # -------- Tables --------
-        elif tag == qn('w:tbl'):
-            rows = child.findall('.//w:tr', namespaces=NSMAP)
-            table_data = []
-            for row in rows:
-                cells = row.findall('.//w:tc', namespaces=NSMAP)
-                table_data.append([get_cell_text(cell) for cell in cells])
-            table_id = generate_id()
-            parent = get_current_parent()
-            table_item = {
-                'id': table_id,
-                'type': 'table',
-                'data': table_data,
-                'parent_id': parent['id'] if parent else None
-            }
-            if parent:
-                parent['child_ids'].append(table_id)
-            ordered_content.append(table_item)
-
-        # -------- Images (inline drawing detection) --------
-        elif tag == qn('w:p'):
-            for drawing in child.findall('.//w:drawing', namespaces=NSMAP):
-                blip = drawing.find('.//a:blip', namespaces={'a': 'http://schemas.openxmlformats.org/drawingml/2006/main'})
-                if blip is not None:
-                    r_id = blip.attrib.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
-                    if not r_id:
-                        continue
-                    image_part = doc.part.related_parts[r_id]
-                    ext = image_part.content_type.split('/')[-1]
-                    if ext == 'emf':
-                        continue
-                    image_id = generate_id()
-                    image_label = f"Image_{image_id[:8]}.{ext}"
-                    if save_images:
-                        image_path = os.path.join(image_output_dir, image_label)
-                        with open(image_path, "wb") as f:
-                            f.write(image_part.blob)
-                    parent = get_current_parent()
-                    image_item = {
-                        'id': image_id,
-                        'type': 'image',
-                        'label': image_label,
-                        'parent_id': parent['id'] if parent else None
-                    }
-                    if parent:
-                        parent['child_ids'].append(image_id)
-                    ordered_content.append(image_item)
-
-    # -------- Fallback image detection via .rels (to find skipped images) --------
-    found_labels = set(i['label'] for i in ordered_content if i['type'] == 'image')
-    for rel in doc.part._rels.values():
-        if "image" in rel.target_ref:
-            ext = rel.target_ref.split('.')[-1].lower()
-            if ext == 'emf':
-                continue
-            image_label = os.path.basename(rel.target_ref)
-            if image_label in found_labels:
-                continue
-            image_id = generate_id()
-            if save_images:
-                image_path = os.path.join(image_output_dir, image_label)
-                with open(image_path, "wb") as f:
-                    f.write(rel.target_part.blob)
-            image_item = {
-                'id': image_id,
-                'type': 'image',
-                'label': image_label,
-                'parent_id': None  # Unknown order, but still capture
-            }
-            ordered_content.append(image_item)
-
-    return ordered_content
+    return lines
