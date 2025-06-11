@@ -10,81 +10,105 @@ def get_cell_text(cell):
     paragraphs = [Paragraph(p, None).text.strip() for p in cell.findall('.//w:p', namespaces=NSMAP)]
     return ' '.join(p for p in paragraphs if p)
 
-def get_heading_level(style_name):
-    """Extract heading level from style name like 'Heading 1'."""
-    if style_name.startswith("Heading"):
-        try:
-            return int(style_name.split()[-1])
-        except:
-            return None
-    return None
-
-def generate_id():
-    return str(uuid.uuid4())
-
-def extract_ordered_docx_content(file_path, save_images=False, image_output_dir='images'):
+def extract_ordered_docx_content_with_structure(file_path, save_images=False, image_output_dir='images'):
     doc = Document(file_path)
     body = doc._element.body
     ordered_content = []
     image_count = 0
-    heading_stack = []  # stack to maintain heading hierarchy
 
     if save_images:
         os.makedirs(image_output_dir, exist_ok=True)
 
     para_lookup = {p._element: p for p in doc.paragraphs if p.text and p.text.strip()}
+    current_heading = None
+    heading_id_map = {}
 
-    def get_current_parent():
-        return heading_stack[-1] if heading_stack else None
+    def get_heading_level(style_name):
+        if style_name.startswith("Heading"):
+            try:
+                return int(style_name.replace("Heading", "").strip())
+            except:
+                return None
+        return None
+
+    def find_parent_heading(level):
+        for h_level in reversed(range(1, level)):
+            if h_level in heading_id_map:
+                return heading_id_map[h_level]
+        return None
 
     for child in body.iterchildren():
         tag = child.tag
 
-        # -------- Paragraph --------
+        # ---------- Paragraph ----------
         if tag == qn('w:p'):
             para = para_lookup.get(child)
             if para:
                 text = para.text.strip()
                 style = para.style.name if para.style else ""
-
                 heading_level = get_heading_level(style)
-                if heading_level:
-                    # New heading
-                    heading_id = generate_id()
-                    heading_item = {
+
+                if heading_level:  # Heading or Subheading
+                    heading_id = str(uuid.uuid4())
+                    heading_obj = {
                         'id': heading_id,
                         'type': 'heading',
                         'text': text,
                         'level': heading_level,
+                        'parent_id': None,
                         'child_ids': []
                     }
+                    parent_heading = find_parent_heading(heading_level)
+                    if parent_heading:
+                        heading_obj['parent_id'] = parent_heading['id']
+                        parent_heading['child_ids'].append(heading_id)
 
-                    # Manage heading stack for parent-child logic
-                    while heading_stack and heading_stack[-1]['level'] >= heading_level:
-                        heading_stack.pop()
-                    parent = get_current_parent()
-                    if parent:
-                        heading_item['parent_id'] = parent['id']
-                        parent['child_ids'].append(heading_id)
+                    heading_id_map[heading_level] = heading_obj
+                    current_heading = heading_obj
+                    ordered_content.append(heading_obj)
 
-                    heading_stack.append(heading_item)
-                    ordered_content.append(heading_item)
-
-                else:
-                    # Paragraph under current heading
-                    paragraph_id = generate_id()
-                    parent = get_current_parent()
-                    para_item = {
-                        'id': paragraph_id,
+                else:  # Normal paragraph
+                    para_id = str(uuid.uuid4())
+                    para_obj = {
+                        'id': para_id,
                         'type': 'paragraph',
                         'text': text,
-                        'parent_id': parent['id'] if parent else None
+                        'under_heading': current_heading['text'] if current_heading else None,
+                        'parent_id': current_heading['id'] if current_heading else None
                     }
-                    if parent:
-                        parent['child_ids'].append(paragraph_id)
-                    ordered_content.append(para_item)
+                    if current_heading:
+                        current_heading['child_ids'].append(para_id)
+                    ordered_content.append(para_obj)
 
-        # -------- Table --------
+                # ---------- Inline Images ----------
+                for drawing in child.findall('.//w:drawing', namespaces=NSMAP):
+                    blip = drawing.find('.//a:blip', namespaces={'a': 'http://schemas.openxmlformats.org/drawingml/2006/main'})
+                    if blip is not None:
+                        rId = blip.attrib.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
+                        rel = doc.part.rels.get(rId)
+                        if rel and not rel.target_ref.lower().endswith(".emf"):
+                            image_count += 1
+                            image_label = f"Image_{image_count}"
+                            image_id = str(uuid.uuid4())
+
+                            if save_images:
+                                ext = rel.target_ref.split('.')[-1]
+                                image_path = os.path.join(image_output_dir, f"{image_label}.{ext}")
+                                with open(image_path, "wb") as f:
+                                    f.write(rel.target_part.blob)
+
+                            image_obj = {
+                                'id': image_id,
+                                'type': 'image',
+                                'label': image_label,
+                                'under_heading': current_heading['text'] if current_heading else None,
+                                'parent_id': current_heading['id'] if current_heading else None
+                            }
+                            if current_heading:
+                                current_heading['child_ids'].append(image_id)
+                            ordered_content.append(image_obj)
+
+        # ---------- Table ----------
         elif tag == qn('w:tbl'):
             table_data = []
             rows = child.findall('.//w:tr', namespaces=NSMAP)
@@ -93,42 +117,16 @@ def extract_ordered_docx_content(file_path, save_images=False, image_output_dir=
                 row_data = [get_cell_text(cell) for cell in cells]
                 table_data.append(row_data)
 
-            table_id = generate_id()
-            parent = get_current_parent()
-            table_item = {
+            table_id = str(uuid.uuid4())
+            table_obj = {
                 'id': table_id,
                 'type': 'table',
                 'data': table_data,
-                'parent_id': parent['id'] if parent else None
+                'under_heading': current_heading['text'] if current_heading else None,
+                'parent_id': current_heading['id'] if current_heading else None
             }
-            if parent:
-                parent['child_ids'].append(table_id)
-            ordered_content.append(table_item)
-
-    # -------- Images --------
-    for rel in doc.part._rels.values():
-        if "image" in rel.target_ref:
-            ext = rel.target_ref.split('.')[-1].lower()
-            if ext == 'emf':
-                continue  # ❌ Skip EMF files
-
-            image_count += 1
-            image_label = f"Image_{image_count}"
-            if save_images:
-                image_path = os.path.join(image_output_dir, f"{image_label}.{ext}")
-                with open(image_path, "wb") as f:
-                    f.write(rel.target_part.blob)
-
-            image_id = generate_id()
-            parent = get_current_parent()
-            image_item = {
-                'id': image_id,
-                'type': 'image',
-                'label': image_label,
-                'parent_id': parent['id'] if parent else None
-            }
-            if parent:
-                parent['child_ids'].append(image_id)
-            ordered_content.append(image_item)
+            if current_heading:
+                current_heading['child_ids'].append(table_id)
+            ordered_content.append(table_obj)
 
     return ordered_content
