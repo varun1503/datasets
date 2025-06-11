@@ -1,42 +1,33 @@
-def format_structured_output(ordered_content):
-    id_to_node = {item['id']: dict(item) for item in ordered_content}
+def build_nested_structure_from_flat_list(flat_list):
+    """
+    Convert flat list with parent_id and child_ids into nested dict format.
+    Returns the top-level sections (headings) with nested content.
+    """
+    id_to_node = {item['id']: dict(item, children=[]) for item in flat_list}
+
+    # Attach children to their respective parents
     for node in id_to_node.values():
-        node['children'] = []
+        parent_id = node.get('parent_id')
+        if parent_id and parent_id in id_to_node:
+            id_to_node[parent_id]['children'].append(node)
 
-    for item in ordered_content:
-        pid = item.get('parent_id')
-        if pid and pid in id_to_node:
-            id_to_node[pid]['children'].append(item)
-
-    top_headings = [node for node in ordered_content if node['type'] == 'heading' and node.get('parent_id') is None]
-
-    formatted_lines = []
-    for heading in top_headings:
-        formatted_lines.append(f"Heading: {heading['text']}")
-        formatted_lines.extend(render_children(heading['children'], indent=1))
-
-    return "\n".join(formatted_lines)
-
-
-def render_children(children, indent=1):
+    # Return only root-level nodes (which have no parent)
+    root_nodes = [node for node in id_to_node.values() if not node.get('parent_id')]
+    return root_nodes
+def format_nested_structure(nodes, indent=0):
     lines = []
-    indent_space = "    " * indent
-
-    for child in children:
-        if child['type'] == 'subheading':
-            lines.append(f"{indent_space}Subheading: {child['text']}")
-            lines.extend(render_children(child.get('children', []), indent + 1))
-
-        elif child['type'] == 'paragraph':
-            lines.append(f"{indent_space}Paragraph: {child['text']}")
-
-        elif child['type'] == 'table':
-            lines.append(f"{indent_space}Table:")
-            for row in child['data']:
-                row_str = " | ".join(row)
-                lines.append(f"{indent_space}    - {row_str}")
-
-        elif child['type'] == 'image':
-            lines.append(f"{indent_space}Image: {child['label']}")
-
+    for node in nodes:
+        prefix = "    " * indent
+        if node['type'] == 'heading':
+            lines.append(f"{prefix}🔷 Heading (Level {node['level']}): {node['text']}")
+            if node.get('children'):
+                lines.extend(format_nested_structure(node['children'], indent + 1))
+        elif node['type'] == 'paragraph':
+            lines.append(f"{prefix}📄 Paragraph: {node['text']}")
+        elif node['type'] == 'table':
+            lines.append(f"{prefix}📊 Table:")
+            for row in node['data']:
+                lines.append(f"{prefix}    | " + " | ".join(row))
+        elif node['type'] == 'image':
+            lines.append(f"{prefix}🖼️ Image: {node['label']}")
     return lines
