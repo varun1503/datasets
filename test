@@ -2,40 +2,89 @@ from docx import Document
 from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
 import os
-import base64
+import uuid
 
-# WordprocessingML namespace
 NSMAP = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
 
 def get_cell_text(cell):
     paragraphs = [Paragraph(p, None).text.strip() for p in cell.findall('.//w:p', namespaces=NSMAP)]
     return ' '.join(p for p in paragraphs if p)
 
-def encode_image_base64(image_blob):
-    return base64.b64encode(image_blob).decode("utf-8")
+def get_heading_level(style_name):
+    """Extract heading level from style name like 'Heading 1'."""
+    if style_name.startswith("Heading"):
+        try:
+            return int(style_name.split()[-1])
+        except:
+            return None
+    return None
 
-def extract_ordered_docx_content_with_insights(file_path, model_caller, model_index, prompt_template):
+def generate_id():
+    return str(uuid.uuid4())
+
+def extract_ordered_docx_content(file_path, save_images=False, image_output_dir='images'):
     doc = Document(file_path)
     body = doc._element.body
     ordered_content = []
     image_count = 0
+    heading_stack = []  # stack to maintain heading hierarchy
 
-    para_lookup = {
-        p._element: p.text.strip()
-        for p in doc.paragraphs
-        if p.text and p.text.strip()
-    }
+    if save_images:
+        os.makedirs(image_output_dir, exist_ok=True)
+
+    para_lookup = {p._element: p for p in doc.paragraphs if p.text and p.text.strip()}
+
+    def get_current_parent():
+        return heading_stack[-1] if heading_stack else None
 
     for child in body.iterchildren():
         tag = child.tag
 
-        # Paragraph
+        # -------- Paragraph --------
         if tag == qn('w:p'):
-            para_text = para_lookup.get(child, "")
-            if para_text:
-                ordered_content.append(('paragraph', para_text))
+            para = para_lookup.get(child)
+            if para:
+                text = para.text.strip()
+                style = para.style.name if para.style else ""
 
-        # Table
+                heading_level = get_heading_level(style)
+                if heading_level:
+                    # New heading
+                    heading_id = generate_id()
+                    heading_item = {
+                        'id': heading_id,
+                        'type': 'heading',
+                        'text': text,
+                        'level': heading_level,
+                        'child_ids': []
+                    }
+
+                    # Manage heading stack for parent-child logic
+                    while heading_stack and heading_stack[-1]['level'] >= heading_level:
+                        heading_stack.pop()
+                    parent = get_current_parent()
+                    if parent:
+                        heading_item['parent_id'] = parent['id']
+                        parent['child_ids'].append(heading_id)
+
+                    heading_stack.append(heading_item)
+                    ordered_content.append(heading_item)
+
+                else:
+                    # Paragraph under current heading
+                    paragraph_id = generate_id()
+                    parent = get_current_parent()
+                    para_item = {
+                        'id': paragraph_id,
+                        'type': 'paragraph',
+                        'text': text,
+                        'parent_id': parent['id'] if parent else None
+                    }
+                    if parent:
+                        parent['child_ids'].append(paragraph_id)
+                    ordered_content.append(para_item)
+
+        # -------- Table --------
         elif tag == qn('w:tbl'):
             table_data = []
             rows = child.findall('.//w:tr', namespaces=NSMAP)
@@ -43,26 +92,43 @@ def extract_ordered_docx_content_with_insights(file_path, model_caller, model_in
                 cells = row.findall('.//w:tc', namespaces=NSMAP)
                 row_data = [get_cell_text(cell) for cell in cells]
                 table_data.append(row_data)
-            ordered_content.append(('table', table_data))
 
-    # Image handling and insights
+            table_id = generate_id()
+            parent = get_current_parent()
+            table_item = {
+                'id': table_id,
+                'type': 'table',
+                'data': table_data,
+                'parent_id': parent['id'] if parent else None
+            }
+            if parent:
+                parent['child_ids'].append(table_id)
+            ordered_content.append(table_item)
+
+    # -------- Images --------
     for rel in doc.part._rels.values():
         if "image" in rel.target_ref:
-            image_blob = rel.target_part.blob
-            image_base64 = encode_image_base64(image_blob)
-            
-            # Prepare model input
-            messages = [{
-                "type": "text",
-                "text": "You are a model risk validation expert. Describe the image."
-            }, {
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:image/png;base64,{image_base64}"
-                }
-            }]
-            
-            insight = model_caller.model_call(model_index, prompt_template, messages)
-            ordered_content.append(('image', insight))
+            ext = rel.target_ref.split('.')[-1].lower()
+            if ext == 'emf':
+                continue  # ❌ Skip EMF files
+
+            image_count += 1
+            image_label = f"Image_{image_count}"
+            if save_images:
+                image_path = os.path.join(image_output_dir, f"{image_label}.{ext}")
+                with open(image_path, "wb") as f:
+                    f.write(rel.target_part.blob)
+
+            image_id = generate_id()
+            parent = get_current_parent()
+            image_item = {
+                'id': image_id,
+                'type': 'image',
+                'label': image_label,
+                'parent_id': parent['id'] if parent else None
+            }
+            if parent:
+                parent['child_ids'].append(image_id)
+            ordered_content.append(image_item)
 
     return ordered_content
