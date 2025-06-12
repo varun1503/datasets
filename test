@@ -33,8 +33,8 @@ def extract_ordered_docx_content(file_path, model_caller, model_index="3", image
     doc = Document(file_path)
     body = doc._element.body
     ordered_content = []
-    current_heading = None
     heading_stack = []
+    current_heading = None
 
     if save_images:
         os.makedirs(image_output_dir, exist_ok=True)
@@ -50,24 +50,39 @@ def extract_ordered_docx_content(file_path, model_caller, model_index="3", image
                 continue
 
             if is_heading(para):
-                level = 1
                 try:
-                    # Use style Heading1, Heading2 if possible
                     level = int(para.style.name.replace("Heading", ""))
                 except:
-                    pass
-                current_heading = {"text": text, "level": level}
-                heading_stack = [current_heading]
+                    level = 1
+
+                # Update heading stack
+                while heading_stack and heading_stack[-1]['level'] >= level:
+                    heading_stack.pop()
+
+                parent_heading = heading_stack[-1] if heading_stack else None
+
+                current_heading = {
+                    "text": text,
+                    "level": level,
+                    "parent": parent_heading["text"] if parent_heading else None
+                }
+
+                heading_stack.append(current_heading)
+
                 ordered_content.append({
                     "type": "heading",
                     "text": text,
-                    "level": level
+                    "level": level,
+                    "parent": current_heading["parent"]
                 })
+
             else:
                 ordered_content.append({
                     "type": "paragraph",
                     "text": text,
-                    "under_heading": current_heading["text"] if current_heading else None
+                    "under_heading": current_heading["text"] if current_heading else None,
+                    "under_heading_level": current_heading["level"] if current_heading else None,
+                    "under_heading_parent": current_heading["parent"] if current_heading else None
                 })
 
             # --- Embedded image(s) in paragraph ---
@@ -95,7 +110,9 @@ def extract_ordered_docx_content(file_path, model_caller, model_index="3", image
                             "type": "image",
                             "label": image_label,
                             "image_context": llm_output,
-                            "under_heading": current_heading["text"] if current_heading else None
+                            "under_heading": current_heading["text"] if current_heading else None,
+                            "under_heading_level": current_heading["level"] if current_heading else None,
+                            "under_heading_parent": current_heading["parent"] if current_heading else None
                         })
 
         # --- Table ---
@@ -109,7 +126,9 @@ def extract_ordered_docx_content(file_path, model_caller, model_index="3", image
             ordered_content.append({
                 "type": "table",
                 "data": table_data,
-                "under_heading": current_heading["text"] if current_heading else None
+                "under_heading": current_heading["text"] if current_heading else None,
+                "under_heading_level": current_heading["level"] if current_heading else None,
+                "under_heading_parent": current_heading["parent"] if current_heading else None
             })
 
     return ordered_content
