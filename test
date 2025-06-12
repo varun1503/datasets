@@ -3,30 +3,22 @@ from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
 import os
 import uuid
-import base64
-import re
 
-# Namespaces for DOCX XML parsing
 NSMAP = {
     'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
     'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
     'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
 }
 
+
 def generate_id():
     return str(uuid.uuid4())
 
+
 def get_cell_text(cell):
     paragraphs = [Paragraph(p, None).text.strip() for p in cell.findall('.//w:p', namespaces=NSMAP)]
-    return "\n".join(p for p in paragraphs if p)
+    return ' '.join(p for p in paragraphs if p)
 
-def extract_section_number(text):
-    match = re.match(r"^((\d+\.)+)", text.strip())
-    return match.group(1).strip() if match else None
-
-def encode_image(image_path):
-    with open(image_path, "rb") as f:
-        return base64.b64encode(f.read()).decode('utf-8')
 
 def extract_ordered_docx_content(file_path, save_images=True, image_output_dir='images'):
     doc = Document(file_path)
@@ -40,27 +32,40 @@ def extract_ordered_docx_content(file_path, save_images=True, image_output_dir='
     def get_current_parent():
         return parent_stack[-1] if parent_stack else None
 
+    section_counters = {}
+
     for child in body.iterchildren():
         tag = child.tag
 
-        # Paragraph Handling
+        # Paragraphs and headings
         if tag == qn('w:p'):
             para = Paragraph(child, doc)
             text = para.text.strip()
             if not text:
                 continue
+
             style = para.style.name if para.style else ""
 
-            # Heading detection
+            # -------- Headings --------
             if style.startswith("Heading"):
-                level = int(style.replace("Heading", "").strip() or "1")
+                level_str = style.replace("Heading", "").strip()
+                if not level_str.isdigit():
+                    continue  # Ignore custom styles
+
+                level = int(level_str)
+                section_counters[level] = section_counters.get(level, 0) + 1
+
+                # Reset deeper level counters
+                for deeper in range(level + 1, 10):
+                    section_counters.pop(deeper, None)
+
+                section_number = ".".join(str(section_counters[i]) for i in sorted(section_counters) if i <= level)
                 heading_id = generate_id()
-                section_number = extract_section_number(text)
+
                 heading_item = {
                     'id': heading_id,
                     'type': 'heading',
-                    'text': text,
-                    'section_number': section_number,
+                    'text': f"{section_number}. {text}",
                     'level': level,
                     'child_ids': []
                 }
@@ -77,7 +82,7 @@ def extract_ordered_docx_content(file_path, save_images=True, image_output_dir='
                 ordered_content.append(heading_item)
                 continue
 
-            # Normal Paragraph
+            # -------- Normal Paragraphs --------
             para_id = generate_id()
             parent = get_current_parent()
             para_item = {
@@ -90,7 +95,7 @@ def extract_ordered_docx_content(file_path, save_images=True, image_output_dir='
                 parent['child_ids'].append(para_id)
             ordered_content.append(para_item)
 
-            # Embedded images within paragraph
+            # -------- Embedded Images --------
             for drawing in child.findall('.//w:drawing', namespaces=NSMAP):
                 blip = drawing.find('.//a:blip', namespaces=NSMAP)
                 if blip is not None:
@@ -99,36 +104,28 @@ def extract_ordered_docx_content(file_path, save_images=True, image_output_dir='
                     if image_part:
                         content_type = image_part.content_type
                         ext = content_type.split('/')[-1].lower()
-                        allowed_exts = ['png', 'jpeg', 'jpg']
+                        if ext == 'emf':
+                            continue
+                        image_id = generate_id()
+                        image_label = f"Image_{image_id[:8]}.{ext}"
 
-                        if ext in allowed_exts:
-                            image_id = generate_id()
-                            image_label = f"Image_{image_id[:8]}"
-                            image_filename = f"{image_label}.{ext}"
+                        if save_images:
+                            image_path = os.path.join(image_output_dir, image_label)
+                            with open(image_path, "wb") as f:
+                                f.write(image_part.blob)
 
-                            if save_images:
-                                image_path = os.path.join(image_output_dir, image_filename)
-                                with open(image_path, "wb") as f:
-                                    f.write(image_part.blob)
+                        parent = get_current_parent()
+                        image_item = {
+                            'id': image_id,
+                            'type': 'image',
+                            'label': image_label,
+                            'parent_id': parent['id'] if parent else None
+                        }
+                        if parent:
+                            parent['child_ids'].append(image_id)
+                        ordered_content.append(image_item)
 
-                                base64_image = encode_image(image_path)
-                                # Placeholder for AI model usage
-                                prompt_image = "Prompt().image_insight_prompt()"
-                                input_nodes = {"base_64_encoded_image": base64_image}
-                                llm_output = "llm_output_model_invoke()"  # Replace with real call
-
-                            image_item = {
-                                'id': image_id,
-                                'type': 'image',
-                                'label': image_filename,
-                                'image_context': llm_output,
-                                'parent_id': parent['id'] if parent else None
-                            }
-                            if parent:
-                                parent['child_ids'].append(image_id)
-                            ordered_content.append(image_item)
-
-        # Table Handling
+        # -------- Table --------
         elif tag == qn('w:tbl'):
             table_data = []
             rows = child.findall('.//w:tr', namespaces=NSMAP)
