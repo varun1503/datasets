@@ -1,141 +1,52 @@
-from docx import Document
-from docx.oxml.ns import qn
-from docx.text.paragraph import Paragraph
-import os
-import base64
-import uuid
+def preprocess_content_chunks(content, max_chunk_len=5000):
+    preprocess_chunk = []
+    current_chunk = []
+    each_chunk_text = ""
+    
+    current_heading = None
+    current_subheading = None
 
-NSMAP = {
-    'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
-    'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
-    'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
-}
+    def flush_chunk():
+        nonlocal each_chunk_text, current_chunk
+        if each_chunk_text.strip():
+            preprocess_chunk.append({
+                "heading": current_heading,
+                "subheading": current_subheading,
+                "paragraph": each_chunk_text.strip(),
+                "children": current_chunk
+            })
+        each_chunk_text = ""
+        current_chunk = []
 
+    for item in content:
+        item_type = item.get("type")
 
-def generate_id():
-    return str(uuid.uuid4())
+        if item_type == "heading" and item.get("level") == 1:
+            # New heading → flush everything
+            flush_chunk()
+            current_heading = item.get("text")
+            current_subheading = None
+            current_chunk.append(item)
 
+        elif item_type == "heading" and item.get("level") == 2:
+            # New subheading → flush previous subheading's chunk
+            flush_chunk()
+            current_subheading = item.get("text")
+            current_chunk.append(item)
 
-def encode_image(image_path):
-    with open(image_path, "rb") as img_file:
-        return base64.b64encode(img_file.read()).decode("utf-8")
+        elif item_type in ("paragraph", "table", "image"):
+            current_chunk.append(item)
+            if item_type == "paragraph" and item.get("text"):
+                new_text = item["text"].strip()
+                if len(each_chunk_text + " " + new_text) > max_chunk_len:
+                    flush_chunk()
+                each_chunk_text += " " + new_text
 
+            elif item_type == "image" and item.get("image_context"):
+                image_text = item["image_context"].strip()
+                if len(each_chunk_text + " " + image_text) > max_chunk_len:
+                    flush_chunk()
+                each_chunk_text += " " + image_text
 
-def get_cell_text(cell):
-    paragraphs = [Paragraph(p, None).text.strip() for p in cell.findall('.//w:p', namespaces=NSMAP)]
-    return ' '.join(p for p in paragraphs if p)
-
-
-def is_heading(paragraph):
-    texts = [run.text for run in paragraph.runs if run.text.strip()]
-    bold = any(run.bold for run in paragraph.runs)
-    font_size = max((run.font.size.pt for run in paragraph.runs if run.font.size), default=0)
-    starts_like_heading = any(text.strip().startswith(tuple(str(i) for i in range(1, 10))) for text in texts)
-    return bold and font_size >= 11 and starts_like_heading
-
-
-def extract_ordered_docx_content(doc, model_caller=None, model_index="3", image_output_dir="output_images", save_images=True):
-    body = doc._element.body
-    ordered_content = []
-    heading_stack = []
-
-    if save_images:
-        os.makedirs(image_output_dir, exist_ok=True)
-
-    def get_current_heading():
-        return heading_stack[-1] if heading_stack else None
-
-    for child in body.iterchildren():
-        tag = child.tag
-
-        if tag == qn('w:p'):
-            para = Paragraph(child, doc)
-            text = para.text.strip()
-            if not text:
-                continue
-
-            if is_heading(para):
-                try:
-                    level = int(para.style.name.replace("Heading", ""))
-                except Exception:
-                    level = 1
-
-                while heading_stack and heading_stack[-1]["level"] >= level:
-                    heading_stack.pop()
-
-                heading = {
-                    "id": generate_id(),
-                    "type": "heading",
-                    "text": text,
-                    "level": level,
-                    "child_ids": [],
-                    "parent_id": heading_stack[-1]["id"] if heading_stack else None
-                }
-
-                if heading_stack:
-                    heading_stack[-1]["child_ids"].append(heading["id"])
-
-                heading_stack.append(heading)
-                ordered_content.append(heading)
-
-            else:
-                paragraph = {
-                    "id": generate_id(),
-                    "type": "paragraph",
-                    "text": text,
-                    "parent_id": get_current_heading()["id"] if get_current_heading() else None
-                }
-                if get_current_heading():
-                    get_current_heading()["child_ids"].append(paragraph["id"])
-                ordered_content.append(paragraph)
-
-            # --- Embedded image(s) in paragraph ---
-            for drawing in child.findall('.//w:drawing', namespaces=NSMAP):
-                blip = drawing.find('.//a:blip', namespaces=NSMAP)
-                if blip is not None:
-                    r_embed = blip.attrib.get(qn('r:embed'))
-                    image_part = doc.part.related_parts.get(r_embed)
-                    if image_part:
-                        content_type = image_part.content_type
-                        ext = content_type.split('/')[-1].lower()
-                        if ext == "emf":
-                            continue
-                        image_id = generate_id()
-                        image_label = f"Image_{image_id[:8]}"
-                        image_path = os.path.join(image_output_dir, f"{image_label}.{ext}")
-                        if save_images:
-                            with open(image_path, "wb") as f:
-                                f.write(image_part.blob)
-                        base64_image = encode_image(image_path)
-                        llm_output = f"[Image context would be generated here]"  # placeholder
-                        image_item = {
-                            "id": image_id,
-                            "type": "image",
-                            "label": image_label,
-                            "image_context": llm_output,
-                            "parent_id": get_current_heading()["id"] if get_current_heading() else None
-                        }
-                        if get_current_heading():
-                            get_current_heading()["child_ids"].append(image_id)
-                        ordered_content.append(image_item)
-
-        elif tag == qn('w:tbl'):
-            table_data = []
-            rows = child.findall('.//w:tr', namespaces=NSMAP)
-            for row in rows:
-                cells = row.findall('.//w:tc', namespaces=NSMAP)
-                row_data = [get_cell_text(cell) for cell in cells]
-                table_data.append(row_data)
-
-            table_id = generate_id()
-            table_item = {
-                "id": table_id,
-                "type": "table",
-                "data": table_data,
-                "parent_id": get_current_heading()["id"] if get_current_heading() else None
-            }
-            if get_current_heading():
-                get_current_heading()["child_ids"].append(table_id)
-            ordered_content.append(table_item)
-
-    return ordered_content
+    flush_chunk()  # Final flush
+    return preprocess_chunk
