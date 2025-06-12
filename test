@@ -6,7 +6,7 @@ def preprocess_content_chunks(content, max_chunk_len=5000):
     current_tables = []
     current_image_contexts = []
     tmrc_checklist = None
-    last_was_heading = False  # Flag to track if previous item was a heading
+    last_was_heading = False  # True if last item was a heading/subheading
 
     def flush_chunk():
         nonlocal current_paragraph, current_tables, current_image_contexts, tmrc_checklist
@@ -20,10 +20,12 @@ def preprocess_content_chunks(content, max_chunk_len=5000):
                 "tmrc_checklist": tmrc_checklist if tmrc_checklist else None
             }
             preprocess_chunk.append(chunk)
-            current_paragraph = ""
-            current_tables = []
-            current_image_contexts = []
-            tmrc_checklist = None
+
+        # Reset
+        current_paragraph = ""
+        current_tables = []
+        current_image_contexts = []
+        tmrc_checklist = None
 
     for item in content:
         item_type = item.get("type")
@@ -35,13 +37,13 @@ def preprocess_content_chunks(content, max_chunk_len=5000):
             current_subheading = None
             last_was_heading = True
 
-        # --- Heading Level 2 (Subheading) ---
+        # --- Heading Level 2 ---
         elif item_type == "heading" and item.get("level") == 2:
             flush_chunk()
             current_subheading = item["text"]
             last_was_heading = True
 
-        # --- Paragraph Text ---
+        # --- Paragraph ---
         elif item_type == "paragraph":
             text = item.get("text", "").strip()
             if not text:
@@ -51,16 +53,15 @@ def preprocess_content_chunks(content, max_chunk_len=5000):
             current_paragraph += " " + text
             last_was_heading = False
 
-        # --- Table Handling ---
+        # --- Table ---
         elif item_type == "table":
-            if last_was_heading:
-                # Assign to TMRC checklist if table is immediately after heading or subheading
+            if last_was_heading and tmrc_checklist is None:
                 tmrc_checklist = item.get("data", [])
                 last_was_heading = False
             else:
                 current_tables.append(item.get("data", []))
 
-        # --- Image Handling ---
+        # --- Image ---
         elif item_type == "image":
             context = item.get("image_context", "").strip()
             if context:
