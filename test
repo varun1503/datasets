@@ -5,21 +5,25 @@ def preprocess_content_chunks(content, max_chunk_len=5000):
     current_subheading = None
     current_tables = []
     current_image_contexts = []
+    tmrc_checklist = None
+    last_was_heading = False  # Flag to track if previous item was a heading
 
     def flush_chunk():
-        nonlocal current_paragraph, current_tables, current_image_contexts
-        if current_paragraph.strip():
+        nonlocal current_paragraph, current_tables, current_image_contexts, tmrc_checklist
+        if current_paragraph.strip() or current_tables or current_image_contexts or tmrc_checklist:
             chunk = {
                 "heading": current_heading,
                 "subheading": current_subheading,
-                "paragraph": current_paragraph.strip(),
+                "paragraph": current_paragraph.strip() if current_paragraph.strip() else None,
                 "table": current_tables if current_tables else None,
-                "image_context": current_image_contexts if current_image_contexts else None
+                "image_context": current_image_contexts if current_image_contexts else None,
+                "tmrc_checklist": tmrc_checklist if tmrc_checklist else None
             }
             preprocess_chunk.append(chunk)
             current_paragraph = ""
             current_tables = []
             current_image_contexts = []
+            tmrc_checklist = None
 
     for item in content:
         item_type = item.get("type")
@@ -29,11 +33,13 @@ def preprocess_content_chunks(content, max_chunk_len=5000):
             flush_chunk()
             current_heading = item["text"]
             current_subheading = None
+            last_was_heading = True
 
         # --- Heading Level 2 (Subheading) ---
         elif item_type == "heading" and item.get("level") == 2:
             flush_chunk()
             current_subheading = item["text"]
+            last_was_heading = True
 
         # --- Paragraph Text ---
         elif item_type == "paragraph":
@@ -43,16 +49,23 @@ def preprocess_content_chunks(content, max_chunk_len=5000):
             if len(current_paragraph + " " + text) > max_chunk_len:
                 flush_chunk()
             current_paragraph += " " + text
+            last_was_heading = False
 
-        # --- Table Handling (append, don't flush yet) ---
+        # --- Table Handling ---
         elif item_type == "table":
-            current_tables.append(item.get("data", []))
+            if last_was_heading:
+                # Assign to TMRC checklist if table is immediately after heading or subheading
+                tmrc_checklist = item.get("data", [])
+                last_was_heading = False
+            else:
+                current_tables.append(item.get("data", []))
 
-        # --- Image Handling (append, don't flush yet) ---
+        # --- Image Handling ---
         elif item_type == "image":
             context = item.get("image_context", "").strip()
             if context:
                 current_image_contexts.append(context)
+            last_was_heading = False
 
     flush_chunk()
     return preprocess_chunk
