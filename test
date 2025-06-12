@@ -1,52 +1,65 @@
 def preprocess_content_chunks(content, max_chunk_len=5000):
     preprocess_chunk = []
-    current_chunk = []
-    each_chunk_text = ""
+    current_paragraph = ""
     
     current_heading = None
     current_subheading = None
+    current_table = None
+    current_image_context = None
 
     def flush_chunk():
-        nonlocal each_chunk_text, current_chunk
-        if each_chunk_text.strip():
+        nonlocal current_paragraph, current_table, current_image_context
+        if current_paragraph.strip():
             preprocess_chunk.append({
                 "heading": current_heading,
                 "subheading": current_subheading,
-                "paragraph": each_chunk_text.strip(),
-                "children": current_chunk
+                "paragraph": current_paragraph.strip(),
+                "table": current_table,
+                "image_context": current_image_context
             })
-        each_chunk_text = ""
-        current_chunk = []
+        # reset chunk variables
+        current_paragraph = ""
+        current_table = None
+        current_image_context = None
 
     for item in content:
         item_type = item.get("type")
 
+        # --- Handle heading (level 1) ---
         if item_type == "heading" and item.get("level") == 1:
-            # New heading → flush everything
             flush_chunk()
-            current_heading = item.get("text")
+            current_heading = item["text"]
             current_subheading = None
-            current_chunk.append(item)
 
+        # --- Handle subheading (level 2) ---
         elif item_type == "heading" and item.get("level") == 2:
-            # New subheading → flush previous subheading's chunk
             flush_chunk()
-            current_subheading = item.get("text")
-            current_chunk.append(item)
+            current_subheading = item["text"]
 
-        elif item_type in ("paragraph", "table", "image"):
-            current_chunk.append(item)
-            if item_type == "paragraph" and item.get("text"):
-                new_text = item["text"].strip()
-                if len(each_chunk_text + " " + new_text) > max_chunk_len:
-                    flush_chunk()
-                each_chunk_text += " " + new_text
+        # --- Handle paragraph ---
+        elif item_type == "paragraph":
+            text = item.get("text", "").strip()
+            if not text:
+                continue  # skip empty paragraphs
+            if len(current_paragraph + " " + text) > max_chunk_len:
+                flush_chunk()
+            current_paragraph += " " + text
 
-            elif item_type == "image" and item.get("image_context"):
-                image_text = item["image_context"].strip()
-                if len(each_chunk_text + " " + image_text) > max_chunk_len:
-                    flush_chunk()
-                each_chunk_text += " " + image_text
+        # --- Handle table ---
+        elif item_type == "table":
+            if current_table is not None:
+                flush_chunk()
+            current_table = item["data"]
+
+        # --- Handle image with context ---
+        elif item_type == "image":
+            context = item.get("image_context", "").strip()
+            if not context:
+                continue
+            if current_image_context is not None:
+                flush_chunk()
+            current_image_context = context
 
     flush_chunk()  # Final flush
+
     return preprocess_chunk
