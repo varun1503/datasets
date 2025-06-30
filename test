@@ -1,150 +1,21 @@
-from docx import Document
-from docx.oxml.ns import qn
-from docx.text.paragraph import Paragraph
 import os
-import uuid
+import tempfile
 
-NSMAP = {
-    'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
-    'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
-    'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
-}
+def s3_object_read(self, s3_file):
+    import os
+    from pathlib import Path
 
+    s3_obj = S3Utils()
+    temp_dir = tempfile.gettempdir()  # OS-safe temp directory
 
-def generate_id():
-    return str(uuid.uuid4())
+    # Ensure subfolder for isolation if needed
+    data_dir = os.path.join(temp_dir, "s3_temp_data")
+    os.makedirs(data_dir, exist_ok=True)
 
+    # Build full path to where the file will be saved
+    local_file_path = os.path.join(data_dir, os.path.basename(s3_file))
 
-def get_cell_text(cell):
-    paragraphs = [Paragraph(p, None).text.strip() for p in cell.findall('.//w:p', namespaces=NSMAP)]
-    return ' '.join(p for p in paragraphs if p)
+    # Download file
+    s3_obj.download_file(s3_file, local_file_path)
 
-
-def extract_ordered_docx_content(file_path, save_images=True, image_output_dir='images'):
-    doc = Document(file_path)
-    body = doc._element.body
-    ordered_content = []
-    parent_stack = []
-
-    if save_images:
-        os.makedirs(image_output_dir, exist_ok=True)
-
-    def get_current_parent():
-        return parent_stack[-1] if parent_stack else None
-
-    section_counters = {}
-
-    for child in body.iterchildren():
-        tag = child.tag
-
-        # Paragraphs and headings
-        if tag == qn('w:p'):
-            para = Paragraph(child, doc)
-            text = para.text.strip()
-            if not text:
-                continue
-
-            style = para.style.name if para.style else ""
-
-            # -------- Headings --------
-            if style.startswith("Heading"):
-                level_str = style.replace("Heading", "").strip()
-                if not level_str.isdigit():
-                    continue  # Ignore custom styles
-
-                level = int(level_str)
-                section_counters[level] = section_counters.get(level, 0) + 1
-
-                # Reset deeper level counters
-                for deeper in range(level + 1, 10):
-                    section_counters.pop(deeper, None)
-
-                section_number = ".".join(str(section_counters[i]) for i in sorted(section_counters) if i <= level)
-                heading_id = generate_id()
-
-                heading_item = {
-                    'id': heading_id,
-                    'type': 'heading',
-                    'text': f"{section_number}. {text}",
-                    'level': level,
-                    'child_ids': []
-                }
-
-                while parent_stack and parent_stack[-1]['level'] >= level:
-                    parent_stack.pop()
-
-                parent = get_current_parent()
-                heading_item['parent_id'] = parent['id'] if parent else None
-                if parent:
-                    parent['child_ids'].append(heading_id)
-
-                parent_stack.append(heading_item)
-                ordered_content.append(heading_item)
-                continue
-
-            # -------- Normal Paragraphs --------
-            para_id = generate_id()
-            parent = get_current_parent()
-            para_item = {
-                'id': para_id,
-                'type': 'paragraph',
-                'text': text,
-                'parent_id': parent['id'] if parent else None
-            }
-            if parent:
-                parent['child_ids'].append(para_id)
-            ordered_content.append(para_item)
-
-            # -------- Embedded Images --------
-            for drawing in child.findall('.//w:drawing', namespaces=NSMAP):
-                blip = drawing.find('.//a:blip', namespaces=NSMAP)
-                if blip is not None:
-                    r_embed = blip.attrib.get(qn('r:embed'))
-                    image_part = doc.part.related_parts.get(r_embed)
-                    if image_part:
-                        content_type = image_part.content_type
-                        ext = content_type.split('/')[-1].lower()
-                        if ext == 'emf':
-                            continue
-                        image_id = generate_id()
-                        image_label = f"Image_{image_id[:8]}.{ext}"
-
-                        if save_images:
-                            image_path = os.path.join(image_output_dir, image_label)
-                            with open(image_path, "wb") as f:
-                                f.write(image_part.blob)
-
-                        parent = get_current_parent()
-                        image_item = {
-                            'id': image_id,
-                            'type': 'image',
-                            'label': image_label,
-                            'parent_id': parent['id'] if parent else None
-                        }
-                        if parent:
-                            parent['child_ids'].append(image_id)
-                        ordered_content.append(image_item)
-
-        # -------- Table --------
-        elif tag == qn('w:tbl'):
-            table_data = []
-            rows = child.findall('.//w:tr', namespaces=NSMAP)
-            for row in rows:
-                row_data = []
-                for cell in row.findall('.//w:tc', namespaces=NSMAP):
-                    row_data.append(get_cell_text(cell))
-                table_data.append(row_data)
-
-            table_id = generate_id()
-            parent = get_current_parent()
-            table_item = {
-                'id': table_id,
-                'type': 'table',
-                'data': table_data,
-                'parent_id': parent['id'] if parent else None
-            }
-            if parent:
-                parent['child_ids'].append(table_id)
-            ordered_content.append(table_item)
-
-    return ordered_content
+    return local_file_path
