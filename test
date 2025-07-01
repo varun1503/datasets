@@ -1,21 +1,46 @@
-import os
-import tempfile
+from langchain.schema import Document
 
-def s3_object_read(self, s3_file):
-    import os
-    from pathlib import Path
+def chunk_document(self, preprocess_chunk):
+    final_chunk = []
 
-    s3_obj = S3Utils()
-    temp_dir = tempfile.gettempdir()  # OS-safe temp directory
+    print(f"Total input chunks received: {len(preprocess_chunk)}")
 
-    # Ensure subfolder for isolation if needed
-    data_dir = os.path.join(temp_dir, "s3_temp_data")
-    os.makedirs(data_dir, exist_ok=True)
+    for i in range(len(preprocess_chunk)):
+        chunk = preprocess_chunk[i]
 
-    # Build full path to where the file will be saved
-    local_file_path = os.path.join(data_dir, os.path.basename(s3_file))
+        # ✅ Skip if not a dictionary
+        if not isinstance(chunk, dict):
+            print(f"Skipping index {i}: not a dict -> {type(chunk)}")
+            continue
 
-    # Download file
-    s3_obj.download_file(s3_file, local_file_path)
+        # ✅ Ensure 'metadata' key exists
+        if "metadata" not in chunk:
+            chunk["metadata"] = {}
 
-    return local_file_path
+        # ✅ Optionally update metadata with expected fields if present
+        chunk["metadata"].update({
+            "heading": chunk.get("heading", ""),
+            "subheading": chunk.get("subheading", ""),
+            "table": chunk.get("table", ""),
+            "image": chunk.get("image", "")
+        })
+
+        # ✅ Check for paragraph content
+        paragraph = chunk.get("paragraph")
+        if paragraph is None:
+            print(f"Chunk {i} has no paragraph. Adding with 'None' content.")
+            doc = Document(
+                page_content="None",
+                metadata=chunk["metadata"]
+            )
+        else:
+            doc = Document(
+                page_content=paragraph,
+                metadata=chunk["metadata"]
+            )
+
+        # ✅ Append the created document
+        final_chunk.append(doc)
+
+    print(f"Total valid documents created: {len(final_chunk)}")
+    return final_chunk
