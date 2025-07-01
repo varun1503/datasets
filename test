@@ -1,46 +1,49 @@
-from langchain.schema import Document
+import pandas as pd
+from pathlib import Path
 
-def chunk_document(self, preprocess_chunk):
-    final_chunk = []
+def process_chunks_to_csv(
+    chunks,
+    filename: str,
+    root_dir: str,
+    model_id: str = '4925',
+    model_version: str = 'V1.0',
+    model_type: str = 'LLM',
+    market: str = 'Japan',
+    metadata_type: str = 'tollgating',
+    doc_type: str = 'docs',
+    input_type: str = 'multimodal documents'
+) -> pd.DataFrame:
+    # Extract values using list comprehensions with safe .get()
+    content_list = [chunk.get('content', '') for chunk in chunks]
+    metadata_list = [chunk.get('metadata', {}) for chunk in chunks]
+    end_index_list = [len(content) for content in content_list]
 
-    print(f"Total input chunks received: {len(preprocess_chunk)}")
+    n = len(content_list)
+    metadata_type_list = [metadata_type] * n
+    doc_type_list = [doc_type] * n
+    input_type_list = [input_type] * n
+    start_index_list = [0] * n  # Optional: replace with actual logic
 
-    for i in range(len(preprocess_chunk)):
-        chunk = preprocess_chunk[i]
+    # Create DataFrame
+    df = pd.DataFrame({
+        'content': content_list,
+        'metadata_content': metadata_list,
+        'metadata_type': metadata_type_list,
+        'start_index': start_index_list,
+        'end_index': end_index_list,
+        'doc_type': doc_type_list,
+        'input_type': input_type_list,
+        'modelID': [model_id] * n,
+        'model_version': [model_version] * n,
+        'model_type': [model_type] * n,
+        'market': [market] * n
+    })
 
-        # ✅ Skip if not a dictionary
-        if not isinstance(chunk, dict):
-            print(f"Skipping index {i}: not a dict -> {type(chunk)}")
-            continue
+    df.fillna('None', inplace=True)
 
-        # ✅ Ensure 'metadata' key exists
-        if "metadata" not in chunk:
-            chunk["metadata"] = {}
+    # Save to CSV
+    output_path = Path(root_dir) / f"{filename}_preprocess.csv"
+    df.to_csv(output_path, index=False)
 
-        # ✅ Optionally update metadata with expected fields if present
-        chunk["metadata"].update({
-            "heading": chunk.get("heading", ""),
-            "subheading": chunk.get("subheading", ""),
-            "table": chunk.get("table", ""),
-            "image": chunk.get("image", "")
-        })
-
-        # ✅ Check for paragraph content
-        paragraph = chunk.get("paragraph")
-        if paragraph is None:
-            print(f"Chunk {i} has no paragraph. Adding with 'None' content.")
-            doc = Document(
-                page_content="None",
-                metadata=chunk["metadata"]
-            )
-        else:
-            doc = Document(
-                page_content=paragraph,
-                metadata=chunk["metadata"]
-            )
-
-        # ✅ Append the created document
-        final_chunk.append(doc)
-
-    print(f"Total valid documents created: {len(final_chunk)}")
-    return final_chunk
+    print(f"✅ Preprocessed CSV saved at: {output_path}")
+    return df
