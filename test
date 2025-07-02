@@ -1,129 +1,78 @@
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
-from fastapi.responses import JSONResponse
+import pandas as pd
 from pathlib import Path
-import json
-import os
-from your_module import (
-    IngestionRequest, DataLoader, preprocessing, Chunking,
-    S3Utils, Ingestion, MetadataModel, RagIngestionHandler
-)
+from app.utils.s3_storage import S3Utils
 
-router = APIRouter()
+def process_chunks_to_csv(
+    chunks,
+    root_dir: str = "./database",
+    model_id: str = '4925',
+    model_version: str = 'V1.0',
+    model_type: str = 'LLM',
+    market: str = 'Japan',
+    metadata_type: str = 'tollgating',
+    doc_type: str = 'docs',
+    input_type: str = 'multimodal documents'
+) -> pd.DataFrame:
 
-def get_router(client):
+    # Extract filename from metadata
+    filename = chunks[0]["metadata"].get("source", "unknown_file")
 
-    async def handle_rag_ingestion(file: UploadFile, metadata: str, extension: str) -> JSONResponse:
-        try:
-            print("RAW metadata string:", metadata)
-            metadata_dict = json.loads(metadata)
-            logger.info(f"metadata_dict: {metadata_dict}")
+    # Lists for DataFrame construction
+    content_list = []
+    metadata_list = []
 
-            parsed_metadata = MetadataModel(**metadata_dict)
-            print("parsed_metadata", parsed_metadata)
-            print("parsed_meta_dict", parsed_metadata.model_dump())
-            logger.info(f"parsed_metadata: {parsed_metadata}")
+    for chunk in chunks:
+        metadata = chunk.get("metadata", {})
+        section = metadata.get("section", "N/A")
+        subsection = metadata.get("subsection", "N/A")
+        content = chunk.get("content", "")
+        
+        # Prepend section and subsection to the content
+        updated_content = f"Section: {section}, Subsection: {subsection}\n{content}"
+        content_list.append(updated_content)
+        metadata_list.append(metadata)
 
-        except Exception as e:
-            logger.error(f"Error parsing metadata: {e}")
-            return JSONResponse(status_code=400, content={"error": "Invalid metadata", "details": str(e)})
+    n = len(content_list)
+    end_index_list = [len(c) for c in content_list]
+    start_index_list = [0] * n  # You can modify this if actual start indexes are available
 
-        try:
-            handler = RagIngestionHandler(
-                file=file,
-                metadata=parsed_metadata,
-                username="your_username",
-                password="your_password",
-                eag_cred="",
-                hmac_cred="",
-                haac_user="",
-                env="dev",
-                extension=extension,
-            )
-            logger.info("Handler created")
-            result = await handler.handle_request()
-            logger.info("Handler result received")
-            return JSONResponse(content=result)
+    # Other static lists
+    metadata_type_list = [metadata_type] * n
+    doc_type_list = [doc_type] * n
+    input_type_list = [input_type] * n
+    model_id_list = [model_id] * n
+    model_version_list = [model_version] * n
+    model_type_list = [model_type] * n
+    market_list = [market] * n
+    filename_list = [filename] * n
 
-        except Exception as e:
-            logger.error(f"Error in indexing pipeline: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+    # Create DataFrame
+    df = pd.DataFrame({
+        'content': content_list,
+        'filename': filename_list,
+        'metadata_content': metadata_list,
+        'metadata_type': metadata_type_list,
+        'start_index': start_index_list,
+        'end_index': end_index_list,
+        'doc_type': doc_type_list,
+        'input_type': input_type_list,
+        'modelID': model_id_list,
+        'model_version': model_version_list,
+        'model_type': model_type_list,
+        'market': market_list
+    })
 
-    @router.post("/csv-ingestion")
-    async def csv_rag_ingestion(
-        file: UploadFile = File(...),
-        metadata: str = Form(...)
-    ) -> JSONResponse:
-        return await handle_rag_ingestion(file, metadata, ".csv")
+    df.fillna('None', inplace=True)
 
-    @router.post(
-        "/injestion",
-        description="Parsing from s3 and ingestion in datastax",
-        operation_id="injestion word document"
-    )
-    async def upload_docx(
-        http_client: client,
-        request: IngestionRequest
-    ):
-        file_name = request.file_name
-        model_id = request.model_id
-        model_version = request.model_version
+    # Save to CSV
+    output_path = Path(root_dir) / f"{filename}_preprocess.csv"
+    df.to_csv(output_path, index=False)
 
-        # Extraction
-        document_obj = DataLoader()
-        document_extract = document_obj.docx_extraction(file_name)
+    # Upload to S3
+    s3_obj = S3Utils()
+    s3_path = f"s3://your-bucket-name/{filename}_preprocess.csv"  # Replace with your actual path logic
+    s3_obj.upload_file(str(output_path), s3_path)
 
-        # Preprocessing
-        preprocess_obj = preprocessing()
-        process_data = preprocess_obj.preprocess_content_chunks(document_extract)
-        pre_chunk = preprocess_obj.chunk_document(process_data)
+    print(f"Preprocessed CSV saved at: {output_path}")
 
-        # Chunking
-        chunking_obj = Chunking()
-        chunks = chunking_obj.create_chunks(pre_chunk)
-
-        # Save CSV locally
-        s3_path, csv_file_name = preprocess_obj.process_chunks_to_csv(chunks)
-        local_path = "csv"
-        os.makedirs(local_path, exist_ok=True)
-        csv_path = str(Path(local_path) / csv_file_name)
-
-        print("csv_file_name", csv_file_name)
-        print("csv_path", csv_path)
-
-        # Download from S3 to local
-        s3_obj = S3Utils()
-        s3_obj.download_file(s3_path, csv_path)
-
-        # Prepare metadata
-        indexing_payload = {
-            "usecaseid": "1313",
-            "usecasename": "Model validation",
-            "doc": {
-                "metadata": {
-                    "origin": "doc uploaded from",
-                    "model_id": model_id,
-                    "model_version": model_version
-                },
-                "operation": {
-                    "embedding": "text-embedding-3-large",
-                    "chunking": {"type": None}
-                },
-                "metadata_cols": [
-                    "metadata_content", "metadata_type", "doc_type",
-                    "input_type", "start_index"
-                ]
-            }
-        }
-
-        # Upload the CSV by invoking the CSV ingestion API
-        with open(csv_path, "rb") as f:
-            file_to_upload = UploadFile(filename=csv_file_name, file=f)
-            metadata_str = json.dumps(indexing_payload)
-            response = await csv_rag_ingestion(file=file_to_upload, metadata=metadata_str)
-
-        if response.status_code == 200:
-            return {"message": "CSV uploaded successfully"}
-        else:
-            return {"error": "Request Failed", "status": response.status_code}
-
-    return router
+    return df
