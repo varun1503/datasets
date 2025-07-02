@@ -1,41 +1,13 @@
-Here’s a rephrased and well-structured version of the work you've done over the last month, broken down into clear bullet points:
+import ast
 
+vector_raw = input_df[vector_col_name].at[i]
 
----
-
-Work Summary for the Last Month:
-
-1. Developed a Foundational LLM Repository
-
-Created a complete repository that includes pre-processing, chunking, auto-merging of chunks, and data ingestion pipelines.
-
-Implemented data retrieval mechanisms from data stacks for efficient querying and context generation.
-
-
-
-2. Implemented Document Parsing for MRMG Docs
-
-Built a parser using python-docx to extract content from Word documents.
-
-Pre-processed document elements such as tables, paragraphs, and images.
-
-Parsed images and fed them into the LLM to enhance contextual understanding.
-
-Extracted and mapped TMRC checklists into metadata for structured downstream usage.
-
-
-
-3. Designed and Structured a Full-Scale LLM Project Repository
-
-Initiated the development of a comprehensive LLM repo with modular structure.
-
-Incorporated services, utilities, configuration files, chunking logic, and database integration for scalable deployment.
-
-
-
-
-
----
-
-Let me know if you'd like this formatted for a report, resume, or project documentation.
-
+if isinstance(vector_raw, str):
+    try:
+        vector = ast.literal_eval(vector_raw)
+    except (ValueError, SyntaxError) as e:
+        logger.error(f"Literal eval failed for row {i}: {vector_raw} — {e}")
+        counts["failure"] += 1
+        continue
+else:
+    vector = vector_raw
