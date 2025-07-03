@@ -1,9 +1,81 @@
-def restructure_data(data_list):
-    result = []
-    for item in data_list:
-        new_item = {
-            'content': item.get('paragraph', ''),
-            'metadata': {k: v for k, v in item.items() if k != 'paragraph'}
+last_heading_item = None
+last_was_heading = False
+
+for child in body.iterchildren():
+    tag = child.tag
+
+    # ----- Paragraph -----
+    if tag == qn('w:p'):
+        para = Paragraph(child, doc)
+        text = para.text.strip()
+        style = para.style.name if para.style else ""
+
+        # ----- Headings -----
+        if style.startswith("Heading"):
+            level_str = style.replace("Heading", "").strip()
+            if not level_str.isdigit():
+                continue  # Ignore custom styles
+
+            level = int(level_str)
+            section_counters[level] = section_counters.get(level, 0) + 1
+
+            # Reset deeper level counters
+            for deeper in range(level + 1, 10):
+                section_counters.pop(deeper, None)
+
+            section_number = ".".join(
+                str(section_counters[i]) for i in sorted(section_counters) if i <= level
+            )
+
+            heading_id = self.generate_id()
+            heading_item = {
+                'id': heading_id,
+                'type': 'heading',
+                'text': f"{section_number}. {text}",
+                'section': section_number,
+                'level': level,
+                'source': file_name,
+                'child_ids': []
+            }
+
+            # ----- Determine parent -----
+            if last_was_heading and last_heading_item:
+                # Treat this heading as a subheading of the last one
+                parent = last_heading_item
+                heading_item['parent_id'] = parent['id']
+                parent['child_ids'].append(heading_id)
+                parent_stack.append(heading_item)
+            else:
+                while parent_stack and parent_stack[-1]['level'] >= level:
+                    parent_stack.pop()
+
+                parent = get_current_parent()
+                heading_item['parent_id'] = parent['id'] if parent else None
+                if parent:
+                    parent['child_ids'].append(heading_id)
+                parent_stack.append(heading_item)
+
+            ordered_content.append(heading_item)
+
+            # ----- Track state -----
+            last_heading_item = heading_item
+            last_was_heading = True
+            continue
+
+        # ----- Normal paragraph -----
+        para_id = self.generate_id()
+        parent = get_current_parent()
+        para_item = {
+            'id': para_id,
+            'type': 'paragraph',
+            'text': text,
+            'source': file_name,
+            'parent_id': parent['id'] if parent else None
         }
-        result.append(new_item)
-    return result
+        if parent:
+            parent['child_ids'].append(para_id)
+
+        ordered_content.append(para_item)
+
+        # This is not a heading
+        last_was_heading = False
