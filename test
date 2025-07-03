@@ -1,78 +1,9 @@
-import pandas as pd
-from pathlib import Path
-from app.utils.s3_storage import S3Utils
-
-def process_chunks_to_csv(
-    chunks,
-    root_dir: str = "./database",
-    model_id: str = '4925',
-    model_version: str = 'V1.0',
-    model_type: str = 'LLM',
-    market: str = 'Japan',
-    metadata_type: str = 'tollgating',
-    doc_type: str = 'docs',
-    input_type: str = 'multimodal documents'
-) -> pd.DataFrame:
-
-    # Extract filename from metadata
-    filename = chunks[0]["metadata"].get("source", "unknown_file")
-
-    # Lists for DataFrame construction
-    content_list = []
-    metadata_list = []
-
-    for chunk in chunks:
-        metadata = chunk.get("metadata", {})
-        section = metadata.get("section", "N/A")
-        subsection = metadata.get("subsection", "N/A")
-        content = chunk.get("content", "")
-        
-        # Prepend section and subsection to the content
-        updated_content = f"Section: {section}, Subsection: {subsection}\n{content}"
-        content_list.append(updated_content)
-        metadata_list.append(metadata)
-
-    n = len(content_list)
-    end_index_list = [len(c) for c in content_list]
-    start_index_list = [0] * n  # You can modify this if actual start indexes are available
-
-    # Other static lists
-    metadata_type_list = [metadata_type] * n
-    doc_type_list = [doc_type] * n
-    input_type_list = [input_type] * n
-    model_id_list = [model_id] * n
-    model_version_list = [model_version] * n
-    model_type_list = [model_type] * n
-    market_list = [market] * n
-    filename_list = [filename] * n
-
-    # Create DataFrame
-    df = pd.DataFrame({
-        'content': content_list,
-        'filename': filename_list,
-        'metadata_content': metadata_list,
-        'metadata_type': metadata_type_list,
-        'start_index': start_index_list,
-        'end_index': end_index_list,
-        'doc_type': doc_type_list,
-        'input_type': input_type_list,
-        'modelID': model_id_list,
-        'model_version': model_version_list,
-        'model_type': model_type_list,
-        'market': market_list
-    })
-
-    df.fillna('None', inplace=True)
-
-    # Save to CSV
-    output_path = Path(root_dir) / f"{filename}_preprocess.csv"
-    df.to_csv(output_path, index=False)
-
-    # Upload to S3
-    s3_obj = S3Utils()
-    s3_path = f"s3://your-bucket-name/{filename}_preprocess.csv"  # Replace with your actual path logic
-    s3_obj.upload_file(str(output_path), s3_path)
-
-    print(f"Preprocessed CSV saved at: {output_path}")
-
-    return df
+def restructure_data(data_list):
+    result = []
+    for item in data_list:
+        new_item = {
+            'content': item.get('paragraph', ''),
+            'metadata': {k: v for k, v in item.items() if k != 'paragraph'}
+        }
+        result.append(new_item)
+    return result
