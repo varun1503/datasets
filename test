@@ -6,33 +6,56 @@ from docx.text.paragraph import Paragraph
 doc = Document("your_file.docx")
 body = doc._element.body
 
+parsed = []
+para_list = []
+
+# Flatten all paragraphs
 for child in body.iterchildren():
-    tag = child.tag
-    if tag == qn("w:p"):
+    if child.tag == qn("w:p"):
         para = Paragraph(child, doc)
         text = para.text.strip()
         style = para.style.name if para.style else ""
+        para_list.append((style, text))
 
-        # Strategy 1: Styled Headings (normal case)
-        if style.startswith("Heading"):
-            print(f"Styled Heading ({style}): {text}")
-            continue
+# Function to check if TOC-style line
+def is_toc_line(text):
+    return re.search(r'\.+\s*\d+$', text) is not None  # e.g., "1.1 Intro......... 3"
 
-        # Strategy 2: Heuristic Headings (SECTION X:)
-        if re.match(r'^SECTION\s+\d+[:.]', text, re.IGNORECASE):
-            print(f"Detected SECTION heading (heuristic): {text}")
-            continue
+# Final clean list of real headings
+real_headings = []
 
-        # Strategy 3: Subheading pattern like 1.1, 1.2.3 etc.
-        if re.match(r'^\d+(\.\d+)+\s+', text):
-            print(f"Detected numbered subheading (heuristic): {text}")def get_cell_text(cell):
-    texts = []
-    for paragraph in cell.findall('.//w:p', namespaces=NSMAP):
-        para_text = ''
-        for run in paragraph.findall('.//w:r', namespaces=NSMAP):
-            for text_elem in run.findall('.//w:t', namespaces=NSMAP):
-                if text_elem.text:
-                    para_text += text_elem.text
-        if para_text.strip():
-            texts.append(para_text.strip())
-    return ' '.join(texts)
+for i, (style, text) in enumerate(para_list):
+    if not text:
+        continue
+
+    # Skip lines that are part of TOC
+    if is_toc_line(text):
+        continue
+
+    # Check if styled or heuristic heading
+    is_heading = (
+        style.startswith("Heading") or
+        re.match(r'^SECTION\s+\d+[:.]', text, re.IGNORECASE) or
+        re.match(r'^\d+(\.\d+)+\s+', text)
+    )
+
+    if is_heading:
+        # Check if some real content follows
+        lookahead = 1
+        has_content = False
+        while i + lookahead < len(para_list):
+            next_text = para_list[i + lookahead][1]
+            next_style = para_list[i + lookahead][0]
+            if next_style.startswith("Heading") or re.match(r'^SECTION\s+\d+', next_text, re.IGNORECASE):
+                break  # another heading — no content
+            if next_text.strip():
+                has_content = True
+                break
+            lookahead += 1
+
+        if has_content:
+            real_headings.append(text)
+
+# Print results
+for h in real_headings:
+    print(h)
