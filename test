@@ -1,8 +1,52 @@
+import re
+from docx import Document
+from docx.oxml.ns import qn
+from docx.text.paragraph import Paragraph
+
+doc = Document("your_file.docx")
+body = doc._element.body
+
+def is_heading(text, style):
+    return (
+        style.startswith("Heading") or
+        re.match(r'^SECTION\s+\d+[:.]', text, re.IGNORECASE) or
+        re.match(r'^\d+(\.\d+)+\s+', text)
+    )
+
 def is_toc_line(text):
-    """
-    Check if a line is from Table of Contents.
-    Match if:
-    - Ends with a number (1–3 digits) after spaces or dots.
-    - Contains heading-like numbering at the start.
-    """
+    # Handles: dotted lines or just spaces before ending number
     return bool(re.match(r'^.+[\.\s]{2,}\d{1,3}$', text.strip()))
+
+para_list = []
+in_toc = True
+real_headings = []
+
+for child in body.iterchildren():
+    if child.tag != qn("w:p"):
+        continue
+
+    para = Paragraph(child, doc)
+    text = para.text.strip()
+    style = para.style.name if para.style else ""
+
+    if not text:
+        continue
+
+    # Skip TOC lines
+    if in_toc:
+        if not is_toc_line(text) and not style.lower().startswith("toc"):
+            # Likely we're now past TOC
+            if is_heading(text, style):
+                in_toc = False
+            else:
+                continue
+        else:
+            continue  # skip TOC lines
+
+    # Real content heading
+    if is_heading(text, style):
+        real_headings.append((style, text))
+
+# ✅ Print filtered real headings
+for style, heading in real_headings:
+    print(f"{style} --> {heading}")
