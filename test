@@ -1,4 +1,31 @@
-def get_cell_text(cell):
+import re
+from docx import Document
+from docx.oxml.ns import qn
+from docx.text.paragraph import Paragraph
+
+doc = Document("your_file.docx")
+body = doc._element.body
+
+for child in body.iterchildren():
+    tag = child.tag
+    if tag == qn("w:p"):
+        para = Paragraph(child, doc)
+        text = para.text.strip()
+        style = para.style.name if para.style else ""
+
+        # Strategy 1: Styled Headings (normal case)
+        if style.startswith("Heading"):
+            print(f"Styled Heading ({style}): {text}")
+            continue
+
+        # Strategy 2: Heuristic Headings (SECTION X:)
+        if re.match(r'^SECTION\s+\d+[:.]', text, re.IGNORECASE):
+            print(f"Detected SECTION heading (heuristic): {text}")
+            continue
+
+        # Strategy 3: Subheading pattern like 1.1, 1.2.3 etc.
+        if re.match(r'^\d+(\.\d+)+\s+', text):
+            print(f"Detected numbered subheading (heuristic): {text}")def get_cell_text(cell):
     texts = []
     for paragraph in cell.findall('.//w:p', namespaces=NSMAP):
         para_text = ''
