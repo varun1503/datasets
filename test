@@ -1,61 +1,8 @@
-import re
-from docx import Document
-from docx.oxml.ns import qn
-from docx.text.paragraph import Paragraph
-
-doc = Document("your_file.docx")
-body = doc._element.body
-
-parsed = []
-para_list = []
-
-# Flatten all paragraphs
-for child in body.iterchildren():
-    if child.tag == qn("w:p"):
-        para = Paragraph(child, doc)
-        text = para.text.strip()
-        style = para.style.name if para.style else ""
-        para_list.append((style, text))
-
-# Function to check if TOC-style line
 def is_toc_line(text):
-    return re.search(r'\.+\s*\d+$', text) is not None  # e.g., "1.1 Intro......... 3"
-
-# Final clean list of real headings
-real_headings = []
-
-for i, (style, text) in enumerate(para_list):
-    if not text:
-        continue
-
-    # Skip lines that are part of TOC
-    if is_toc_line(text):
-        continue
-
-    # Check if styled or heuristic heading
-    is_heading = (
-        style.startswith("Heading") or
-        re.match(r'^SECTION\s+\d+[:.]', text, re.IGNORECASE) or
-        re.match(r'^\d+(\.\d+)+\s+', text)
-    )
-
-    if is_heading:
-        # Check if some real content follows
-        lookahead = 1
-        has_content = False
-        while i + lookahead < len(para_list):
-            next_text = para_list[i + lookahead][1]
-            next_style = para_list[i + lookahead][0]
-            if next_style.startswith("Heading") or re.match(r'^SECTION\s+\d+', next_text, re.IGNORECASE):
-                break  # another heading — no content
-            if next_text.strip():
-                has_content = True
-                break
-            lookahead += 1
-
-        if has_content:
-            real_headings.append(text)
-
-# Print results
-for h in real_headings:
-    print(h)
+    """
+    Check if a line is from Table of Contents.
+    Match if:
+    - Ends with a number (1–3 digits) after spaces or dots.
+    - Contains heading-like numbering at the start.
+    """
+    return bool(re.match(r'^.+[\.\s]{2,}\d{1,3}$', text.strip()))
