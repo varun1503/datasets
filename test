@@ -1,52 +1,39 @@
-import re
-from docx import Document
-from docx.oxml.ns import qn
-from docx.text.paragraph import Paragraph
+Here’s a rephrased and polished version of your update points for a one-pager or to present in your scrum meeting:
 
-doc = Document("your_file.docx")
-body = doc._element.body
 
-def is_heading(text, style):
-    return (
-        style.startswith("Heading") or
-        re.match(r'^SECTION\s+\d+[:.]', text, re.IGNORECASE) or
-        re.match(r'^\d+(\.\d+)+\s+', text)
-    )
+---
 
-def is_toc_line(text):
-    # Handles: dotted lines or just spaces before ending number
-    return bool(re.match(r'^.+[\.\s]{2,}\d{1,3}$', text.strip()))
+Work Progress Update
 
-para_list = []
-in_toc = True
-real_headings = []
+1. Modular Notebook Design
 
-for child in body.iterchildren():
-    if child.tag != qn("w:p"):
-        continue
+Structured the Jupyter notebook into modular components to separate concerns between services and API integrations, ensuring better maintainability and scalability.
 
-    para = Paragraph(child, doc)
-    text = para.text.strip()
-    style = para.style.name if para.style else ""
 
-    if not text:
-        continue
 
-    # Skip TOC lines
-    if in_toc:
-        if not is_toc_line(text) and not style.lower().startswith("toc"):
-            # Likely we're now past TOC
-            if is_heading(text, style):
-                in_toc = False
-            else:
-                continue
-        else:
-            continue  # skip TOC lines
+2. Document Parsing Service
 
-    # Real content heading
-    if is_heading(text, style):
-        real_headings.append((style, text))
+Developed a robust parsing service to process Word documents (.docx), extracting content and converting it into chunks suitable for downstream ingestion.
 
-# ✅ Print filtered real headings
-for style, heading in real_headings:
-    print(f"{style} --> {heading}")
+
+
+3. FastAPI Integration for Automation
+
+Built FastAPI endpoints to automate the parsing and ingestion workflow. The API accepts a filename, triggers the parsing service, uploads files to S3, and inserts the processed data into Datastax.
+
+
+
+4. Code Refactoring & Metadata Enhancement
+
+Refactored parsing logic to improve performance and readability.
+
+Added a preprocessing layer to enrich metadata and chunk content with additional contextual information before ingestion.
+
+
+
+
+
+---
+
+Let me know if you want this condensed further for a slide or if you need a version with technical bullet points.
+
