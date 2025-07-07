@@ -1,13 +1,16 @@
 def parse_table_with_merged_cells(table):
     """
     Parses a docx table and handles vertically merged cells using <w:vMerge/>.
-    Returns a list of rows with their corresponding text (merged where needed).
+    Also removes only exact duplicate rows (based on combined cell text).
+    Returns a list of cleaned rows.
     """
     merged_cells_tracker = {}  # (col_idx) -> previous value
     parsed_rows = []
+    prev_row_text = None
 
     for row in table.rows:
         parsed_row = []
+
         for col_idx, cell in enumerate(row.cells):
             tc = cell._tc
             tcPr = tc.tcPr
@@ -16,7 +19,6 @@ def parse_table_with_merged_cells(table):
             if vmerge is not None:
                 val = vmerge.val
                 if val is None or val == 'continue':
-                    # Reuse the text from above for vertically merged cell
                     parsed_row.append(merged_cells_tracker.get(col_idx, ""))
                 else:  # val == 'restart'
                     cell_text = get_cell_text(cell)
@@ -27,8 +29,10 @@ def parse_table_with_merged_cells(table):
                 merged_cells_tracker[col_idx] = cell_text
                 parsed_row.append(cell_text)
 
-        # Filter out empty rows if needed (optional)
-        if any(cell.strip() for cell in parsed_row):
+        # Check for exact duplicate row before appending
+        row_text = " | ".join([cell.strip() for cell in parsed_row])
+        if row_text != prev_row_text:
             parsed_rows.append(parsed_row)
+            prev_row_text = row_text  # Update for next comparison
 
     return parsed_rows
