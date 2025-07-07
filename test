@@ -1,31 +1,15 @@
 def parse_table_with_merged_cells(table):
-    """
-    Parses a docx table and handles vertically merged cells using <w:vMerge/>.
-    Returns a list of rows with their corresponding text (merged where needed).
-    """
-    merged_cells_tracker = {}  # (col_idx) -> previous value
-    parsed_rows = []
+    table_data = []
+    max_cols = max(len(row.cells) for row in table.rows)
 
     for row in table.rows:
-        parsed_row = []
-        for col_idx, cell in enumerate(row.cells):
-            tc = cell._tc
-            tcPr = tc.tcPr
-            vmerge = tcPr.vMerge if tcPr is not None and tcPr.vMerge is not None else None
-
-            if vmerge is not None:
-                val = vmerge.val
-                if val is None or val == 'continue':
-                    # Reuse the text from above for vertically merged cell
-                    parsed_row.append(merged_cells_tracker.get(col_idx, ""))
-                else:  # val == 'restart'
-                    cell_text = get_cell_text(cell)
-                    merged_cells_tracker[col_idx] = cell_text
-                    parsed_row.append(cell_text)
-            else:
-                cell_text = get_cell_text(cell)
-                merged_cells_tracker[col_idx] = cell_text
-                parsed_row.append(cell_text)
-        parsed_rows.append(parsed_row)
-
-    return parsed_rows
+        row_data = []
+        for cell in row.cells:
+            # Get clean cell text
+            cell_text = ' '.join(paragraph.text.strip() for paragraph in cell.paragraphs if paragraph.text.strip())
+            row_data.append(cell_text or "")  # Keep empty if possibly merged
+        # Pad row to match longest if needed
+        while len(row_data) < max_cols:
+            row_data.append("")  # Fill missing cells from merged cells
+        table_data.append(row_data)
+    return table_data
