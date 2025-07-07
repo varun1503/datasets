@@ -1,86 +1,17 @@
-import re
+match = re.match(r'^((\d+\.)+\d*)', text)
+if match:
+    section_number = match.group(1).rstrip('.')
+else:
+    section_number = self.get_section_number(level)
 
-class ParagraphProcessor:
-    def __init__(self, doc, file_name):
-        self.doc = doc
-        self.file_name = file_name
-        self.section_counters = {}
-        self.parent_stack = []
-        self.ordered_content = []
+clean_text = re.sub(r'^((\d+\.)+\d*\s*)', '', text).strip()
 
-    def generate_id(self):
-        import uuid
-        return str(uuid.uuid4())
-
-    def is_heading_like(self, para):
-        text = para.text.strip()
-        if not text:
-            return False
-
-        # Numbered headings: "1.", "2.1", "3.2.1" etc.
-        if re.match(r'^(\d+\.)+(\s+|$)', text):
-            return True
-
-        # Bold or all uppercase heuristics
-        if para.runs and all(run.bold for run in para.runs if run.text.strip()):
-            return True
-        if text.isupper() and len(text.split()) < 10:
-            return True
-
-        return False
-
-    def get_level_from_text(self, text):
-        numbers = re.findall(r'\d+', text)
-        return len(numbers) if numbers else 1
-
-    def get_section_number(self, level):
-        self.section_counters[level] = self.section_counters.get(level, 0) + 1
-        # Reset deeper levels
-        for deeper in range(level + 1, 10):
-            self.section_counters.pop(deeper, None)
-
-        section_number = ".".join(str(self.section_counters[i]) for i in sorted(self.section_counters) if i <= level)
-        return section_number
-
-    def get_current_parent(self):
-        return self.parent_stack[-1] if self.parent_stack else None
-
-    def process(self, para):
-        text = para.text.strip()
-        style = para.style.name if para.style else ""
-
-        is_explicit_heading = style.lower().startswith("heading")
-        is_inferred_heading = self.is_heading_like(para)
-
-        if is_explicit_heading or is_inferred_heading:
-            # Determine heading level
-            if is_explicit_heading:
-                level_str = style.replace("Heading", "").strip()
-                level = int(level_str) if level_str.isdigit() else 1
-            else:
-                level = self.get_level_from_text(text)
-
-            section_number = self.get_section_number(level)
-            heading_id = self.generate_id()
-            heading_item = {
-                'id': heading_id,
-                'type': 'heading',
-                'text': f"{section_number} {text}",
-                'section_number': section_number,
-                'level': level,
-                'source': self.file_name,
-                'child_ids': []
-            }
-
-            # Maintain parent hierarchy
-            while self.parent_stack and self.parent_stack[-1]['level'] >= level:
-                self.parent_stack.pop()
-
-            parent = self.get_current_parent()
-            heading_item['parent_id'] = parent['id'] if parent else None
-
-            if parent:
-                parent['child_ids'].append(heading_id)
-
-            self.parent_stack.append(heading_item)
-            self.ordered_content.append(heading_item)
+heading_item = {
+    'id': heading_id,
+    'type': 'heading',
+    'text': f"{section_number} {clean_text}",
+    'section_number': section_number,
+    'level': level,
+    'source': self.file_name,
+    'child_ids': []
+}
