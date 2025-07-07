@@ -1,27 +1,22 @@
-def is_heading_like(self, para):
+import re
+
+def is_heading_by_style_or_number_or_section(self, para):
     text = para.text.strip()
+    style = para.style.name if para.style else ""
 
     if not text:
         return False
 
-    # Reject if it starts with 'Figure', 'Table', 'Exhibit' + number (e.g., Figure 10.3)
-    if re.match(r'^(Figure|Table|Exhibit)\s+\d+(\.\d+)*', text, re.IGNORECASE):
-        return False
+    # Case 1: Paragraph has heading style
+    if style.lower().startswith("heading"):
+        return True
 
-    # Accept numbered section headings like "1.", "2.1", "3.2.1"
+    # Case 2: Text starts with numbered section like "1.", "2.1.3", etc.
     if re.match(r'^(\d+\.)+(\s+|$)', text):
         return True
 
-    # Accept if all text is bold and no sentence punctuation
-    bold_runs = [run.text.strip() for run in para.runs if run.bold and run.text.strip()]
-    full_runs = [run.text.strip() for run in para.runs if run.text.strip()]
-
-    if bold_runs and bold_runs == full_runs:
-        if len(text.split()) < 12 and not text.endswith('.'):
-            return True
-
-    # All-uppercase short headings
-    if text.isupper() and len(text.split()) < 10:
+    # Case 3: Starts with word "Section" followed by a number (e.g., "Section 2.1" or "SECTION 3")
+    if re.match(r'(?i)^section\s+\d+(\.\d+)*', text):
         return True
 
     return False
