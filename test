@@ -2,22 +2,37 @@ import re
 
 def extract_section_number_from_text(text):
     """
-    Extracts section number from heading text like:
+    Extracts a section number from a heading text.
+    Handles formats like:
+    - "SECTION 1: INTRODUCTION"
     - "Section 2.3.1 Some Title"
-    - "SECTION 1.4 Title"
-    - "2.1 Introduction"
-    Returns the number part: "2.3.1", or None if not matched.
+    - "1.4 Title"
+    Returns the number part (e.g., "1", "2.3.1", "1.4"), or None if not matched.
     """
+    if not text:
+        return None
+    
     text = text.strip()
-
-    # Match "Section 2.3.1", "SECTION 1.2" etc.
-    match = re.match(r'(?i)^section\s+((\d+\.)+\d*)', text)
+    
+    # This single regex handles both cases: with or without "Section" prefix.
+    # ^(?i)             -> Start of the string, case-insensitive
+    # (?:section\s*)?  -> An optional non-capturing group for "section" and a space
+    # ([\d\.]+)        -> A capturing group for the number (digits and dots)
+    match = re.search(r'^(?i)(?:section\s*)?([\d\.]+)', text)
+    
     if match:
+        # Return the captured group 1, which is the number
         return match.group(1)
-
-    # Match numbered prefix like "1.2.3 Title"
-    match = re.match(r'^((\d+\.)+\d*)', text)
-    if match:
-        return match.group(1)
-
+        
     return None
+
+# --- TESTING THE NEW FUNCTION ---
+
+# Test case from your image
+print(f"'SECTION 1: INTRODUCTION' -> {extract_section_number_from_text('SECTION 1: INTRODUCTION')}")
+
+# Other test cases from your docstring
+print(f"'Section 2.3.1 Some Title' -> {extract_section_number_from_text('Section 2.3.1 Some Title')}")
+print(f"'2.1 Introduction' -> {extract_section_number_from_text('2.1 Introduction')}")
+print(f"'  1.4 Title ' -> {extract_section_number_from_text('  1.4 Title ')}")
+print(f"'No number here' -> {extract_section_number_from_text('No number here')}")
