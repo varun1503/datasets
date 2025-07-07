@@ -1,98 +1,23 @@
 import re
-import uuid
 
-class ParagraphProcessor:
-    def __init__(self, doc, file_name):
-        self.doc = doc
-        self.file_name = file_name
-        self.ordered_content = []
-        self.parent_stack = []
-        self.section_counters = {}
+def extract_section_number_from_text(text):
+    """
+    Extracts section number from heading text like:
+    - "Section 2.3.1 Some Title"
+    - "SECTION 1.4 Title"
+    - "2.1 Introduction"
+    Returns the number part: "2.3.1", or None if not matched.
+    """
+    text = text.strip()
 
-    def generate_id(self):
-        return str(uuid.uuid4())
+    # Match "Section 2.3.1", "SECTION 1.2" etc.
+    match = re.match(r'(?i)^section\s+((\d+\.)+\d*)', text)
+    if match:
+        return match.group(1)
 
-    def is_heading_by_style_or_number_or_section(self, para):
-        text = para.text.strip()
-        style = para.style.name if para.style else ""
+    # Match numbered prefix like "1.2.3 Title"
+    match = re.match(r'^((\d+\.)+\d*)', text)
+    if match:
+        return match.group(1)
 
-        if not text:
-            return False
-
-        # Case 1: Style is Heading
-        if style.lower().startswith("heading"):
-            return True
-
-        # Case 2: Starts with numbered section like "1." or "2.3"
-        if re.match(r'^(\d+\.)+(\s+|$)', text):
-            return True
-
-        # Case 3: Starts with "Section" and a number
-        if re.match(r'(?i)^section\s+\d+(\.\d+)*', text):
-            return True
-
-        return False
-
-    def extract_section_number_from_text(self, text):
-        # Match something like: 1.2.3 Title OR Section 1.3 Title
-        match = re.match(r'(?i)^(section\s+)?((\d+\.)+\d*)', text.strip())
-        return match.group(2) if match else None
-
-    def get_level_from_section_number(self, section_number):
-        return len(section_number.strip().split('.')) if section_number else 1
-
-    def get_current_parent(self):
-        return self.parent_stack[-1] if self.parent_stack else None
-
-    def process(self, para):
-        text = para.text.strip()
-        if not text:
-            return  # Skip empty paragraphs
-
-        is_heading = self.is_heading_by_style_or_number_or_section(para)
-
-        if is_heading:
-            section_number = self.extract_section_number_from_text(text)
-            level = self.get_level_from_section_number(section_number) if section_number else 1
-
-            heading_id = self.generate_id()
-            heading_item = {
-                'id': heading_id,
-                'type': 'heading',
-                'text': text,
-                'section_number': section_number,
-                'level': level,
-                'source': self.file_name,
-                'child_ids': []
-            }
-
-            # Handle parent-child hierarchy
-            while self.parent_stack and self.parent_stack[-1]['level'] >= level:
-                self.parent_stack.pop()
-
-            parent = self.get_current_parent()
-            if parent:
-                heading_item['parent_id'] = parent['id']
-                parent['child_ids'].append(heading_id)
-
-            self.parent_stack.append(heading_item)
-            self.ordered_content.append(heading_item)
-        else:
-            para_id = self.generate_id()
-            parent = self.get_current_parent()
-            para_item = {
-                'id': para_id,
-                'type': 'paragraph',
-                'text': text,
-                'source': self.file_name,
-                'parent_id': parent['id'] if parent else None
-            }
-            if parent:
-                parent['child_ids'].append(para_id)
-
-            self.ordered_content.append(para_item)
-
-    def run(self):
-        for para in self.doc.paragraphs:
-            self.process(para)
-        return self.ordered_content
+    return None
