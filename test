@@ -1,10 +1,10 @@
 def parse_table_with_merged_cells(table):
     """
     Parses a docx table and handles vertically merged cells using <w:vMerge/>.
-    Also removes only exact duplicate rows (based on combined cell text).
-    Returns a list of cleaned rows.
+    Keeps natural column counts (does not force all rows to match longest).
+    Removes exact duplicate rows.
     """
-    merged_cells_tracker = {}  # (col_idx) -> previous value
+    merged_cells_tracker = {}  # Tracks content of vertically merged cells
     parsed_rows = []
     prev_row_text = None
 
@@ -20,7 +20,7 @@ def parse_table_with_merged_cells(table):
                 val = vmerge.val
                 if val is None or val == 'continue':
                     parsed_row.append(merged_cells_tracker.get(col_idx, ""))
-                else:  # val == 'restart'
+                else:
                     cell_text = get_cell_text(cell)
                     merged_cells_tracker[col_idx] = cell_text
                     parsed_row.append(cell_text)
@@ -29,10 +29,12 @@ def parse_table_with_merged_cells(table):
                 merged_cells_tracker[col_idx] = cell_text
                 parsed_row.append(cell_text)
 
-        # Check for exact duplicate row before appending
-        row_text = " | ".join([cell.strip() for cell in parsed_row])
-        if row_text != prev_row_text:
-            parsed_rows.append(parsed_row)
-            prev_row_text = row_text  # Update for next comparison
+        # Remove whitespace-only cells and empty trailing cells
+        trimmed_row = [cell.strip() for cell in parsed_row if cell.strip() != ""]
+        if trimmed_row:
+            row_signature = " | ".join(trimmed_row)
+            if row_signature != prev_row_text:
+                parsed_rows.append(trimmed_row)
+                prev_row_text = row_signature
 
     return parsed_rows
