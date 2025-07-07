@@ -1,47 +1,48 @@
-from docx.table import Table as DocxTable
+import re
+from typing import List
 
-class TableParser:
-    def __init__(self):
-        self.merged_cells_tracker = {}
+def is_logical_heading(text: str, runs: List[dict]) -> bool:
+    """
+    Determine if a paragraph is a logical heading.
+    
+    Args:
+        text: Paragraph text
+        runs: List of run dictionaries, each containing 'bold' and 'font_size'
+    
+    Returns:
+        bool: True if paragraph is likely a heading
+    """
+    text = text.strip()
+    if not text:
+        return False
 
-    def get_cell_text(self, cell):
-        """
-        Extracts clean text from a docx cell, joining paragraphs.
-        """
-        paragraphs = cell._tc.findall('.//w:p', namespaces={'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'})
-        texts = []
-        for p in paragraphs:
-            texts.extend([t.text for t in p.iter() if t.text])
-        return ' '.join([t.strip() for t in texts if t.strip()])
+    # Rule 1: Numbered section pattern
+    if re.match(r'^\d+(\.\d+)*[\.\s]', text):
+        if re.match(r'^(Figure|Table)\s*\d+(\.\d+)*[:\s]', text, re.IGNORECASE):
+            return False
+        return True
 
-    def parse_with_merged_cells(self, table: DocxTable):
-        """
-        Parses a docx table and handles vertical merged cells (vMerge).
-        Returns a list of rows without enforcing fixed column lengths.
-        """
-        parsed_rows = []
-        for row in table.rows:
-            row_data = []
-            for col_idx, cell in enumerate(row.cells):
-                tc = cell._tc
-                tcPr = tc.tcPr
-                vmerge = tcPr.vMerge if tcPr is not None and tcPr.vMerge is not None else None
+    # Rule 2: All caps and short (like "SUMMARY")
+    if text.isupper() and len(text.split()) <= 6:
+        return True
 
-                if vmerge is not None:
-                    val = vmerge.val
-                    if val is None or val == 'continue':
-                        # Continue merged value from above
-                        row_data.append(self.merged_cells_tracker.get(col_idx, ""))
-                    else:  # 'restart'
-                        cell_text = self.get_cell_text(cell)
-                        self.merged_cells_tracker[col_idx] = cell_text
-                        row_data.append(cell_text)
-                else:
-                    cell_text = self.get_cell_text(cell)
-                    self.merged_cells_tracker[col_idx] = cell_text
-                    row_data.append(cell_text)
+    # Rule 3: All bold and not caption-like
+    if all(run.get("bold", False) for run in runs) and len(text.split()) <= 7:
+        if re.match(r'^(Figure|Table|Chart|Graph|Exhibit)\s*\d*[:\s]', text, re.IGNORECASE):
+            return False
+        return True
 
-            if any(cell.strip() for cell in row_data):  # Avoid appending blank rows
-                parsed_rows.append(row_data)
+    # Rule 4: Starts with number and font size is larger
+    for run in runs:
+        size = run.get("font_size")
+        if size and size >= 11 and re.match(r'^\d+(\.\d+)*[\.\s]', text):
+            return True
 
-        return parsed_rows
+    return False
+
+# Example usage
+example = {
+    "text": "1.1 Introduction",
+    "runs": [{"bold": False, "font_size": 12}]
+}
+is_logical_heading(example["text"], example["runs"])
