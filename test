@@ -1,58 +1,47 @@
-from docx import Document
-from docx.oxml.ns import qn
+from docx.table import Table as DocxTable
 
-def get_cell_text(cell):
-    """
-    Extracts and joins all paragraph text from a docx table cell.
-    """
-    text = ''
-    for paragraph in cell.paragraphs:
-        text += paragraph.text + '\n'
-    return text.strip()
+class TableParser:
+    def __init__(self):
+        self.merged_cells_tracker = {}
 
-def parse_table_with_merged_cells(table):
-    """
-    Parses a docx table and handles vertically merged cells.
-    """
-    grid = []
-    for row in table.rows:
-        row_cells = []
-        for cell in row.cells:
-            row_cells.append(cell)
-        grid.append(row_cells)
+    def get_cell_text(self, cell):
+        """
+        Extracts clean text from a docx cell, joining paragraphs.
+        """
+        paragraphs = cell._tc.findall('.//w:p', namespaces={'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'})
+        texts = []
+        for p in paragraphs:
+            texts.extend([t.text for t in p.iter() if t.text])
+        return ' '.join([t.strip() for t in texts if t.strip()])
 
-    # Dictionary to store the text of the starting cell of a merge
-    merge_starters = {}
+    def parse_with_merged_cells(self, table: DocxTable):
+        """
+        Parses a docx table and handles vertical merged cells (vMerge).
+        Returns a list of rows without enforcing fixed column lengths.
+        """
+        parsed_rows = []
+        for row in table.rows:
+            row_data = []
+            for col_idx, cell in enumerate(row.cells):
+                tc = cell._tc
+                tcPr = tc.tcPr
+                vmerge = tcPr.vMerge if tcPr is not None and tcPr.vMerge is not None else None
 
-    parsed_rows = []
-    for i, row in enumerate(grid):
-        row_data = []
-        for j, cell in enumerate(row):
-            is_merged = False
-            # Check for vertical merge
-            for other_cell in grid[i-1][j].part.element.xpath(f'.//w:vMerge[@w:val="restart"]'):
-                if cell._tc is other_cell.getparent().getparent():
-                    merge_starters[(i,j)] = get_cell_text(cell)
-                    row_data.append(get_cell_text(cell))
-                    is_merged = True
-                    break
+                if vmerge is not None:
+                    val = vmerge.val
+                    if val is None or val == 'continue':
+                        # Continue merged value from above
+                        row_data.append(self.merged_cells_tracker.get(col_idx, ""))
+                    else:  # 'restart'
+                        cell_text = self.get_cell_text(cell)
+                        self.merged_cells_tracker[col_idx] = cell_text
+                        row_data.append(cell_text)
+                else:
+                    cell_text = self.get_cell_text(cell)
+                    self.merged_cells_tracker[col_idx] = cell_text
+                    row_data.append(cell_text)
 
-            if not is_merged:
-                 # Check if this cell is part of an ongoing merge
-                is_part_of_merge = False
-                for other_cell in cell.part.element.xpath('.//w:vMerge[@w:val="continue"]'):
-                     if cell._tc is other_cell.getparent().getparent():
-                        # Find the starting cell of this merge
-                        for r in range(i - 1, -1, -1):
-                            if (r,j) in merge_starters:
-                                row_data.append(merge_starters[(r,j)])
-                                is_part_of_merge = True
-                                break
-                
-                if not is_part_of_merge:
-                    row_data.append(get_cell_text(cell))
+            if any(cell.strip() for cell in row_data):  # Avoid appending blank rows
+                parsed_rows.append(row_data)
 
-
-        parsed_rows.append(row_data)
-
-    return parsed_rows
+        return parsed_rows
