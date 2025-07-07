@@ -1,24 +1,26 @@
 def is_heading_like(self, para):
     text = para.text.strip()
 
-    # Reject empty
     if not text:
         return False
 
-    # Accept numbered headings
+    # Reject if it starts with 'Figure', 'Table', 'Exhibit' + number (e.g., Figure 10.3)
+    if re.match(r'^(Figure|Table|Exhibit)\s+\d+(\.\d+)*', text, re.IGNORECASE):
+        return False
+
+    # Accept numbered section headings like "1.", "2.1", "3.2.1"
     if re.match(r'^(\d+\.)+(\s+|$)', text):
         return True
 
-    # Accept if ALL runs are bold AND no sentence punctuation (likely heading)
+    # Accept if all text is bold and no sentence punctuation
     bold_runs = [run.text.strip() for run in para.runs if run.bold and run.text.strip()]
     full_runs = [run.text.strip() for run in para.runs if run.text.strip()]
 
-    # Only accept bold if entire paragraph is bold
     if bold_runs and bold_runs == full_runs:
         if len(text.split()) < 12 and not text.endswith('.'):
             return True
 
-    # Accept all-uppercase short titles
+    # All-uppercase short headings
     if text.isupper() and len(text.split()) < 10:
         return True
 
