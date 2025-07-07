@@ -1,83 +1,25 @@
-import re
-import uuid
+def is_heading_like(self, para):
+    text = para.text.strip()
 
-class ParagraphProcessor:
-    def __init__(self, doc, file_name):
-        self.doc = doc
-        self.file_name = file_name
-        self.section_counters = {}
-        self.parent_stack = []
-        self.ordered_content = []
-
-    def generate_id(self):
-        return str(uuid.uuid4())
-
-    def is_heading_like(self, para):
-        text = para.text.strip()
-        if not text:
-            return False
-        if re.match(r'^(\d+\.)+(\s+|$)', text):  # Numbered heading
-            return True
-        if para.runs and all(run.bold for run in para.runs if run.text.strip()):  # Bold
-            return True
-        if text.isupper() and len(text.split()) < 10:  # All caps, short
-            return True
+    # Reject empty
+    if not text:
         return False
 
-    def extract_section_number(self, text):
-        match = re.match(r'^(\d+(\.\d+)*)(?=\s+)', text)
-        return match.group(1) if match else None
+    # Accept numbered headings
+    if re.match(r'^(\d+\.)+(\s+|$)', text):
+        return True
 
-    def get_level_from_section_number(self, section_number):
-        return section_number.count('.') + 1
+    # Accept if ALL runs are bold AND no sentence punctuation (likely heading)
+    bold_runs = [run.text.strip() for run in para.runs if run.bold and run.text.strip()]
+    full_runs = [run.text.strip() for run in para.runs if run.text.strip()]
 
-    def get_auto_section_number(self, level):
-        self.section_counters[level] = self.section_counters.get(level, 0) + 1
-        for deeper in range(level + 1, 10):
-            self.section_counters.pop(deeper, None)
-        return ".".join(str(self.section_counters[i]) for i in sorted(self.section_counters) if i <= level)
+    # Only accept bold if entire paragraph is bold
+    if bold_runs and bold_runs == full_runs:
+        if len(text.split()) < 12 and not text.endswith('.'):
+            return True
 
-    def get_current_parent(self):
-        return self.parent_stack[-1] if self.parent_stack else None
+    # Accept all-uppercase short titles
+    if text.isupper() and len(text.split()) < 10:
+        return True
 
-    def process(self, para):
-        text = para.text.strip()
-        if not text:
-            return
-
-        style = para.style.name if para.style else ""
-        is_explicit_heading = style.lower().startswith("heading")
-        is_inferred_heading = self.is_heading_like(para)
-
-        if is_explicit_heading or is_inferred_heading:
-            heading_id = self.generate_id()
-            section_number = self.extract_section_number(text)
-
-            if section_number:
-                level = self.get_level_from_section_number(section_number)
-            else:
-                level = int(style.replace("Heading", "").strip()) if is_explicit_heading and style.replace("Heading", "").strip().isdigit() else self.get_level_from_section_number("1")
-                section_number = self.get_auto_section_number(level)
-
-            # Build heading item
-            heading_item = {
-                'id': heading_id,
-                'type': 'heading',
-                'text': f"{section_number} {text}" if not text.startswith(section_number) else text,
-                'section_number': section_number,
-                'level': level,
-                'source': self.file_name,
-                'child_ids': []
-            }
-
-            # Maintain hierarchy
-            while self.parent_stack and self.parent_stack[-1]['level'] >= level:
-                self.parent_stack.pop()
-
-            parent = self.get_current_parent()
-            heading_item['parent_id'] = parent['id'] if parent else None
-            if parent:
-                parent['child_ids'].append(heading_id)
-
-            self.parent_stack.append(heading_item)
-            self.ordered_content.append(heading_item)
+    return False
