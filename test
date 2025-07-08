@@ -1,25 +1,16 @@
-import re
+from docx.oxml.ns import qn
+from docx.text.paragraph import Paragraph
 
-def extract_section_number_from_text(text):
-    """
-    Extracts section number from heading text like:
-    - "Section 2.3.1 Some Title"
-    - "SECTION 1.4 Title"
-    - "2.1 Introduction"
-    - "SECTION 1: INTRODUCTION"
+def extract_all_paragraphs(body, doc):
+    para_list = []
 
-    Returns the number part: "2.3.1", "1", etc., or None if not matched.
-    """
-    text = text.strip()
+    def recursive_extract(element):
+        for child in element.iterchildren():
+            if child.tag == qn('w:p'):
+                para = Paragraph(child, doc)
+                para_list.append(para)
+            else:
+                recursive_extract(child)  # recursively go deeper
 
-    # Match "Section 2.3.1", "SECTION 1.2", "Section 1", etc.
-    match = re.search(r'(?i)^section\s+((\d+(\.\d+)*))', text)
-    if match:
-        return match.group(1)
-
-    # Match numbered prefix like "1.2.3 Title" or "1: Title"
-    match = re.match(r'^(\d+(\.\d+)*)([:\s])?', text)
-    if match:
-        return match.group(1)
-
-    return None
+    recursive_extract(body)
+    return para_list
