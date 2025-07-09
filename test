@@ -1,216 +1,22 @@
-import os
-import re
-import uuid
-import base64
-import tempfile
-from pathlib import Path
-from docx import Document
-from docx.oxml.ns import qn
-from docx.text.paragraph import Paragraph
-from app.utils.config_management import load_config
-from app.services.prompt.image_prompt import Prompt
-from app.utils.s3_storage import S3Utils
-from app.services.llm.modelcall import model_invoke
-from app.services.docx_utils.table_parser import TableParser  # adjust path as needed
-
-NSMAP = {
-    'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
-    'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
-    'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
-}
+Sure! Here's a clearer and more professional rephrasing of your message:
 
 
-class DataLoader:
-    def __init__(self):
-        self.config = load_config()
-        self.section_counters = {}
+---
 
-    def generate_id(self):
-        return str(uuid.uuid4())
+Hi,
+Currently, we are using an auto-merger method for chunking, where a large parent chunk is created first, and then smaller child chunks are derived from it — essentially a hierarchical chunking approach.
 
-    def encode_image(self, image_path):
-        with open(image_path, "rb") as f:
-            return base64.b64encode(f.read()).decode('utf-8')
+However, during evaluation, we observed that some chunks are getting split incorrectly in the middle, which impacts content coherence.
 
-    def s3_object_read(self, s3_file):
-        s3 = S3Utils()
-        temp_dir = tempfile.gettempdir()
-        data_dir = os.path.join(temp_dir, "s3_temp_data")
-        os.makedirs(data_dir, exist_ok=True)
-        local_path = os.path.join(data_dir, os.path.basename(s3_file))
-        s3.download_file(s3_file, local_path)
-        return local_path
+To address this, we are now planning to move to a section-wise chunking strategy. In this new approach:
 
-    def is_heading(self, para: Paragraph):
-        text = para.text.strip()
-        style = para.style.name.lower() if para.style else ""
-        if not text:
-            return False
-        if style.startswith("heading") or style.startswith("level"):
-            return True
-        if re.match(r'^(section\s+)?\d+(\.\d+)*', text, re.IGNORECASE):
-            return True
-        return False
+Each section will be treated as a single chunk.
 
-    def get_section_number(self, level):
-        self.section_counters[level] = self.section_counters.get(level, 0) + 1
-        for deeper in range(level + 1, 10):
-            self.section_counters.pop(deeper, None)
-        parts = [str(self.section_counters[i]) for i in sorted(self.section_counters) if i <= level]
-        return ".".join(parts)
+If a section is too large, we will further split it while keeping the full content — including tables and images — intact within each subdivided chunk.
 
-    def get_level_from_section_number(self, section_number):
-        return len(section_number.strip().split('.')) if section_number else 1
 
-    def extract_section_number_from_text(self, text):
-        text = text.strip()
-        match = re.search(r'(?i)^section\s+((\d+(\.\d+)*))', text)
-        if match:
-            return match.group(1)
-        match = re.match(r'^(\d+(\.\d+)*)([:\s])?', text)
-        if match:
-            return match.group(1)
-        return None
 
-    def get_all_paragraphs(self, body, doc):
-        paragraphs = []
+---
 
-        def extract_recursive(element):
-            for child in element.iterchildren():
-                if child.tag == qn('w:p'):
-                    para = Paragraph(child, doc)
-                    paragraphs.append((child, para))
-                else:
-                    extract_recursive(child)
+Let me know if you'd like this in a more technical tone or simplified further.
 
-        extract_recursive(body)
-        return paragraphs
-
-    def docx_extraction(self, local_file_path, save_images=False, image_output_dir='images'):
-        doc = Document(local_file_path)
-        file_name = os.path.basename(local_file_path)
-        body = doc.element.body
-
-        if save_images:
-            os.makedirs(image_output_dir, exist_ok=True)
-
-        parent_stack = []
-        ordered_content = []
-
-        def get_current_parent():
-            return parent_stack[-1] if parent_stack else None
-
-        for child, para in self.get_all_paragraphs(body, doc):
-            text = para.text.strip()
-            style = para.style.name if para.style else ""
-
-            if style.lower().startswith("toc") or not text:
-                continue
-
-            is_heading = self.is_heading(para)
-
-            if is_heading:
-                section_number = self.extract_section_number_from_text(text)
-                if section_number:
-                    level = self.get_level_from_section_number(section_number)
-                else:
-                    if style.lower().startswith("heading"):
-                        level_str = style.lower().replace("heading", "").strip()
-                        if not level_str.isdigit():
-                            continue
-                        level = int(level_str)
-                    else:
-                        parent = get_current_parent()
-                        level = parent['level'] + 1 if parent else 1
-                    section_number = self.get_section_number(level)
-
-                heading_id = self.generate_id()
-                heading_item = {
-                    'id': heading_id,
-                    'type': 'heading',
-                    'text': f"{section_number} {text}" if section_number not in text else text,
-                    'section': section_number,
-                    'level': level,
-                    'source': file_name,
-                    'child_ids': []
-                }
-
-                while parent_stack and parent_stack[-1]['level'] >= level:
-                    parent_stack.pop()
-
-                parent = get_current_parent()
-                heading_item['parent_id'] = parent['id'] if parent else None
-
-                if parent:
-                    parent['child_ids'].append(heading_id)
-
-                parent_stack.append(heading_item)
-                ordered_content.append(heading_item)
-            else:
-                para_id = self.generate_id()
-                parent = get_current_parent()
-                para_item = {
-                    'id': para_id,
-                    'type': 'paragraph',
-                    'text': text,
-                    'source': file_name,
-                    'parent_id': parent['id'] if parent else None
-                }
-                if parent:
-                    parent['child_ids'].append(para_id)
-                ordered_content.append(para_item)
-
-        # ---------------- Image ----------------
-        for drawing in body.findall('.//w:drawing', namespaces=NSMAP):
-            blip = drawing.find('.//a:blip', namespaces=NSMAP)
-            if blip is not None:
-                r_embed = blip.attrib.get(qn('r:embed'))
-                image_part = doc.part.related_parts.get(r_embed)
-                if image_part:
-                    content_type = image_part.content_type
-                    ext = content_type.split("/")[-1].lower()
-                    if ext not in ['png', 'jpeg', 'jpg']:
-                        continue
-                    image_id = self.generate_id()
-                    image_label = f"Image_{image_id[:8]}"
-                    image_path = os.path.join(image_output_dir, f"{image_label}.{ext}")
-                    if save_images:
-                        with open(image_path, "wb") as f:
-                            f.write(image_part.blob)
-
-                    base64_image = self.encode_image(image_path)
-                    prompt = Prompt()
-                    llm_output = model_invoke().model_call("3", prompt.image_insight_prompt, {
-                        "base_64_encoded_image": base64_image
-                    })
-
-                    parent = get_current_parent()
-                    image_item = {
-                        'id': image_id,
-                        'type': 'image',
-                        'label': image_label,
-                        'source': file_name,
-                        'image_context': llm_output if llm_output else None,
-                        'parent_id': parent['id'] if parent else None
-                    }
-                    if parent:
-                        parent['child_ids'].append(image_id)
-                    ordered_content.append(image_item)
-
-        # ---------------- Table ----------------
-        for table_element in body.findall('.//w:tbl', namespaces=NSMAP):
-            table_obj = TableParser().parse_with_merged_cells(Table(table_element, doc))
-            table_id = self.generate_id()
-            parent = get_current_parent()
-            table_item = {
-                'id': table_id,
-                'type': 'table',
-                'data': table_obj,
-                'source': file_name,
-                'parent_id': parent['id'] if parent else None
-            }
-            if parent:
-                parent['child_ids'].append(table_id)
-            ordered_content.append(table_item)
-
-        return ordered_content
