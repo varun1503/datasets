@@ -1,7 +1,19 @@
-curl -o punkt_tab.zip https://ci-repo.aexp.com/repository/github_proxy/nltk/nitk_data/raw/gh-pages/packages/tokenizers/punkt_tab.zip
-
-powershell -Command "Expand-Archive -Path punkt_tab.zip -DestinationPath ."
-
-mkdir "C:\Users\vvaishy\Documents\hpt_rasa\res_venv\nltk_data\tokenizers\punkt_tab"
-
-move punkt_tab\* "C:\Users\vvaishy\Documents\hpt_rasa\res_venv\nltk_data\tokenizers\punkt_tab\"
+def get_dynamic_chunk_sizes(content):
+    total_len = len(content)
+    
+    if total_len <= 1024:
+        # Equal split for small content
+        part = total_len // 3
+        return [part, part, total_len - 2 * part]
+    
+    # Default dynamic chunk ratio
+    chunk_ratios = [4096, 2048, 1024]
+    total_ratio = sum(chunk_ratios)
+    
+    # Calculate each chunk size proportionally
+    chunk_sizes = [int((r / total_ratio) * total_len) for r in chunk_ratios]
+    
+    # Adjust last chunk to match total_len (fix rounding)
+    chunk_sizes[-1] = total_len - sum(chunk_sizes[:-1])
+    
+    return chunk_sizes
