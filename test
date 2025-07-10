@@ -1,22 +1,7 @@
-Sure! Here's a clearer and more professional rephrasing of your message:
+curl -o punkt_tab.zip https://ci-repo.aexp.com/repository/github_proxy/nltk/nitk_data/raw/gh-pages/packages/tokenizers/punkt_tab.zip
 
+powershell -Command "Expand-Archive -Path punkt_tab.zip -DestinationPath ."
 
----
+mkdir "C:\Users\vvaishy\Documents\hpt_rasa\res_venv\nltk_data\tokenizers\punkt_tab"
 
-Hi,
-Currently, we are using an auto-merger method for chunking, where a large parent chunk is created first, and then smaller child chunks are derived from it — essentially a hierarchical chunking approach.
-
-However, during evaluation, we observed that some chunks are getting split incorrectly in the middle, which impacts content coherence.
-
-To address this, we are now planning to move to a section-wise chunking strategy. In this new approach:
-
-Each section will be treated as a single chunk.
-
-If a section is too large, we will further split it while keeping the full content — including tables and images — intact within each subdivided chunk.
-
-
-
----
-
-Let me know if you'd like this in a more technical tone or simplified further.
-
+move punkt_tab\* "C:\Users\vvaishy\Documents\hpt_rasa\res_venv\nltk_data\tokenizers\punkt_tab\"
