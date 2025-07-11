@@ -12,33 +12,50 @@ class HTMLDataLoader:
     def generate_id(self):
         return str(uuid.uuid4())
 
-    def is_heading(self, tag):
-        return tag.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']
-
-    def get_level_from_tag(self, tag):
-        return int(tag.name[1]) if self.is_heading(tag) else 0
+    def encode_image_from_url(self, url):
+        try:
+            response = requests.get(url)
+            if response.status_code == 200:
+                return base64.b64encode(response.content).decode('utf-8')
+        except:
+            return None
+        return None
 
     def extract_section_number_from_text(self, text):
         text = text.strip()
-        match = re.match(r'^(\d+(\.\d+)*)', text)
-        return match.group(1) if match else None
+        match = re.match(r'^(section\s+)?(\d+(\.\d+)*)', text, re.IGNORECASE)
+        if match:
+            return match.group(2)
+        return None
+
+    def get_level_from_section_number(self, section_number):
+        return len(section_number.strip().split('.')) if section_number else 1
 
     def get_section_number(self, level):
         self.section_counters[level] = self.section_counters.get(level, 0) + 1
         # Reset deeper levels
         for deeper in range(level + 1, 10):
             self.section_counters.pop(deeper, None)
-        # Generate hierarchical section number
         return ".".join(str(self.section_counters[i]) for i in sorted(self.section_counters) if i <= level)
 
-    def encode_image_from_url(self, url):
-        try:
-            response = requests.get(url)
-            if response.status_code == 200:
-                return base64.b64encode(response.content).decode('utf-8')
-        except Exception as e:
-            print(f"Image load failed: {url}", e)
-        return None
+    def is_heading(self, tag):
+        text = tag.get_text(strip=True)
+        if not text:
+            return False
+
+        # 1. Starts with numbered section
+        if re.match(r'^(section\s+)?(\d+(\.\d+)*)(\s+|:)', text, re.IGNORECASE):
+            return True
+
+        # 2. ALL CAPS text
+        if text.isupper() and len(text) > 3:
+            return True
+
+        # 3. Contains bold tag or strong tag
+        if tag.find('b') or tag.find('strong'):
+            return True
+
+        return False
 
     def extract_from_html(self, html_content):
         soup = BeautifulSoup(html_content, 'html.parser')
@@ -49,11 +66,15 @@ class HTMLDataLoader:
             return parent_stack[-1] if parent_stack else None
 
         for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'table', 'img']):
-            tag_name = tag.name
             text = tag.get_text(strip=True)
+            tag_name = tag.name
 
-            if self.is_heading(tag):
-                level = self.get_level_from_tag(tag)
+            # Heading — either by tag or logic
+            is_tag_heading = tag_name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']
+            is_para_heading = tag_name == 'p' and self.is_heading(tag)
+
+            if is_tag_heading or is_para_heading:
+                level = int(tag_name[1]) if is_tag_heading else 2  # default to level 2 for paragraph headings
                 section_number = self.extract_section_number_from_text(text)
                 if not section_number:
                     section_number = self.get_section_number(level)
@@ -71,6 +92,7 @@ class HTMLDataLoader:
 
                 while parent_stack and parent_stack[-1]['level'] >= level:
                     parent_stack.pop()
+
                 parent = get_current_parent()
                 heading_item['parent_id'] = parent['id'] if parent else None
                 if parent:
@@ -79,21 +101,22 @@ class HTMLDataLoader:
                 parent_stack.append(heading_item)
                 ordered_content.append(heading_item)
 
-            elif tag_name == 'p':
-                if text:
-                    para_id = self.generate_id()
-                    parent = get_current_parent()
-                    para_item = {
-                        'id': para_id,
-                        'type': 'paragraph',
-                        'text': text,
-                        'source': 'html_doc',
-                        'parent_id': parent['id'] if parent else None
-                    }
-                    if parent:
-                        parent['child_ids'].append(para_id)
-                    ordered_content.append(para_item)
+            # Paragraph
+            elif tag_name == 'p' and text:
+                para_id = self.generate_id()
+                parent = get_current_parent()
+                para_item = {
+                    'id': para_id,
+                    'type': 'paragraph',
+                    'text': text,
+                    'source': 'html_doc',
+                    'parent_id': parent['id'] if parent else None
+                }
+                if parent:
+                    parent['child_ids'].append(para_id)
+                ordered_content.append(para_item)
 
+            # Table
             elif tag_name == 'table':
                 table_id = self.generate_id()
                 parent = get_current_parent()
@@ -110,17 +133,18 @@ class HTMLDataLoader:
                     parent['child_ids'].append(table_id)
                 ordered_content.append(table_item)
 
+            # Image
             elif tag_name == 'img':
                 image_id = self.generate_id()
                 image_url = tag.get('src')
-                base64_image = self.encode_image_from_url(image_url)
+                base64_img = self.encode_image_from_url(image_url)
                 parent = get_current_parent()
                 image_item = {
                     'id': image_id,
                     'type': 'image',
                     'label': f"Image_{image_id[:8]}",
                     'source': 'html_doc',
-                    'image_context': base64_image,
+                    'image_context': base64_img,
                     'parent_id': parent['id'] if parent else None
                 }
                 if parent:
