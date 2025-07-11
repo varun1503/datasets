@@ -1,41 +1,105 @@
-from langchain.schema import Document
 
-def chunk_document(preprocess_chunk):
-    final_chunk = []
-    
-    for i in range(1, len(preprocess_chunk)):
-        chunk = preprocess_chunk[i]
+import os
+import time
+from typing import Optional, List, Any
+from utils.config_management import load_config
+from utils.s3_storage import S3Utils
+from orchestrators.langgraph_follow_up import LanggraphFollowUpOrchestrator
+from utils.base64 import Base64Encoding
+from utils.emailservice import EmailService
+from utils.ELFLogging import logger
 
-        # Safety check
-        if not isinstance(chunk, dict):
-            print(f"Skipping index {i}: not a dict ->", type(chunk))
-            continue
 
-        metadata = {
-            "heading": chunk.get("heading"),
-            "subheading": chunk.get("subheading"),
-            "image_context": chunk.get("image_context", []),
-            "source": "10-K.html"
+# Simulate request payload
+user_id = "test_user"
+session_id = "test_session"
+files_selected = ["example_doc"]
+contexts_selected = None
+user_query = "What are the main points?"
+chat_history = []  # Or fill with history [{"user_query": "...", "llm_response": "..."}]
+query_type = "doc"
+encoding = True
+
+s3_util = S3Utils()
+
+os.makedirs(config["data"]["bm25_path"], exist_ok=True)
+os.makedirs(config["vectorstore"]["index_save_path"], exist_ok=True)
+
+for file in files_selected:
+    if not os.path.exists(f"""{config["data"]["bm25_path"]}/{file}_doc.pkl"""):
+        s3_util.download_file(
+            f"""{config["data"]["s3_folder"]}/Active/{config["project"]["usecase"]}/{file}_doc.pkl""",
+            f"""{config["data"]["bm25_path"]}/{file}_doc.pkl"""
+        )
+
+    if not os.path.exists(f"""{config["data"]["bm25_path"]}/{file}.pkl"""):
+        s3_util.download_file(
+            f"""{config["data"]["s3_folder"]}/Active/{config["project"]["usecase"]}/{file}.pkl""",
+            f"""{config["data"]["bm25_path"]}/{file}.pkl"""
+        )
+
+    if not os.path.exists(f"""{config["vectorstore"]["index_save_path"]}/docstore.pkl"""):
+        s3_util.download_file(
+            f"""{config["data"]["s3_folder"]}/Active/{config["project"]["usecase"]}/{file}/docstore.pkl""",
+            f"""{config["vectorstore"]["index_save_path"]}/docstore.pkl"""
+        )
+
+try:
+    start_time = time.time()
+    orchestrator = LanggraphFollowUpOrchestrator()
+    encoder = Base64Encoding()
+
+    # Initial state setup
+    orchestrator.initial_state['question'] = encoder.decode(encoder.encode(user_query))
+    orchestrator.initial_state['filename'] = files_selected
+    orchestrator.initial_state['contexts_selected'] = contexts_selected
+    orchestrator.initial_state['query_type'] = query_type
+    orchestrator.initial_state['pre_summary_flag'] = False
+    orchestrator.initial_state['k'] = 15
+    orchestrator.initial_state['return_flag'] = "query_output"
+    orchestrator.initial_state['chat_history'] = [
+        f"Query: {entry.get('user_query', '')}, Response: {entry.get('llm_response', '')}"
+        for entry in chat_history
+    ]
+
+    # Execute
+    result = orchestrator.execute()
+
+    # Format response
+    if isinstance(result['final_result'], list):
+        response_ = [r[2:] if r.startswith("- ") else r for r in result['final_result']]
+    else:
+        response_ = result['final_result']
+
+    if encoding:
+        llm_response = {
+            "response": encoder.encode(response_),
+            "sources": [{
+                "source_content": encoder.encode(result.get('retrieved_results', "")),
+                "source_title": "_".join(files_selected) + " -> " + result.get("node", ""),
+                "citation": encoder.encode(result.get('citation', "")),
+                "reasoning": encoder.encode(result.get('reasoning', ""))
+            }]
+        }
+    else:
+        llm_response = {
+            "response": response_,
+            "sources": [{
+                "source_content": result.get('retrieved_results', ""),
+                "source_title": "_".join(files_selected) + " -> " + result.get("node", ""),
+                "citation": result.get('citation', ""),
+                "reasoning": result.get('reasoning', "")
+            }]
         }
 
-        # Paragraph as one chunk
-        paragraph = chunk.get("paragraph", "").strip()
-        if paragraph:
-            doc = Document(
-                page_content=paragraph,
-                metadata=metadata.copy()
-            )
-            final_chunk.append(doc)
+    logger.info(f"Response generated in %.2f seconds", time.time() - start_time)
+    print(llm_response)
 
-        # Each table as separate chunk
-        for table in chunk.get("table", []):
-            table_str = "\n".join(["\t".join(row) for row in table])
-            table_doc = Document(
-                page_content=table_str,
-                metadata=metadata.copy()
-            )
-            final_chunk.append(table_doc)
-
-    # Wrap with filename
-    source_key = preprocess_chunk[0].get("source", "10-K.html")
-    return {source_key: final_chunk}
+except Exception as e:
+    EmailService().sendEmail(message=f"""Error raised in notebook test:
+    
+User ID: {user_id}
+Session ID: {session_id}
+Files Selected: {files_selected}
+Error: {str(e)}""")
+    raise
