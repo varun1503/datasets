@@ -1,19 +1,130 @@
-def get_dynamic_chunk_sizes(content):
-    total_len = len(content)
-    
-    if total_len <= 1024:
-        # Equal split for small content
-        part = total_len // 3
-        return [part, part, total_len - 2 * part]
-    
-    # Default dynamic chunk ratio
-    chunk_ratios = [4096, 2048, 1024]
-    total_ratio = sum(chunk_ratios)
-    
-    # Calculate each chunk size proportionally
-    chunk_sizes = [int((r / total_ratio) * total_len) for r in chunk_ratios]
-    
-    # Adjust last chunk to match total_len (fix rounding)
-    chunk_sizes[-1] = total_len - sum(chunk_sizes[:-1])
-    
-    return chunk_sizes
+from bs4 import BeautifulSoup
+import uuid
+import base64
+import re
+import requests
+
+
+class HTMLDataLoader:
+    def __init__(self):
+        self.section_counters = {}
+
+    def generate_id(self):
+        return str(uuid.uuid4())
+
+    def is_heading(self, tag):
+        return tag.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']
+
+    def get_level_from_tag(self, tag):
+        return int(tag.name[1]) if self.is_heading(tag) else 0
+
+    def extract_section_number_from_text(self, text):
+        text = text.strip()
+        match = re.match(r'^(\d+(\.\d+)*)', text)
+        return match.group(1) if match else None
+
+    def get_section_number(self, level):
+        self.section_counters[level] = self.section_counters.get(level, 0) + 1
+        # Reset deeper levels
+        for deeper in range(level + 1, 10):
+            self.section_counters.pop(deeper, None)
+        # Generate hierarchical section number
+        return ".".join(str(self.section_counters[i]) for i in sorted(self.section_counters) if i <= level)
+
+    def encode_image_from_url(self, url):
+        try:
+            response = requests.get(url)
+            if response.status_code == 200:
+                return base64.b64encode(response.content).decode('utf-8')
+        except Exception as e:
+            print(f"Image load failed: {url}", e)
+        return None
+
+    def extract_from_html(self, html_content):
+        soup = BeautifulSoup(html_content, 'html.parser')
+        ordered_content = []
+        parent_stack = []
+
+        def get_current_parent():
+            return parent_stack[-1] if parent_stack else None
+
+        for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'table', 'img']):
+            tag_name = tag.name
+            text = tag.get_text(strip=True)
+
+            if self.is_heading(tag):
+                level = self.get_level_from_tag(tag)
+                section_number = self.extract_section_number_from_text(text)
+                if not section_number:
+                    section_number = self.get_section_number(level)
+
+                heading_id = self.generate_id()
+                heading_item = {
+                    'id': heading_id,
+                    'type': 'heading',
+                    'text': f"{section_number} {text}" if section_number not in text else text,
+                    'section': section_number,
+                    'level': level,
+                    'source': 'html_doc',
+                    'child_ids': []
+                }
+
+                while parent_stack and parent_stack[-1]['level'] >= level:
+                    parent_stack.pop()
+                parent = get_current_parent()
+                heading_item['parent_id'] = parent['id'] if parent else None
+                if parent:
+                    parent['child_ids'].append(heading_id)
+
+                parent_stack.append(heading_item)
+                ordered_content.append(heading_item)
+
+            elif tag_name == 'p':
+                if text:
+                    para_id = self.generate_id()
+                    parent = get_current_parent()
+                    para_item = {
+                        'id': para_id,
+                        'type': 'paragraph',
+                        'text': text,
+                        'source': 'html_doc',
+                        'parent_id': parent['id'] if parent else None
+                    }
+                    if parent:
+                        parent['child_ids'].append(para_id)
+                    ordered_content.append(para_item)
+
+            elif tag_name == 'table':
+                table_id = self.generate_id()
+                parent = get_current_parent()
+                table_data = [[cell.get_text(strip=True) for cell in row.find_all(['td', 'th'])]
+                              for row in tag.find_all('tr')]
+                table_item = {
+                    'id': table_id,
+                    'type': 'table',
+                    'data': table_data,
+                    'source': 'html_doc',
+                    'parent_id': parent['id'] if parent else None
+                }
+                if parent:
+                    parent['child_ids'].append(table_id)
+                ordered_content.append(table_item)
+
+            elif tag_name == 'img':
+                image_id = self.generate_id()
+                image_url = tag.get('src')
+                base64_image = self.encode_image_from_url(image_url)
+                parent = get_current_parent()
+                image_item = {
+                    'id': image_id,
+                    'type': 'image',
+                    'label': f"Image_{image_id[:8]}",
+                    'source': 'html_doc',
+                    'image_context': base64_image,
+                    'parent_id': parent['id'] if parent else None
+                }
+                if parent:
+                    parent['child_ids'].append(image_id)
+                ordered_content.append(image_item)
+
+        return ordered_content
