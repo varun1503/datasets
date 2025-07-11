@@ -1,51 +1,41 @@
-def preprocess_content_chunks(content):
-    """
-    Groups content under one heading and one subheading.
-    Returns list of chunks, each as:
-    {
-        "heading": "...",
-        "subheading": "...",
-        "paragraph": "...",
-        "table": [...],
-        "image_context": [...]
-    }
-    """
-    id_to_item = {item['id']: item for item in content}
-    chunks = []
+from langchain.schema import Document
 
-    for item in content:
-        if item["type"] != "heading":
+def chunk_document(preprocess_chunk):
+    final_chunk = []
+    
+    for i in range(1, len(preprocess_chunk)):
+        chunk = preprocess_chunk[i]
+
+        # Safety check
+        if not isinstance(chunk, dict):
+            print(f"Skipping index {i}: not a dict ->", type(chunk))
             continue
 
-        level = item.get("level", 1)
-        heading_text = item["text"]
-        chunk = {
-            "heading": heading_text if level == 1 else None,
-            "subheading": heading_text if level > 1 else None,
-            "paragraph": "",
-            "table": [],
-            "image_context": []
+        metadata = {
+            "heading": chunk.get("heading"),
+            "subheading": chunk.get("subheading"),
+            "image_context": chunk.get("image_context", []),
+            "source": "10-K.html"
         }
 
-        # Traverse children
-        child_ids = item.get("child_ids", [])
-        for cid in child_ids:
-            child = id_to_item[cid]
-            ctype = child["type"]
+        # Paragraph as one chunk
+        paragraph = chunk.get("paragraph", "").strip()
+        if paragraph:
+            doc = Document(
+                page_content=paragraph,
+                metadata=metadata.copy()
+            )
+            final_chunk.append(doc)
 
-            if ctype == "paragraph":
-                chunk["paragraph"] += (child["text"].strip() + " ")
+        # Each table as separate chunk
+        for table in chunk.get("table", []):
+            table_str = "\n".join(["\t".join(row) for row in table])
+            table_doc = Document(
+                page_content=table_str,
+                metadata=metadata.copy()
+            )
+            final_chunk.append(table_doc)
 
-            elif ctype == "table":
-                chunk["table"].append(child["data"])
-
-            elif ctype == "image":
-                img_data = child.get("image_context")
-                if img_data:
-                    chunk["image_context"].append(img_data)
-
-        # Strip paragraph whitespace
-        chunk["paragraph"] = chunk["paragraph"].strip()
-        chunks.append(chunk)
-
-    return chunks
+    # Wrap with filename
+    source_key = preprocess_chunk[0].get("source", "10-K.html")
+    return {source_key: final_chunk}
