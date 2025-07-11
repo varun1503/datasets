@@ -1,119 +1,51 @@
-from bs4 import BeautifulSoup
-import uuid
-import base64
-import re
-import requests
+def preprocess_content_chunks(content):
+    """
+    Groups content under one heading and one subheading.
+    Returns list of chunks, each as:
+    {
+        "heading": "...",
+        "subheading": "...",
+        "paragraph": "...",
+        "table": [...],
+        "image_context": [...]
+    }
+    """
+    id_to_item = {item['id']: item for item in content}
+    chunks = []
 
-class TenKHTMLDataLoader:
-    def __init__(self):
-        pass  # No section_counters needed anymore
+    for item in content:
+        if item["type"] != "heading":
+            continue
 
-    def generate_id(self):
-        return str(uuid.uuid4())
+        level = item.get("level", 1)
+        heading_text = item["text"]
+        chunk = {
+            "heading": heading_text if level == 1 else None,
+            "subheading": heading_text if level > 1 else None,
+            "paragraph": "",
+            "table": [],
+            "image_context": []
+        }
 
-    def encode_image_from_url(self, url):
-        try:
-            response = requests.get(url)
-            if response.status_code == 200:
-                return base64.b64encode(response.content).decode('utf-8')
-        except:
-            return None
-        return None
+        # Traverse children
+        child_ids = item.get("child_ids", [])
+        for cid in child_ids:
+            child = id_to_item[cid]
+            ctype = child["type"]
 
-    def is_10k_heading(self, tag):
-        text = tag.get_text(strip=True)
-        if not text:
-            return False
-        if re.match(r'item\s+\d+[a-zA-Z]?\.', text, re.IGNORECASE):
-            return True
-        if text.isupper() and len(text.split()) <= 10 and len(text) > 5:
-            return True
-        return False
+            if ctype == "paragraph":
+                chunk["paragraph"] += (child["text"].strip() + " ")
 
-    def extract_from_html(self, html_content):
-        soup = BeautifulSoup(html_content, 'html.parser')
-        ordered_content = []
-        parent_stack = []
+            elif ctype == "table":
+                chunk["table"].append(child["data"])
 
-        def get_current_parent():
-            return parent_stack[-1] if parent_stack else None
+            elif ctype == "image":
+                img_data = child.get("image_context")
+                if img_data:
+                    chunk["image_context"].append(img_data)
 
-        for tag in soup.find_all(['p', 'table', 'img']):
-            text = tag.get_text(strip=True)
-            tag_name = tag.name
+        # Strip paragraph whitespace
+        chunk["paragraph"] = chunk["paragraph"].strip()
+        chunks.append(chunk)
 
-            # --- Heading Detection for 10-K ---
-            if self.is_10k_heading(tag):
-                heading_id = self.generate_id()
-                heading_item = {
-                    'id': heading_id,
-                    'type': 'heading',
-                    'text': text,
-                    'source': '10k_html',
-                    'child_ids': []
-                }
-
-                # Pop parents only based on tag order (not levels)
-                while parent_stack:
-                    parent_stack.pop()
-
-                parent = get_current_parent()
-                heading_item['parent_id'] = parent['id'] if parent else None
-                if parent:
-                    parent['child_ids'].append(heading_id)
-
-                parent_stack.append(heading_item)
-                ordered_content.append(heading_item)
-                continue
-
-            # --- Paragraph ---
-            if tag_name == 'p' and text:
-                para_id = self.generate_id()
-                parent = get_current_parent()
-                para_item = {
-                    'id': para_id,
-                    'type': 'paragraph',
-                    'text': text,
-                    'source': '10k_html',
-                    'parent_id': parent['id'] if parent else None
-                }
-                if parent:
-                    parent['child_ids'].append(para_id)
-                ordered_content.append(para_item)
-
-            # --- Table ---
-            elif tag_name == 'table':
-                table_id = self.generate_id()
-                parent = get_current_parent()
-                table_data = [[cell.get_text(strip=True) for cell in row.find_all(['td', 'th'])]
-                              for row in tag.find_all('tr')]
-                table_item = {
-                    'id': table_id,
-                    'type': 'table',
-                    'data': table_data,
-                    'source': '10k_html',
-                    'parent_id': parent['id'] if parent else None
-                }
-                if parent:
-                    parent['child_ids'].append(table_id)
-                ordered_content.append(table_item)
-
-            # --- Image ---
-            elif tag_name == 'img':
-                image_id = self.generate_id()
-                image_url = tag.get('src')
-                base64_img = self.encode_image_from_url(image_url)
-                parent = get_current_parent()
-                image_item = {
-                    'id': image_id,
-                    'type': 'image',
-                    'label': f"Image_{image_id[:8]}",
-                    'source': '10k_html',
-                    'image_context': base64_img,
-                    'parent_id': parent['id'] if parent else None
-                }
-                if parent:
-                    parent['child_ids'].append(image_id)
-                ordered_content.append(image_item)
-
-        return ordered_content
+    return chunks
