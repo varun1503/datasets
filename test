@@ -1,105 +1,73 @@
-
+from fastapi import FastAPI, Request, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from datetime import datetime
+import asyncio
+import logging
 import os
-import time
-from typing import Optional, List, Any
-from utils.config_management import load_config
-from utils.s3_storage import S3Utils
-from orchestrators.langgraph_follow_up import LanggraphFollowUpOrchestrator
-from utils.base64 import Base64Encoding
-from utils.emailservice import EmailService
-from utils.ELFLogging import logger
 
+# Optional: Load environment variables if using a .env file
+# from dotenv import load_dotenv
+# load_dotenv()
 
-# Simulate request payload
-user_id = "test_user"
-session_id = "test_session"
-files_selected = ["example_doc"]
-contexts_selected = None
-user_query = "What are the main points?"
-chat_history = []  # Or fill with history [{"user_query": "...", "llm_response": "..."}]
-query_type = "doc"
-encoding = True
+# === Timestamp ===
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-s3_util = S3Utils()
+# === Logger Setup ===
+logger = logging.getLogger("uvicorn.access")
+logger.setLevel(logging.INFO)
 
-os.makedirs(config["data"]["bm25_path"], exist_ok=True)
-os.makedirs(config["vectorstore"]["index_save_path"], exist_ok=True)
+# Avoid duplicate handlers
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
 
-for file in files_selected:
-    if not os.path.exists(f"""{config["data"]["bm25_path"]}/{file}_doc.pkl"""):
-        s3_util.download_file(
-            f"""{config["data"]["s3_folder"]}/Active/{config["project"]["usecase"]}/{file}_doc.pkl""",
-            f"""{config["data"]["bm25_path"]}/{file}_doc.pkl"""
-        )
+logger.info(f"App starting at {timestamp}")
 
-    if not os.path.exists(f"""{config["data"]["bm25_path"]}/{file}.pkl"""):
-        s3_util.download_file(
-            f"""{config["data"]["s3_folder"]}/Active/{config["project"]["usecase"]}/{file}.pkl""",
-            f"""{config["data"]["bm25_path"]}/{file}.pkl"""
-        )
+# === FastAPI App ===
+app = FastAPI(title="Data Preprocessing API")
 
-    if not os.path.exists(f"""{config["vectorstore"]["index_save_path"]}/docstore.pkl"""):
-        s3_util.download_file(
-            f"""{config["data"]["s3_folder"]}/Active/{config["project"]["usecase"]}/{file}/docstore.pkl""",
-            f"""{config["vectorstore"]["index_save_path"]}/docstore.pkl"""
-        )
+# === CORS Middleware ===
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-try:
-    start_time = time.time()
-    orchestrator = LanggraphFollowUpOrchestrator()
-    encoder = Base64Encoding()
+# === Request Logging Middleware ===
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    if request.url.path != "/gdhahealthcheck":
+        logger.info(f"Request: {request.method} {request.url}")
 
-    # Initial state setup
-    orchestrator.initial_state['question'] = encoder.decode(encoder.encode(user_query))
-    orchestrator.initial_state['filename'] = files_selected
-    orchestrator.initial_state['contexts_selected'] = contexts_selected
-    orchestrator.initial_state['query_type'] = query_type
-    orchestrator.initial_state['pre_summary_flag'] = False
-    orchestrator.initial_state['k'] = 15
-    orchestrator.initial_state['return_flag'] = "query_output"
-    orchestrator.initial_state['chat_history'] = [
-        f"Query: {entry.get('user_query', '')}, Response: {entry.get('llm_response', '')}"
-        for entry in chat_history
-    ]
+    response = await call_next(request)
 
-    # Execute
-    result = orchestrator.execute()
+    if request.url.path != "/gdhahealthcheck":
+        logger.info(f"STATUS_CODE: {response.status_code}")
+        if os.getenv("APP_ENV") != "20":
+            await asyncio.to_thread(logger.handlers[0].flush)  # force flush
 
-    # Format response
-    if isinstance(result['final_result'], list):
-        response_ = [r[2:] if r.startswith("- ") else r for r in result['final_result']]
-    else:
-        response_ = result['final_result']
+    return response
 
-    if encoding:
-        llm_response = {
-            "response": encoder.encode(response_),
-            "sources": [{
-                "source_content": encoder.encode(result.get('retrieved_results', "")),
-                "source_title": "_".join(files_selected) + " -> " + result.get("node", ""),
-                "citation": encoder.encode(result.get('citation', "")),
-                "reasoning": encoder.encode(result.get('reasoning', ""))
-            }]
-        }
-    else:
-        llm_response = {
-            "response": response_,
-            "sources": [{
-                "source_content": result.get('retrieved_results', ""),
-                "source_title": "_".join(files_selected) + " -> " + result.get("node", ""),
-                "citation": result.get('citation', ""),
-                "reasoning": result.get('reasoning', "")
-            }]
-        }
+# === Mount Error Handlers & Include Routers ===
+from app.core.error_handling import mount_error_handling
+from app.core.client import HTTPClient
+from app.routers import get_routers  # assuming get_routers is defined in app/routers
 
-    logger.info(f"Response generated in %.2f seconds", time.time() - start_time)
-    print(llm_response)
+mount_error_handling(app)
 
-except Exception as e:
-    EmailService().sendEmail(message=f"""Error raised in notebook test:
-    
-User ID: {user_id}
-Session ID: {session_id}
-Files Selected: {files_selected}
-Error: {str(e)}""")
-    raise
+client = Depends(HTTPClient.get_client)
+for router in get_routers():
+    app.include_router(router(client))
+
+# === Root Endpoint ===
+@app.get("/")
+async def root() -> JSONResponse:
+    """Root endpoint for the application."""
+    return JSONResponse(content={"message": "Hello World"})
+
+print('app/main.py: app created successfully! Swagger UI available at /docs and /redoc.')
