@@ -1,73 +1,19 @@
-from fastapi import FastAPI, Request, Depends
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from datetime import datetime
-import asyncio
-import logging
-import os
+Sure! Here's a clearer and more structured rephrasing of your statement:
 
-# Optional: Load environment variables if using a .env file
-# from dotenv import load_dotenv
-# load_dotenv()
 
-# === Timestamp ===
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+---
 
-# === Logger Setup ===
-logger = logging.getLogger("uvicorn.access")
-logger.setLevel(logging.INFO)
+We updated the AutoMerger logic by integrating the NLTK sentence splitter and introduced a dynamic chunking strategy. This ensures that each section, heading, and subheading remains grouped together within the same parent chunk.
 
-# Avoid duplicate handlers
-if not logger.handlers:
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
+If the parent chunk length is less than 1000 characters, we retain it as a single chunk (no further splitting).
 
-logger.info(f"App starting at {timestamp}")
+If it's greater than 1000, we apply a ratio-based splitting using the proportions [4:2:1] to divide the content into smaller subchunks.
 
-# === FastAPI App ===
-app = FastAPI(title="Data Preprocessing API")
 
-# === CORS Middleware ===
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+This approach improves coherence and preserves logical grouping of content while ensuring optimal chunk size for downstream processing.
 
-# === Request Logging Middleware ===
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    if request.url.path != "/gdhahealthcheck":
-        logger.info(f"Request: {request.method} {request.url}")
 
-    response = await call_next(request)
+---
 
-    if request.url.path != "/gdhahealthcheck":
-        logger.info(f"STATUS_CODE: {response.status_code}")
-        if os.getenv("APP_ENV") != "20":
-            await asyncio.to_thread(logger.handlers[0].flush)  # force flush
+Let me know if you want this framed for documentation, presentation, or code comments.
 
-    return response
-
-# === Mount Error Handlers & Include Routers ===
-from app.core.error_handling import mount_error_handling
-from app.core.client import HTTPClient
-from app.routers import get_routers  # assuming get_routers is defined in app/routers
-
-mount_error_handling(app)
-
-client = Depends(HTTPClient.get_client)
-for router in get_routers():
-    app.include_router(router(client))
-
-# === Root Endpoint ===
-@app.get("/")
-async def root() -> JSONResponse:
-    """Root endpoint for the application."""
-    return JSONResponse(content={"message": "Hello World"})
-
-print('app/main.py: app created successfully! Swagger UI available at /docs and /redoc.')
