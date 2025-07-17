@@ -1,19 +1,122 @@
-Sure! Here's a clearer and more structured rephrasing of your statement:
+Based on your screenshots and uploaded files, here's a step-by-step model lifecycle journey in your application (MRMG – Model Validation Assist) for AMEX. This outlines the full flow from adding a model to generating a validation report:
 
 
 ---
 
-We updated the AutoMerger logic by integrating the NLTK sentence splitter and introduced a dynamic chunking strategy. This ensures that each section, heading, and subheading remains grouped together within the same parent chunk.
+🔹 Step 1: Add a Model
 
-If the parent chunk length is less than 1000 characters, we retain it as a single chunk (no further splitting).
+📍 Screen Reference: First screenshot
 
-If it's greater than 1000, we apply a ratio-based splitting using the proportions [4:2:1] to divide the content into smaller subchunks.
+Navigate to Model Management.
+
+Click on “+ Add Model”.
+
+Enter the following:
+
+Model Name (e.g., Ask Amex Bot)
+
+EMM ID
+
+Version ID
+
+Version
+
+Market
 
 
-This approach improves coherence and preserves logical grouping of content while ensuring optimal chunk size for downstream processing.
+Use the ✏️ (Edit) or 🗑 (Delete) buttons for actions on existing models.
+
 
 
 ---
 
-Let me know if you want this framed for documentation, presentation, or code comments.
+🔹 Step 2: Register a Model
+
+📍 Screen Reference: Second screenshot (Register a Model)
+
+Click on a model entry to register detailed information.
+
+Fill in:
+
+Model ID and Model Name
+
+Market (e.g., Maxico [Mexico])
+
+Model Version
+
+Model Category, Model Owner Group
+
+Lead Validator, Local Bank Impact Category
+
+Business Line
+
+Validators
+
+
+Finally, click ✅ Save to submit or 🗑 Delete to discard.
+
+
+
+---
+
+🔹 Step 3: Toll Gating Assist – Model Doc Completeness Check
+
+📍 Screen Reference: Third screenshot
+
+Navigate to Toll Gating Assist.
+
+Fill in the following:
+
+Model ID, Version, Market
+
+Select Business Process, Scope, and Market
+
+
+Upload required documents:
+
+Validation Checklist
+
+Model Documentation
+
+
+
+
+---
+
+🔹 Step 4: Validation Report Automation
+
+📍 Screen Reference: Fourth screenshot
+
+Navigate to Validation Report Automation.
+
+Select:
+
+Model ID, Version, Market
+
+Business Process, Scope, and Market
+
+
+Upload supporting documents:
+
+RFR DOC
+
+Findings
+
+Model DOC
+
+
+Click Generate Report to complete the validation report creation.
+
+
+
+---
+
+✅ Final Outcome:
+
+You now have a fully documented, validated, and tracked model with reports ready for review or audit.
+
+
+---
+
+Would you like a downloadable PDF or flowchart of this journey for sharing or documentation purposes?
 
