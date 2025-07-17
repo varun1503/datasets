@@ -1,28 +1,13 @@
-import re
-
-def is_caption(text):
-    return bool(re.match(r'^\s*(Figure|Fig\.?)\s*\d+[:.\s-]', text, re.IGNORECASE))
-
-...
-
-# Inside your image loop
-image_caption = None
-
-# Check previous and next paragraphs for possible caption
-prev_para = paragraph_list[i - 1].text if i > 0 else ''
-next_para = paragraph_list[i + 1].text if i < len(paragraph_list) - 1 else ''
-
-if is_caption(prev_para):
-    image_caption = prev_para.strip()
-elif is_caption(next_para):
-    image_caption = next_para.strip()
-
-image_item = {
-    'id': image_id,
-    'type': 'image',
-    'label': image_label,
-    'source': file_name,
-    'image_context': llm_output if llm_output else "None",
-    'caption': image_caption,
-    'parent_id': parent['id'] if parent else None
-}
+def find_caption(all_paragraphs, current_para_idx):
+    caption_keywords = ["figure", "fig", "image", "table", "exhibit", "chart", "graph"]
+    # Try previous paragraph
+    if current_para_idx > 0:
+        prev_text = all_paragraphs[current_para_idx - 1].text.strip()
+        if any(kw in prev_text.lower() for kw in caption_keywords):
+            return prev_text
+    # Try next paragraph
+    if current_para_idx + 1 < len(all_paragraphs):
+        next_text = all_paragraphs[current_para_idx + 1].text.strip()
+        if any(kw in next_text.lower() for kw in caption_keywords):
+            return next_text
+    return ""
