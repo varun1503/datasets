@@ -1,102 +1,44 @@
-class preprocessing:
-    def __init__(self):
-        self.config = load_config()
-        self.s3_object = S3Utils()
+def is_image_caption(text):
+    import re
+    if not text:
+        return False
+    pattern = re.compile(
+        r'^\s*(figure|fig\.?)\s*\d+.*',  # Flexible pattern: "Figure 2.1...", "Fig 4 ..." etc
+        re.IGNORECASE
+    )
+    return bool(pattern.match(text.strip()))
 
-    def preprocess_content_chunks(self, content, max_chunk_len=5000):
-        preprocess_chunk = []
-        current_paragraph = ""
-        current_source = content[0].get("source", None)
-        current_heading = None
-        current_subheading = None
-        subsection = None
-        section = None
-        current_tables = []
-        current_image_contexts = []
-        current_caption = []
-        tmrc_checklist = None
-        last_was_heading = False  # True if last item was a heading/subheading
+# Before your main for-loop, collect all paragraphs in order:
+all_paras = []
+for child in body.iterchildren():
+    if child.tag == qn('w:p'):
+        all_paras.append(child)
 
-        def flush_chunk():
-            nonlocal current_paragraph, current_tables, current_image_contexts, tmrc_checklist, current_caption
-            if (current_paragraph.strip() or current_tables or current_image_contexts or tmrc_checklist or current_caption):
-                chunk = {
-                    "heading": current_heading,
-                    "subheading": current_subheading,
-                    "section": section,
-                    "subsection": subsection,
-                    "paragraph": current_paragraph.strip() if current_paragraph.strip() else None,
-                    "table": current_tables if current_tables else None,
-                    "image_context": current_image_contexts if current_image_contexts else None,
-                    "caption": current_caption if current_caption else None,
-                    "tmrc_checklist": tmrc_checklist if tmrc_checklist else None,
-                    "Source": current_source
-                }
-                preprocess_chunk.append(chunk)
-            # Reset for next chunk
-            current_paragraph = ""
-            current_tables = []
-            current_image_contexts = []
-            current_caption = []
-            tmrc_checklist = None
+# Now in your main loop...
+para_idx = -1
+for idx, child in enumerate(body.iterchildren()):
+    tag = child.tag
 
-        for item in content:
-            item_type = item.get("type")
-            current_source = item.get("source", None)
+    # update paragraph index if it's a paragraph
+    if tag == qn('w:p'):
+        para_idx += 1
 
-            # --- Heading Level 1 ---
-            if item_type == "heading" and item.get("level") == 1:
-                flush_chunk()
-                current_heading = item.get("text")
-                current_subheading = None
-                section = item.get("section")
-                subsection = None
-                last_was_heading = True
+    # Image block
+    for drawing in child.findall('.//w:drawing', namespaces=NSMAP):
+        blip = drawing.find('.//a:blip', namespaces=NSMAP)
+        if blip is not None:
+            # ... your usual image extraction logic ...
 
-            # --- Heading Level 2 ---
-            elif item_type == "heading" and item.get("level") == 2:
-                flush_chunk()
-                current_subheading = item.get("text")
-                subsection = item.get("section")
-                last_was_heading = True
-
-            # --- Paragraph ---
-            elif item_type == "paragraph":
-                text = item.get("text", "").strip()
-                if not text:
-                    continue
-                # if len(current_paragraph + " " + text) > max_chunk_len:
-                #     flush_chunk()
-                current_paragraph += " " + text
-                last_was_heading = False
-
-            # --- Table ---
-            elif item_type == "table":
-                if last_was_heading and tmrc_checklist is None:
-                    tmrc_checklist = item.get("data", [])
-                    last_was_heading = False
-                else:
-                    current_tables.append(item.get("data", []))
-
-            # --- Image ---
-            elif item_type == "image":
-                context = item.get("image_context", "")
-                caption = item.get("caption", "")
-                if caption and caption.strip():
-                    current_caption.append(caption.strip())
-                if context and context.strip():
-                    current_image_contexts.append(context.strip())
-                last_was_heading = False
-
-        flush_chunk()
-
-        # Post-processing: convert single-item lists to string, and empty lists to None
-        for chunk in preprocess_chunk:
-            for k in ["image_context", "caption", "table"]:
-                if isinstance(chunk[k], list):
-                    if not chunk[k]:
-                        chunk[k] = None
-                    elif len(chunk[k]) == 1:
-                        chunk[k] = chunk[k][0]
-
-        return preprocess_chunk
+            # Caption logic:
+            caption = None
+            # Check previous paragraph
+            if para_idx > 0:
+                prev_para = Paragraph(all_paras[para_idx-1], doc)
+                if is_image_caption(prev_para.text):
+                    caption = prev_para.text.strip()
+            # If not found, check next paragraph
+            if not caption and para_idx+1 < len(all_paras):
+                next_para = Paragraph(all_paras[para_idx+1], doc)
+                if is_image_caption(next_para.text):
+                    caption = next_para.text.strip()
+            # Add 'caption' key to your image item
