@@ -1,122 +1,28 @@
-Based on your screenshots and uploaded files, here's a step-by-step model lifecycle journey in your application (MRMG – Model Validation Assist) for AMEX. This outlines the full flow from adding a model to generating a validation report:
-
-
----
-
-🔹 Step 1: Add a Model
-
-📍 Screen Reference: First screenshot
-
-Navigate to Model Management.
-
-Click on “+ Add Model”.
-
-Enter the following:
-
-Model Name (e.g., Ask Amex Bot)
-
-EMM ID
-
-Version ID
-
-Version
-
-Market
-
-
-Use the ✏️ (Edit) or 🗑 (Delete) buttons for actions on existing models.
-
-
-
----
-
-🔹 Step 2: Register a Model
-
-📍 Screen Reference: Second screenshot (Register a Model)
-
-Click on a model entry to register detailed information.
-
-Fill in:
-
-Model ID and Model Name
-
-Market (e.g., Maxico [Mexico])
-
-Model Version
-
-Model Category, Model Owner Group
-
-Lead Validator, Local Bank Impact Category
-
-Business Line
-
-Validators
-
-
-Finally, click ✅ Save to submit or 🗑 Delete to discard.
-
-
-
----
-
-🔹 Step 3: Toll Gating Assist – Model Doc Completeness Check
-
-📍 Screen Reference: Third screenshot
-
-Navigate to Toll Gating Assist.
-
-Fill in the following:
-
-Model ID, Version, Market
-
-Select Business Process, Scope, and Market
-
-
-Upload required documents:
-
-Validation Checklist
-
-Model Documentation
-
-
-
-
----
-
-🔹 Step 4: Validation Report Automation
-
-📍 Screen Reference: Fourth screenshot
-
-Navigate to Validation Report Automation.
-
-Select:
-
-Model ID, Version, Market
-
-Business Process, Scope, and Market
-
-
-Upload supporting documents:
-
-RFR DOC
-
-Findings
-
-Model DOC
-
-
-Click Generate Report to complete the validation report creation.
-
-
-
----
-
-✅ Final Outcome:
-
-You now have a fully documented, validated, and tracked model with reports ready for review or audit.
-
-
----
-
-Would you like a downloadable PDF or flowchart of this journey for sharing or documentation purposes?
-
+import re
+
+def is_caption(text):
+    return bool(re.match(r'^\s*(Figure|Fig\.?)\s*\d+[:.\s-]', text, re.IGNORECASE))
+
+...
+
+# Inside your image loop
+image_caption = None
+
+# Check previous and next paragraphs for possible caption
+prev_para = paragraph_list[i - 1].text if i > 0 else ''
+next_para = paragraph_list[i + 1].text if i < len(paragraph_list) - 1 else ''
+
+if is_caption(prev_para):
+    image_caption = prev_para.strip()
+elif is_caption(next_para):
+    image_caption = next_para.strip()
+
+image_item = {
+    'id': image_id,
+    'type': 'image',
+    'label': image_label,
+    'source': file_name,
+    'image_context': llm_output if llm_output else "None",
+    'caption': image_caption,
+    'parent_id': parent['id'] if parent else None
+}
