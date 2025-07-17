@@ -3,42 +3,7 @@ def is_image_caption(text):
     if not text:
         return False
     pattern = re.compile(
-        r'^\s*(figure|fig\.?)\s*\d+.*',  # Flexible pattern: "Figure 2.1...", "Fig 4 ..." etc
+        r'^\s*(figure|fig\.?)\s*[:.\-]?\s*.+',  # matches "Figure: Caption", "Fig. Caption", etc.
         re.IGNORECASE
     )
     return bool(pattern.match(text.strip()))
-
-# Before your main for-loop, collect all paragraphs in order:
-all_paras = []
-for child in body.iterchildren():
-    if child.tag == qn('w:p'):
-        all_paras.append(child)
-
-# Now in your main loop...
-para_idx = -1
-for idx, child in enumerate(body.iterchildren()):
-    tag = child.tag
-
-    # update paragraph index if it's a paragraph
-    if tag == qn('w:p'):
-        para_idx += 1
-
-    # Image block
-    for drawing in child.findall('.//w:drawing', namespaces=NSMAP):
-        blip = drawing.find('.//a:blip', namespaces=NSMAP)
-        if blip is not None:
-            # ... your usual image extraction logic ...
-
-            # Caption logic:
-            caption = None
-            # Check previous paragraph
-            if para_idx > 0:
-                prev_para = Paragraph(all_paras[para_idx-1], doc)
-                if is_image_caption(prev_para.text):
-                    caption = prev_para.text.strip()
-            # If not found, check next paragraph
-            if not caption and para_idx+1 < len(all_paras):
-                next_para = Paragraph(all_paras[para_idx+1], doc)
-                if is_image_caption(next_para.text):
-                    caption = next_para.text.strip()
-            # Add 'caption' key to your image item
