@@ -1,9 +1,38 @@
-def is_image_caption(text):
-    import re
+
+if tag == qn('w:p'):
+    para = Paragraph(child, doc)
+    text = para.text.strip()
+    style = para.style.name if para.style else ""
+
     if not text:
-        return False
-    pattern = re.compile(
-        r'^\s*(figure|fig\.?)\s*[:.\-]?\s*.+',  # matches "Figure: Caption", "Fig. Caption", etc.
-        re.IGNORECASE
-    )
-    return bool(pattern.match(text.strip()))
+        continue
+
+    # Handle TOC styles
+    if style.lower().startswith("toc"):
+        if not toc_heading_added:
+            toc_heading_id = self.generate_id()
+            toc_parent = {
+                "id": toc_heading_id,
+                "type": "heading",
+                "text": "Table of Contents",
+                "section": "0",
+                "level": 0,
+                "source": file_name,
+                "child_ids": [],
+                "parent_id": None
+            }
+            ordered_content.append(toc_parent)
+            parent_stack.append(toc_parent)
+            toc_heading_added = True
+
+        para_id = self.generate_id()
+        para_item = {
+            "id": para_id,
+            "type": "paragraph",
+            "text": text,
+            "source": file_name,
+            "parent_id": toc_parent["id"]
+        }
+        toc_parent["child_ids"].append(para_id)
+        ordered_content.append(para_item)
+        continue
