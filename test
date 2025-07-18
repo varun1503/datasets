@@ -1,38 +1,243 @@
+import os
+import re
+import uuid
+import base64
+import tempfile
+from pathlib import Path
+from docx import Document
+from docx.oxml.ns import qn
+from docx.text.paragraph import Paragraph
+from docx.table import Table
+from app.services.settings.env_config import config
+from app.services.prompt.image_prompt import Prompt
+from app.utils.s3_storage import S3Utils
+from app.services.llm.modelcall import model_invoke
+from app.utils.table_parser import TableParser
 
-if tag == qn('w:p'):
-    para = Paragraph(child, doc)
-    text = para.text.strip()
-    style = para.style.name if para.style else ""
+NSMAP = {
+    'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+    'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
+    'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+}
 
-    if not text:
-        continue
+class DataLoader:
+    def __init__(self):
+        self.config = config
+        self.section_counters = {}
+        self.model_call_count = 0
 
-    # Handle TOC styles
-    if style.lower().startswith("toc"):
-        if not toc_heading_added:
-            toc_heading_id = self.generate_id()
-            toc_parent = {
-                "id": toc_heading_id,
-                "type": "heading",
-                "text": "Table of Contents",
-                "section": "0",
-                "level": 0,
-                "source": file_name,
-                "child_ids": [],
-                "parent_id": None
-            }
-            ordered_content.append(toc_parent)
-            parent_stack.append(toc_parent)
-            toc_heading_added = True
+    def generate_id(self):
+        return str(uuid.uuid4())
 
-        para_id = self.generate_id()
-        para_item = {
-            "id": para_id,
-            "type": "paragraph",
-            "text": text,
-            "source": file_name,
-            "parent_id": toc_parent["id"]
-        }
-        toc_parent["child_ids"].append(para_id)
-        ordered_content.append(para_item)
-        continue
+    def encode_image(self, image_path):
+        with open(image_path, "rb") as f:
+            return base64.b64encode(f.read()).decode("utf-8")
+
+    def s3_object_read(self, s3_file):
+        s3_obj = S3Utils()
+        temp_dir = tempfile.gettempdir()
+        data_dir = os.path.join(temp_dir, "s3_temp_data")
+        os.makedirs(data_dir, exist_ok=True)
+        local_file_path = os.path.join(data_dir, os.path.basename(s3_file))
+        s3_obj.download_file(s3_file, local_file_path)
+        return local_file_path
+
+    def is_heading(self, para: Paragraph):
+        text = para.text.strip()
+        style = para.style.name.lower() if para.style else ""
+        if not text:
+            return False
+        if style.startswith("heading") or style.startswith("level") or style.startswith("body heading"):
+            return True
+        if re.match(r"^(\d+\.)+(\s*)", text): return True
+        if re.match(r"^section\s+\d+", text.lower()): return True
+        return False
+
+    def extract_section_number_from_text(self, text):
+        match = re.match(r"^((\d+\.)+\d*)", text.strip())
+        return match.group(1) if match else None
+
+    def get_level_from_section_number(self, section_number):
+        return section_number.count(".")
+
+    def get_section_number(self, level):
+        self.section_counters.setdefault(level, 0)
+        self.section_counters[level] += 1
+        return ".".join(str(self.section_counters.get(i, 0)) for i in range(level + 1))
+
+    def is_image_caption(self, text):
+        if not text:
+            return False
+        return bool(re.match(r'^\s*(figure|fig\.?)\s*[:.\-]?\s*.+', text.strip(), re.IGNORECASE))
+
+    def docx_extraction(self, local_file_path, save_images=False, image_output_dir='images'):
+        doc = Document(local_file_path)
+        file_name = os.path.basename(local_file_path)
+        body = doc._element.body
+        ordered_content = []
+        parent_stack = []
+        last_paragraph = ""
+        toc_heading_id = None
+
+        if save_images:
+            os.makedirs(image_output_dir, exist_ok=True)
+
+        def get_current_parent():
+            return parent_stack[-1] if parent_stack else None
+
+        for child in body.iterchildren():
+            tag = child.tag
+
+            if tag == qn('w:p'):
+                para = Paragraph(child, doc)
+                text = para.text.strip()
+                style = para.style.name if para.style else ""
+                last_paragraph = text
+
+                # --- TOC Handling ---
+                if style.lower().startswith("toc"):
+                    if not toc_heading_id:
+                        heading_id = self.generate_id()
+                        heading_item = {
+                            "id": heading_id,
+                            "type": "heading",
+                            "text": "TOC Heading",
+                            "section": None,
+                            "level": 0,
+                            "source": file_name,
+                            "child_ids": [],
+                            "parent_id": None
+                        }
+                        parent_stack.append(heading_item)
+                        ordered_content.append(heading_item)
+                        toc_heading_id = heading_id
+
+                    para_id = self.generate_id()
+                    para_item = {
+                        "id": para_id,
+                        "type": "paragraph",
+                        "text": text,
+                        "source": file_name,
+                        "parent_id": toc_heading_id
+                    }
+                    ordered_content.append(para_item)
+                    parent_stack[-1]["child_ids"].append(para_id)
+                    continue
+
+                # --- Heading ---
+                is_heading = self.is_heading(para)
+                if is_heading:
+                    section_number = self.extract_section_number_from_text(text)
+                    if section_number:
+                        level = self.get_level_from_section_number(section_number)
+                    elif style.lower().startswith("heading"):
+                        level_str = style.lower().replace("heading", "").strip()
+                        if not level_str.isdigit(): continue
+                        level = int(level_str)
+                        section_number = self.get_section_number(level)
+                    else:
+                        parent = get_current_parent()
+                        level = parent["level"] + 1 if parent else 1
+                        section_number = self.get_section_number(level)
+
+                    heading_id = self.generate_id()
+                    heading_item = {
+                        "id": heading_id,
+                        "type": "heading",
+                        "text": f"{section_number} {text}" if section_number not in text else text,
+                        "section": section_number,
+                        "level": level,
+                        "source": file_name,
+                        "child_ids": []
+                    }
+
+                    while parent_stack and parent_stack[-1]["level"] >= level:
+                        parent_stack.pop()
+
+                    parent = get_current_parent()
+                    heading_item["parent_id"] = parent["id"] if parent else None
+                    if parent:
+                        parent["child_ids"].append(heading_id)
+
+                    parent_stack.append(heading_item)
+                    ordered_content.append(heading_item)
+                    continue
+
+                # --- Normal Paragraph ---
+                para_id = self.generate_id()
+                parent = get_current_parent()
+                para_item = {
+                    "id": para_id,
+                    "type": "paragraph",
+                    "text": text,
+                    "source": file_name,
+                    "parent_id": parent["id"] if parent else None
+                }
+                if parent:
+                    parent["child_ids"].append(para_id)
+                ordered_content.append(para_item)
+
+            # --- Embedded Images ---
+            for drawing in child.findall('.//w:drawing', namespaces=NSMAP):
+                blip = drawing.find('.//a:blip', namespaces=NSMAP)
+                if blip is not None:
+                    r_embed = blip.attrib.get(qn('r:embed'))
+                    image_part = doc.part.related_parts.get(r_embed)
+                    if not image_part:
+                        continue
+
+                    ext = image_part.content_type.split("/")[-1].lower()
+                    if ext not in ["png", "jpeg", "jpg"]:
+                        continue
+
+                    caption = last_paragraph if self.is_image_caption(last_paragraph) else ""
+                    image_id = self.generate_id()
+                    image_label = f"Image_{image_id[:8]}"
+                    llm_output = None
+
+                    if save_images:
+                        image_path = os.path.join(image_output_dir, f"{image_label}.{ext}")
+                        with open(image_path, "wb") as f:
+                            f.write(image_part.blob)
+
+                        base64_image = self.encode_image(image_path)
+                        prompt_image = Prompt().image_insight_prompt()
+                        input_nodes = {"base_64_encoded_image": base64_image}
+                        self.model_call_count += 1
+                        if self.model_call_count % 10 == 0:
+                            time.sleep(5)
+                        llm_output = model_invoke().model_call("3", prompt_image, input_nodes)
+
+                    parent = get_current_parent()
+                    image_item = {
+                        "id": image_id,
+                        "type": "image",
+                        "label": image_label,
+                        "caption": caption,
+                        "source": file_name,
+                        "image_context": llm_output if llm_output else "None",
+                        "parent_id": parent["id"] if parent else None
+                    }
+                    if parent:
+                        parent["child_ids"].append(image_id)
+                    ordered_content.append(image_item)
+
+            # --- Table ---
+            if tag == qn('w:tbl'):
+                table_obj = Table(child, doc)
+                table_parser = TableParser()
+                table_data = table_parser.parse_with_merged_cells(table_obj)
+                table_id = self.generate_id()
+                parent = get_current_parent()
+                table_item = {
+                    "id": table_id,
+                    "type": "table",
+                    "data": table_data,
+                    "source": file_name,
+                    "parent_id": parent["id"] if parent else None
+                }
+                if parent:
+                    parent["child_ids"].append(table_id)
+                ordered_content.append(table_item)
+
+        return ordered_content
