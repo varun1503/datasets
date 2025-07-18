@@ -1,96 +1,15 @@
-def preprocess_content_chunks(self, content, max_chunk_len=5000):
-    preprocess_chunk = []
-    current_paragraph = ""
-    current_source = content[0].get("source", None)
-    current_heading = None
-    current_subheading = None
-
-    subsection = None
-    section = None
-    current_tables = []
-    current_image_contexts = []
-    current_caption = []
-    tmrc_checklist = None
-    last_was_heading = False  # True if last item was a heading/subheading
-
-    def convert_table_to_json(tables):
-        json_tables = []
-        for table in tables:
-            if not table or len(table) < 2:
-                continue
-            header = table[0]
-            rows = table[1:]
-            try:
-                table_json = [dict(zip(header, row)) for row in rows]
-            except Exception:
-                table_json = table  # fallback in case of mismatch
-            json_tables.append(table_json)
-        return json_tables if json_tables else None
-
-    def flush_chunk():
-        nonlocal current_paragraph, current_tables, current_image_contexts, tmrc_checklist, current_caption
-        if current_paragraph.strip() or current_tables or current_image_contexts or tmrc_checklist or current_caption:
-            chunk = {
-                "heading": current_heading,
-                "subheading": current_subheading,
-                "section": section,
-                "subsection": subsection,
-                "paragraph": current_paragraph.strip() if current_paragraph.strip() else None,
-                "table": convert_table_to_json(current_tables),  # <-- Added conversion here
-                "image_context": current_image_contexts if current_image_contexts else None,
-                "caption": current_caption if current_caption else None,
-                "tmrc_checklist": tmrc_checklist if tmrc_checklist else None,
-                "Source": current_source
-            }
-            preprocess_chunk.append(chunk)
-
-        # Reset
-        current_paragraph = ""
-        current_tables = []
-        current_image_contexts = []
-        tmrc_checklist = None
-        current_caption = []
-
-    for item in content:
-        item_type = item.get("type")
-        current_source = item.get("source", None)
-
-        if item_type == "heading" and item.get("level") == 1:
-            flush_chunk()
-            current_heading = item["text"]
-            current_subheading = None
-            section = item["section"]
-            subsection = None
-            last_was_heading = True
-
-        elif item_type == "heading" and item.get("level") == 2:
-            flush_chunk()
-            current_subheading = item["text"]
-            subsection = item["section"]
-            last_was_heading = True
-
-        elif item_type == "paragraph":
-            text = item.get("text", "").strip()
-            if not text:
-                continue
-            current_paragraph += " " + text
-            last_was_heading = False
-
-        elif item_type == "table":
-            if last_was_heading and tmrc_checklist is None:
-                tmrc_checklist = item.get("data", [])
-                last_was_heading = False
-            else:
-                current_tables.append(item.get("data", []))  # still raw here
-
-        elif item_type == "image":
-            context = item.get("image_context", "").strip()
-            caption = item.get("caption", "").strip()
-            if caption:
-                current_caption.append(caption)
-            if context:
-                current_image_contexts.append(context)
-            last_was_heading = False
-
-    flush_chunk()
-    return preprocess_chunk
+def extract_styled_text(paragraph):
+    styled_runs = []
+    for run in paragraph.runs:
+        run_style = {
+            "text": run.text,
+            "bold": run.bold,
+            "italic": run.italic,
+            "underline": run.underline,
+            "font_size": run.font.size.pt if run.font.size else None,
+            "font_name": run.font.name,
+            "color": str(run.font.color.rgb) if run.font.color and run.font.color.rgb else None,
+            "highlight": str(run.font.highlight_color) if run.font.highlight_color else None
+        }
+        styled_runs.append(run_style)
+    return styled_runs
