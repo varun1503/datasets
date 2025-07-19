@@ -1,40 +1,102 @@
+To get both the outer-table rows (your headers, the “34” row, etc.) and the inner two-column intent/count table, you need to:
+
+1. Parse the outer table exactly as you do today,
+
+
+2. Filter out the one flattened “blob” row that represents the nested table,
+
+
+3. Emit that cleaned outer table,
+
+
+4. Then parse each nested <w:tbl> inside it as its own two-column table, and emit those.
+
+
+
+Here’s a drop-in replacement for your if tag == qn('w:tbl'): block in docx_extraction():
+
 if tag == qn('w:tbl'):
-    # — First, look for any nested <w:tbl> inside this outer table —
-    nested_tbl_els = child.findall('.//w:tbl', namespaces=NSMAP)
-    if nested_tbl_els:
-        # We’ll ignore the outer table itself, and emit each nested one as its own item:
-        for nt_el in nested_tbl_els:
-            nested_tbl = Table(nt_el, doc)
-            nested_data = TableParser().parse_with_merged_cells(nested_tbl)
+    table_obj    = Table(child, doc)
+    parser       = TableParser()
+    full_data    = parser.parse_with_merged_cells(table_obj)
 
-            tbl_id = self.generate_id()
-            parent = get_current_parent()
-            table_item = {
-                "id":        tbl_id,
-                "type":      "table",
-                "data":      nested_data,
-                "source":    file_name,
-                "parent_id": parent["id"] if parent else None
-            }
-            if parent:
-                parent["child_ids"].append(tbl_id)
-            ordered_content.append(table_item)
-
-        # skip adding the flattened “outer” table:
-        continue
-
-    # — Otherwise no nested tables, parse as normal —
-    table_obj   = Table(child, doc)
-    table_data  = TableParser().parse_with_merged_cells(table_obj)
-    tbl_id      = self.generate_id()
-    parent      = get_current_parent()
-    table_item = {
-        "id":        tbl_id,
+    # 1) Emit the outer (primary) table, minus any fully-flattened nested rows
+    clean_outer = [
+        row for row in full_data
+        # keep any row that
+        #  - has more than one column, OR
+        #  - is a single column but doesn’t look like the inner resp list
+        if len(row) > 1 or not (len(row) == 1 and '_resp' in row[0])
+    ]
+    outer_id = self.generate_id()
+    parent   = get_current_parent()
+    ordered_content.append({
+        "id":        outer_id,
         "type":      "table",
-        "data":      table_data,
+        "data":      clean_outer,
         "source":    file_name,
         "parent_id": parent["id"] if parent else None
-    }
+    })
     if parent:
-        parent["child_ids"].append(tbl_id)
-    ordered_content.append(table_item)
+        parent["child_ids"].append(outer_id)
+
+    # 2) Now find and emit each nested table as its own two-column table
+    for nt_el in child.findall('.//w:tbl', namespaces=NSMAP):
+        nested_tbl  = Table(nt_el, doc)
+        nested_data = parser.parse_with_merged_cells(nested_tbl)
+        nid = self.generate_id()
+        ordered_content.append({
+            "id":        nid,
+            "type":      "table",
+            "data":      nested_data,
+            "source":    file_name,
+            "parent_id": outer_id
+        })
+        parent["child_ids"].append(nid)
+
+    # skip the old “one-big-blob” emit
+    continue
+
+Why this works
+
+full_data gives you every row of the outer table—including that giant flattened cell.
+
+clean_outer drops only the single-column row that contains '_resp'. Everything else (your header rows, the “34” row, etc.) stays in place.
+
+You emit that cleaned outer table first.
+
+You then .findall('.//w:tbl') to grab each real nested <w:tbl>, parse them normally (so you get exactly ["intent","count"], ["account_number_resp","102"], …), and emit them right after, with parent_id pointing back to the outer table.
+
+
+Resulting JSON for Table 6 will look like:
+
+// outer table
+{
+  "type":"table",
+  "data":[
+    ["Table 6"],
+    ["Dependent variable type (continuous, binary, categorical, ordinal)"],
+    ["Categorical"],
+    ["Does dependent variable require subjectivity/manual labeling? (Y/N) – if ‘N’ state reason below"],
+    ["Y"],
+    ["If ‘N’ above then reason needs to be stated here by modeling team"],
+    ["State the number of classes …"],
+    ["34"]
+  ],
+  …  
+},
+// nested intent/count table
+{
+  "type":"table",
+  "data":[
+    ["intent","count"],
+    ["account_number_resp","102"],
+    ["account_pin_resp","115"],
+    …,
+    ["trip_itinerary_resp","24"]
+  ],
+  …
+}
+
+Give that a try, and you should see your primary rows and the inner two-column table separately. Let me know how it goes!
+
