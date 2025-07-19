@@ -1,102 +1,91 @@
-To get both the outer-table rows (your headers, the “34” row, etc.) and the inner two-column intent/count table, you need to:
+Below is a drop-in replacement for your table-handling section in docx_extraction(), which:
 
-1. Parse the outer table exactly as you do today,
-
-
-2. Filter out the one flattened “blob” row that represents the nested table,
+1. Defines a recursive iter_table_paragraphs at the top of your class,
 
 
-3. Emit that cleaned outer table,
+2. Uses it to pull out every paragraph in both the outer table and any nested tables,
 
 
-4. Then parse each nested <w:tbl> inside it as its own two-column table, and emit those.
+3. Bundles those paragraphs back into rows (you can tweak how you split/join if you want a different shape),
+
+
+4. Keeps your existing parent/child and ID logic.
 
 
 
-Here’s a drop-in replacement for your if tag == qn('w:tbl'): block in docx_extraction():
+from docx.table import Table as DocxTable
 
-if tag == qn('w:tbl'):
-    table_obj    = Table(child, doc)
-    parser       = TableParser()
-    full_data    = parser.parse_with_merged_cells(table_obj)
+class DataLoader:
+    # … all your existing methods …
 
-    # 1) Emit the outer (primary) table, minus any fully-flattened nested rows
-    clean_outer = [
-        row for row in full_data
-        # keep any row that
-        #  - has more than one column, OR
-        #  - is a single column but doesn’t look like the inner resp list
-        if len(row) > 1 or not (len(row) == 1 and '_resp' in row[0])
-    ]
-    outer_id = self.generate_id()
-    parent   = get_current_parent()
-    ordered_content.append({
-        "id":        outer_id,
-        "type":      "table",
-        "data":      clean_outer,
-        "source":    file_name,
-        "parent_id": parent["id"] if parent else None
-    })
-    if parent:
-        parent["child_ids"].append(outer_id)
+    @staticmethod
+    def iter_table_paragraphs(tbl: DocxTable):
+        """
+        Recursively yield every Paragraph in tbl,
+        including those in nested tables.
+        """
+        for row in tbl.rows:
+            for cell in row.cells:
+                # 1) yield each paragraph in this cell
+                for para in cell.paragraphs:
+                    yield para
+                # 2) then recurse into any nested tables in this cell
+                for nested in cell.tables:
+                    yield from DataLoader.iter_table_paragraphs(nested)
 
-    # 2) Now find and emit each nested table as its own two-column table
-    for nt_el in child.findall('.//w:tbl', namespaces=NSMAP):
-        nested_tbl  = Table(nt_el, doc)
-        nested_data = parser.parse_with_merged_cells(nested_tbl)
-        nid = self.generate_id()
-        ordered_content.append({
-            "id":        nid,
-            "type":      "table",
-            "data":      nested_data,
-            "source":    file_name,
-            "parent_id": outer_id
-        })
-        parent["child_ids"].append(nid)
+    def docx_extraction(self, local_file_path, save_images=False, image_output_dir='images'):
+        # … all your existing setup …
+        for child in body.iterchildren():
+            tag = child.tag
 
-    # skip the old “one-big-blob” emit
-    continue
+            # … handle paragraphs, headings, images …
 
-Why this works
+            # ---- Table ----
+            if tag == qn('w:tbl'):
+                # wrap the raw xml element in python-docx Table
+                table_obj = DocxTable(child, doc)
 
-full_data gives you every row of the outer table—including that giant flattened cell.
+                # --- Option A: get every single paragraph text (flat list) ---
+                all_paras = [p.text.strip() for p in self.iter_table_paragraphs(table_obj) if p.text.strip()]
+                # now you can reshape all_paras into rows however you like: 
+                # for example, if you know every 2 paras is a row:
+                table_data = [ all_paras[i:i+2] for i in range(0, len(all_paras), 2) ]
 
-clean_outer drops only the single-column row that contains '_resp'. Everything else (your header rows, the “34” row, etc.) stays in place.
+                # --- Option B: if you still want to use your merged-cell parser
+                # but ALSO catch nested tables, you could do:
+                # parser = TableParser()
+                # outer = parser.parse_with_merged_cells(table_obj)
+                # nested = []
+                # for cell in table_obj._tbl.findall('.//w:tc', namespaces=NSMAP):
+                #     for nt in Table(cell, doc).tables:
+                #         nested.extend(parser.parse_with_merged_cells(nt))
+                # table_data = outer + nested
 
-You emit that cleaned outer table first.
+                table_id = self.generate_id()
+                parent   = get_current_parent()
+                table_item = {
+                    "id":        table_id,
+                    "type":      "table",
+                    "data":      table_data,
+                    "source":    file_name,
+                    "parent_id": parent["id"] if parent else None
+                }
+                if parent:
+                    parent["child_ids"].append(table_id)
+                ordered_content.append(table_item)
 
-You then .findall('.//w:tbl') to grab each real nested <w:tbl>, parse them normally (so you get exactly ["intent","count"], ["account_number_resp","102"], …), and emit them right after, with parent_id pointing back to the outer table.
+                continue
+
+        return ordered_content
+
+How it works
+
+iter_table_paragraphs walks every cell in every row, yields its paragraphs, and then descends into any nested tables it finds.
+
+In the Option A example above, we collect all paragraph texts into one list and then simply group them two-by-two (so ["intent","count"], ["account_number_resp","102"], …). Adjust the grouping logic if your rows have more or fewer columns.
+
+If you’d rather still rely on your TableParser.parse_with_merged_cells for the outer structure (e.g. to respect merged cells) but also want the nested ones, uncomment Option B and combine outer + nested.
 
 
-Resulting JSON for Table 6 will look like:
-
-// outer table
-{
-  "type":"table",
-  "data":[
-    ["Table 6"],
-    ["Dependent variable type (continuous, binary, categorical, ordinal)"],
-    ["Categorical"],
-    ["Does dependent variable require subjectivity/manual labeling? (Y/N) – if ‘N’ state reason below"],
-    ["Y"],
-    ["If ‘N’ above then reason needs to be stated here by modeling team"],
-    ["State the number of classes …"],
-    ["34"]
-  ],
-  …  
-},
-// nested intent/count table
-{
-  "type":"table",
-  "data":[
-    ["intent","count"],
-    ["account_number_resp","102"],
-    ["account_pin_resp","115"],
-    …,
-    ["trip_itinerary_resp","24"]
-  ],
-  …
-}
-
-Give that a try, and you should see your primary rows and the inner two-column table separately. Let me know how it goes!
+Feel free to pick A or B (or mix both) to best fit your desired JSON shape. Let me know if you need further tweaks!
 
