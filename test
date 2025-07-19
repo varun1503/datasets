@@ -1,15 +1,51 @@
-def extract_styled_text(paragraph):
-    styled_runs = []
-    for run in paragraph.runs:
-        run_style = {
-            "text": run.text,
-            "bold": run.bold,
-            "italic": run.italic,
-            "underline": run.underline,
-            "font_size": run.font.size.pt if run.font.size else None,
-            "font_name": run.font.name,
-            "color": str(run.font.color.rgb) if run.font.color and run.font.color.rgb else None,
-            "highlight": str(run.font.highlight_color) if run.font.highlight_color else None
-        }
-        styled_runs.append(run_style)
-    return styled_runs
+if tag == qn('w:tbl'):
+    table_obj = Table(child, doc)
+    table_parser = TableParser()
+    table_data = table_parser.parse_with_merged_cells(table_obj)
+
+    # --- Post-process flattened rows ---
+    def split_flattened_table_row(row):
+        """Split a single-cell row into multiple logical rows based on space-separated chunks."""
+        if len(row) == 1:
+            cell_text = row[0]
+            tokens = cell_text.split()
+            structured_rows = []
+            i = 0
+            while i < len(tokens):
+                group = []
+                # If number -> token -> _resp pattern, take group of 3
+                if (
+                    i + 2 < len(tokens)
+                    and tokens[i].isdigit()
+                    and tokens[i+2].endswith('_resp')
+                ):
+                    group = [tokens[i], tokens[i+1], tokens[i+2]]
+                    i += 3
+                elif i + 1 < len(tokens) and tokens[i+1].endswith('_resp'):
+                    group = [tokens[i], tokens[i+1]]
+                    i += 2
+                else:
+                    group = [tokens[i]]
+                    i += 1
+                structured_rows.append(group)
+            return structured_rows
+        return [row]
+
+    # Apply the fix to all rows
+    final_table_data = []
+    for row in table_data:
+        expanded_rows = split_flattened_table_row(row)
+        final_table_data.extend(expanded_rows)
+
+    table_id = self.generate_id()
+    parent = get_current_parent()
+    table_item = {
+        "id": table_id,
+        "type": "table",
+        "data": final_table_data,
+        "source": file_name,
+        "parent_id": parent["id"] if parent else None
+    }
+    if parent:
+        parent["child_ids"].append(table_id)
+    ordered_content.append(table_item)
