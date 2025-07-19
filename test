@@ -1,33 +1,110 @@
-elif tag == qn('w:tbl'):
-    table_obj = DocxTable(child, doc)
+Below is a one-stop enhancement to your existing parse_with_merged_cells method that automatically detects any nested tables inside cells and recursively parses them, appending their rows immediately after the parent table’s rows.
 
-    # collect every paragraph (outer + nested)
-    paras = [p.text.strip() for p in self.iter_table_paragraphs(table_obj) if p.text.strip()]
 
-    # now reshape exactly as you want:
-    table_data = []
-    if paras:
-        table_data.append([paras[0]])                      # ["34"]
-    if len(paras) >= 3:
-        table_data.append([paras[1], paras[2]])            # ["intent","count"]
-    idx = 3
-    while idx < len(paras):
-        if idx + 1 < len(paras):
-            table_data.append([paras[idx], paras[idx+1]]) # e.g. ["account_number_resp","102"]
-        else:
-            table_data.append([paras[idx]])
-        idx += 2
+---
 
-    table_id = self.generate_id()
-    parent   = get_current_parent()
-    table_item = {
-        "id":        table_id,
-        "type":      "table",
-        "data":      table_data,
-        "source":    file_name,
-        "parent_id": parent["id"] if parent else None
-    }
-    if parent:
-        parent["child_ids"].append(table_id)
-    ordered_content.append(table_item)
-    continue
+Summary
+
+By leveraging python-docx’s built-in ability to see nested tables via _Cell.tables and then recursing into them, we can extend your current merged-cell logic to also pull out every inner table. The updated method will:
+
+1. First do exactly what you have today—respect vertical merges and build parsed_rows.
+
+
+2. Then walk each cell for any cell.tables, and for each nested table, call parse_with_merged_cells again.
+
+
+3. Append each nested table’s parsed rows into the same output list (you can easily adjust this if you’d rather return them separately).
+
+
+
+This way, you get a flat list of all rows in document order—outer table rows followed by each nested table’s rows.
+
+
+---
+
+Detecting Nested Tables in python-docx
+
+In python-docx, every <w:tc> (table cell) exposes a .tables sequence of any <w:tbl> elements inside it; nested tables are not in the document’s top-level .tables list but accessible through these cell objects . A common StackOverflow snippet shows how to recurse:
+
+def iter_tables_within_table(table):
+    for row in table.rows:
+        for cell in row.cells:
+            for nested in cell.tables:
+                yield nested
+                yield from iter_tables_within_table(nested)
+
+
+
+
+---
+
+Updated parse_with_merged_cells with Nested-Table Support
+
+from docx.table import Table as DocxTable
+
+def parse_with_merged_cells(self, table: DocxTable):
+    """
+    Parse 'table' honoring vertical merges, then detect any nested tables
+    and append their rows recursively.
+    """
+    parsed_rows = []
+    # --- Stage 1: Handle merged cells as before ---
+    for row in table.rows:
+        row_data = []
+        for col_idx, cell in enumerate(row.cells):
+            tc = cell._tc
+            tcPr = tc.tcPr
+            vmerge = tcPr.vMerge if tcPr is not None and tcPr.vMerge is not None else None
+
+            if vmerge is not None:
+                # continue or restart merged cells
+                if vmerge.val is None or vmerge.val == 'continue':
+                    row_data.append(self.merged_cells_tracker.get(col_idx, ""))
+                else:  # 'restart'
+                    cell_text = self.get_cell_text(cell)
+                    self.merged_cells_tracker[col_idx] = cell_text
+                    row_data.append(cell_text)
+            else:
+                cell_text = self.get_cell_text(cell)
+                self.merged_cells_tracker[col_idx] = cell_text
+                row_data.append(cell_text)
+
+        # skip fully blank rows
+        if any(cell.strip() for cell in row_data):
+            parsed_rows.append(row_data)
+
+    # --- Stage 2: Detect & parse nested tables inside every cell ---
+    for row in table.rows:
+        for cell in row.cells:
+            # each .tables is a list of nested DocxTable objects
+            for nested_tbl in cell.tables:
+                # recurse to parse merged/nested behavior
+                nested_rows = self.parse_with_merged_cells(nested_tbl)
+                # append with an optional marker or directly
+                parsed_rows.extend(nested_rows)
+
+    return parsed_rows
+
+Key points
+
+cell.tables gives you any inner tables in that cell .
+
+Recursion via self.parse_with_merged_cells(nested_tbl) ensures nested merges also get respected.
+
+You end up with a single list where outer rows appear first, then all nested tables’ rows—maintaining document order .
+
+
+
+---
+
+Further Reading
+
+python-docx docs on recursive tables: “Complication 3: Tables are Recursive” 
+
+StackOverflow discussion on detecting nested tables in a cell 
+
+Iterating nested content: examples showing how to yield paragraphs and tables in one pass 
+
+
+With this change, any inner table in your DOCX will be parsed right alongside its parent, no more flattened blobs—just structured rows everywhere.
+
