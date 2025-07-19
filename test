@@ -1,51 +1,63 @@
-if tag == qn('w:tbl'):
-    table_obj = Table(child, doc)
-    table_parser = TableParser()
-    table_data = table_parser.parse_with_merged_cells(table_obj)
+class TableParser:
+    # … your existing methods …
 
-    # --- Post-process flattened rows ---
-    def split_flattened_table_row(row):
-        """Split a single-cell row into multiple logical rows based on space-separated chunks."""
-        if len(row) == 1:
-            cell_text = row[0]
-            tokens = cell_text.split()
-            structured_rows = []
-            i = 0
-            while i < len(tokens):
-                group = []
-                # If number -> token -> _resp pattern, take group of 3
-                if (
-                    i + 2 < len(tokens)
-                    and tokens[i].isdigit()
-                    and tokens[i+2].endswith('_resp')
-                ):
-                    group = [tokens[i], tokens[i+1], tokens[i+2]]
-                    i += 3
-                elif i + 1 < len(tokens) and tokens[i+1].endswith('_resp'):
-                    group = [tokens[i], tokens[i+1]]
-                    i += 2
+    def parse_with_merged_cells(self, table: DocxTable):
+        parsed_rows = []
+        # 1) First pass: honor vertical merges exactly as you have now
+        for row in table.rows:
+            row_data = []
+            for col_idx, cell in enumerate(row.cells):
+                tc = cell._tc
+                tcPr = tc.tcPr
+                vmerge = tcPr.vMerge if (tcPr is not None and tcPr.vMerge is not None) else None
+
+                if vmerge is not None:
+                    # a) continued merge → reuse the last value
+                    if vmerge.val is None or vmerge.val == 'continue':
+                        row_data.append(self.merged_cells_tracker.get(col_idx, ""))
+                    # b) restart of merge → read fresh text
+                    else:
+                        text = self.get_cell_text(cell)
+                        self.merged_cells_tracker[col_idx] = text
+                        row_data.append(text)
                 else:
-                    group = [tokens[i]]
-                    i += 1
-                structured_rows.append(group)
-            return structured_rows
-        return [row]
+                    # normal cell
+                    text = self.get_cell_text(cell)
+                    self.merged_cells_tracker[col_idx] = text
+                    row_data.append(text)
 
-    # Apply the fix to all rows
-    final_table_data = []
-    for row in table_data:
-        expanded_rows = split_flattened_table_row(row)
-        final_table_data.extend(expanded_rows)
+            # drop fully blank rows
+            if any(cell.strip() for cell in row_data):
+                parsed_rows.append(row_data)
 
-    table_id = self.generate_id()
-    parent = get_current_parent()
-    table_item = {
-        "id": table_id,
-        "type": "table",
-        "data": final_table_data,
-        "source": file_name,
-        "parent_id": parent["id"] if parent else None
-    }
-    if parent:
-        parent["child_ids"].append(table_id)
-    ordered_content.append(table_item)
+        # 2) Second pass: detect 1-cell “flattened” rows and split them
+        def _split_flat(row):
+            # only split rows that truly look like your “resp” pattern
+            text = row[0].strip()
+            if len(row) == 1 and '_resp' in text and any(tok.isdigit() for tok in text.split()):
+                toks = text.split()
+                out = []
+                i = 0
+                while i < len(toks):
+                    # pattern: number + label + _resp
+                    if i+2 < len(toks) and toks[i].isdigit() and toks[i+2].endswith('_resp'):
+                        out.append([toks[i], toks[i+1], toks[i+2]])
+                        i += 3
+                    # pattern: label + _resp
+                    elif i+1 < len(toks) and toks[i+1].endswith('_resp'):
+                        out.append([toks[i], toks[i+1]])
+                        i += 2
+                    else:
+                        out.append([toks[i]])
+                        i += 1
+                return out
+            # otherwise leave as-is
+            return [row]
+
+        final_rows = []
+        for r in parsed_rows:
+            # if r has multiple columns, or no “resp” text, it'll just give you [r]
+            for piece in _split_flat(r):
+                final_rows.append(piece)
+
+        return final_rows
