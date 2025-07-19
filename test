@@ -1,63 +1,40 @@
-class TableParser:
-    # … your existing methods …
+if tag == qn('w:tbl'):
+    # — First, look for any nested <w:tbl> inside this outer table —
+    nested_tbl_els = child.findall('.//w:tbl', namespaces=NSMAP)
+    if nested_tbl_els:
+        # We’ll ignore the outer table itself, and emit each nested one as its own item:
+        for nt_el in nested_tbl_els:
+            nested_tbl = Table(nt_el, doc)
+            nested_data = TableParser().parse_with_merged_cells(nested_tbl)
 
-    def parse_with_merged_cells(self, table: DocxTable):
-        parsed_rows = []
-        # 1) First pass: honor vertical merges exactly as you have now
-        for row in table.rows:
-            row_data = []
-            for col_idx, cell in enumerate(row.cells):
-                tc = cell._tc
-                tcPr = tc.tcPr
-                vmerge = tcPr.vMerge if (tcPr is not None and tcPr.vMerge is not None) else None
+            tbl_id = self.generate_id()
+            parent = get_current_parent()
+            table_item = {
+                "id":        tbl_id,
+                "type":      "table",
+                "data":      nested_data,
+                "source":    file_name,
+                "parent_id": parent["id"] if parent else None
+            }
+            if parent:
+                parent["child_ids"].append(tbl_id)
+            ordered_content.append(table_item)
 
-                if vmerge is not None:
-                    # a) continued merge → reuse the last value
-                    if vmerge.val is None or vmerge.val == 'continue':
-                        row_data.append(self.merged_cells_tracker.get(col_idx, ""))
-                    # b) restart of merge → read fresh text
-                    else:
-                        text = self.get_cell_text(cell)
-                        self.merged_cells_tracker[col_idx] = text
-                        row_data.append(text)
-                else:
-                    # normal cell
-                    text = self.get_cell_text(cell)
-                    self.merged_cells_tracker[col_idx] = text
-                    row_data.append(text)
+        # skip adding the flattened “outer” table:
+        continue
 
-            # drop fully blank rows
-            if any(cell.strip() for cell in row_data):
-                parsed_rows.append(row_data)
-
-        # 2) Second pass: detect 1-cell “flattened” rows and split them
-        def _split_flat(row):
-            # only split rows that truly look like your “resp” pattern
-            text = row[0].strip()
-            if len(row) == 1 and '_resp' in text and any(tok.isdigit() for tok in text.split()):
-                toks = text.split()
-                out = []
-                i = 0
-                while i < len(toks):
-                    # pattern: number + label + _resp
-                    if i+2 < len(toks) and toks[i].isdigit() and toks[i+2].endswith('_resp'):
-                        out.append([toks[i], toks[i+1], toks[i+2]])
-                        i += 3
-                    # pattern: label + _resp
-                    elif i+1 < len(toks) and toks[i+1].endswith('_resp'):
-                        out.append([toks[i], toks[i+1]])
-                        i += 2
-                    else:
-                        out.append([toks[i]])
-                        i += 1
-                return out
-            # otherwise leave as-is
-            return [row]
-
-        final_rows = []
-        for r in parsed_rows:
-            # if r has multiple columns, or no “resp” text, it'll just give you [r]
-            for piece in _split_flat(r):
-                final_rows.append(piece)
-
-        return final_rows
+    # — Otherwise no nested tables, parse as normal —
+    table_obj   = Table(child, doc)
+    table_data  = TableParser().parse_with_merged_cells(table_obj)
+    tbl_id      = self.generate_id()
+    parent      = get_current_parent()
+    table_item = {
+        "id":        tbl_id,
+        "type":      "table",
+        "data":      table_data,
+        "source":    file_name,
+        "parent_id": parent["id"] if parent else None
+    }
+    if parent:
+        parent["child_ids"].append(tbl_id)
+    ordered_content.append(table_item)
