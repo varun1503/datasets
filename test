@@ -1,91 +1,33 @@
-Below is a drop-in replacement for your table-handling section in docx_extraction(), which:
+elif tag == qn('w:tbl'):
+    table_obj = DocxTable(child, doc)
 
-1. Defines a recursive iter_table_paragraphs at the top of your class,
+    # collect every paragraph (outer + nested)
+    paras = [p.text.strip() for p in self.iter_table_paragraphs(table_obj) if p.text.strip()]
 
+    # now reshape exactly as you want:
+    table_data = []
+    if paras:
+        table_data.append([paras[0]])                      # ["34"]
+    if len(paras) >= 3:
+        table_data.append([paras[1], paras[2]])            # ["intent","count"]
+    idx = 3
+    while idx < len(paras):
+        if idx + 1 < len(paras):
+            table_data.append([paras[idx], paras[idx+1]]) # e.g. ["account_number_resp","102"]
+        else:
+            table_data.append([paras[idx]])
+        idx += 2
 
-2. Uses it to pull out every paragraph in both the outer table and any nested tables,
-
-
-3. Bundles those paragraphs back into rows (you can tweak how you split/join if you want a different shape),
-
-
-4. Keeps your existing parent/child and ID logic.
-
-
-
-from docx.table import Table as DocxTable
-
-class DataLoader:
-    # … all your existing methods …
-
-    @staticmethod
-    def iter_table_paragraphs(tbl: DocxTable):
-        """
-        Recursively yield every Paragraph in tbl,
-        including those in nested tables.
-        """
-        for row in tbl.rows:
-            for cell in row.cells:
-                # 1) yield each paragraph in this cell
-                for para in cell.paragraphs:
-                    yield para
-                # 2) then recurse into any nested tables in this cell
-                for nested in cell.tables:
-                    yield from DataLoader.iter_table_paragraphs(nested)
-
-    def docx_extraction(self, local_file_path, save_images=False, image_output_dir='images'):
-        # … all your existing setup …
-        for child in body.iterchildren():
-            tag = child.tag
-
-            # … handle paragraphs, headings, images …
-
-            # ---- Table ----
-            if tag == qn('w:tbl'):
-                # wrap the raw xml element in python-docx Table
-                table_obj = DocxTable(child, doc)
-
-                # --- Option A: get every single paragraph text (flat list) ---
-                all_paras = [p.text.strip() for p in self.iter_table_paragraphs(table_obj) if p.text.strip()]
-                # now you can reshape all_paras into rows however you like: 
-                # for example, if you know every 2 paras is a row:
-                table_data = [ all_paras[i:i+2] for i in range(0, len(all_paras), 2) ]
-
-                # --- Option B: if you still want to use your merged-cell parser
-                # but ALSO catch nested tables, you could do:
-                # parser = TableParser()
-                # outer = parser.parse_with_merged_cells(table_obj)
-                # nested = []
-                # for cell in table_obj._tbl.findall('.//w:tc', namespaces=NSMAP):
-                #     for nt in Table(cell, doc).tables:
-                #         nested.extend(parser.parse_with_merged_cells(nt))
-                # table_data = outer + nested
-
-                table_id = self.generate_id()
-                parent   = get_current_parent()
-                table_item = {
-                    "id":        table_id,
-                    "type":      "table",
-                    "data":      table_data,
-                    "source":    file_name,
-                    "parent_id": parent["id"] if parent else None
-                }
-                if parent:
-                    parent["child_ids"].append(table_id)
-                ordered_content.append(table_item)
-
-                continue
-
-        return ordered_content
-
-How it works
-
-iter_table_paragraphs walks every cell in every row, yields its paragraphs, and then descends into any nested tables it finds.
-
-In the Option A example above, we collect all paragraph texts into one list and then simply group them two-by-two (so ["intent","count"], ["account_number_resp","102"], …). Adjust the grouping logic if your rows have more or fewer columns.
-
-If you’d rather still rely on your TableParser.parse_with_merged_cells for the outer structure (e.g. to respect merged cells) but also want the nested ones, uncomment Option B and combine outer + nested.
-
-
-Feel free to pick A or B (or mix both) to best fit your desired JSON shape. Let me know if you need further tweaks!
-
+    table_id = self.generate_id()
+    parent   = get_current_parent()
+    table_item = {
+        "id":        table_id,
+        "type":      "table",
+        "data":      table_data,
+        "source":    file_name,
+        "parent_id": parent["id"] if parent else None
+    }
+    if parent:
+        parent["child_ids"].append(table_id)
+    ordered_content.append(table_item)
+    continue
