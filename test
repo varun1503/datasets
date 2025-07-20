@@ -1,280 +1,74 @@
-Here’s the full updated AutoMergeChunker class with your requirement:
-
-Top-level (level 0) chunk is not split (it’s the full doc).
-
-Level 1 and 2 chunk sizes are scaled from level 0’s size.
-
-Chunk sizes are calculated dynamically.
-
-Metadata and docstore logic is preserved.
-
-
-
----
-
-✅ Full AutoMergeChunker with Dynamic Ratio-Based Chunk Sizes:
-
-from app.services.chunking.base import BaseChunker
-from app.services.chunking.entity_extraction import EntityExtractor
-from app.services.chunking.summarization import TextSummarizer
-from langchain.schema import Document
-from langchain_community.docstore.in_memory import InMemoryDocstore
 import uuid
-import os
-import pickle
-from langchain_text_splitters import RecursiveCharacterTextSplitter, NLTKTextSplitter
-from typing import Dict, List
-from app.utils.config_management import load_config
-from app.utils.s3_storage import S3Utils
-from app.utils.spacy_len import spacy_tokenizer_len
 import logging
+from typing import Dict, List, Any, Tuple
 
 logger = logging.getLogger(__name__)
 
-class AutoMergeChunker:
-    def __init__(self, splitter_fn=RecursiveCharacterTextSplitter, len_fn=spacy_tokenizer_len):
-        self.config = load_config()
-        self.len_fn = len_fn
-        self.Splitter = NLTKTextSplitter
-        self.entity_extractor = EntityExtractor()
-        self.text_summmarizer = TextSummarizer()
-        self.s3_util = S3Utils()
+class YourChunkingWrapper:
+    # … your __init__ and other methods …
 
-    def _get_splitter(self, chunk_size):
-        splitter = self.Splitter(chunk_size=chunk_size, chunk_overlap=20)
-        splitter._length_function = self.len_fn
-        return splitter
+    def create_chunks(
+        self,
+        data: Dict[str, List[Dict[str, Any]]],
+        pss: bool = True
+    ) -> List[Dict[str, Any]]:
+        """
+        Process documents and create chunks.
 
-    def _generate_uuid(self):
-        return str(uuid.uuid4())
-
-    def get_dynamic_chunk_sizes(self, content: str):
-        top_level_len = len(content)
-        ratio = (1, 0.5, 0.25)
-
-        level_0 = top_level_len
-        level_1 = min(int(level_0 * ratio[1]), 4096)
-        level_2 = min(int(level_0 * ratio[2]), 2048)
-
-        return [level_0, level_1, level_2]
-
-    def _recursively_split_documents(self, documents, config, level, parent_doc_id=None):
-        all_sub_documents = []
-        prev_sub_doc_id = None
-
-        for document in documents:
-            if level == 0:
-                self.chunk_sizes = self.get_dynamic_chunk_sizes(document.page_content)
-
-            if level >= len(self.chunk_sizes):
-                return []
-
-            chunk_size = self.chunk_sizes[level]
-
-            # level 0 - keep whole document
-            if level == 0:
-                sub_doc_id = self._generate_uuid()
-                metadata = document.metadata.copy()
-                metadata.update({
-                    "doc_id": sub_doc_id,
-                    "parent_node": parent_doc_id,
-                    "prev_node": None,
-                    "level": level,
-                    "type": "doc"
-                })
-                sub_doc = Document(page_content=document.page_content, metadata=metadata)
-                all_sub_documents.append(sub_doc)
-
-                deeper = self._recursively_split_documents([sub_doc], config, level + 1, sub_doc_id)
-                all_sub_documents.extend(deeper)
-                continue
-
-            # deeper levels
-            text_splitter = self._get_splitter(chunk_size)
-            chunks = text_splitter.split_text(document.page_content)
-            sub_documents = []
-            last_id = None
-
-            for i, chunk in enumerate(chunks):
-                sub_doc_id = self._generate_uuid()
-                metadata = document.metadata.copy()
-                metadata.update({
-                    "doc_id": sub_doc_id,
-                    "parent_node": parent_doc_id,
-                    "prev_node": prev_sub_doc_id,
-                    "level": level,
-                    "type": "doc"
-                })
-                sub_doc = Document(page_content=chunk, metadata=metadata)
-                sub_documents.append(sub_doc)
-
-                deeper_sub_documents = self._recursively_split_documents([sub_doc], config, level + 1, sub_doc_id)
-
-                if deeper_sub_documents:
-                    deeper_sub_documents[0].metadata['prev_node'] = last_id
-                    last_id = deeper_sub_documents[-1].metadata['doc_id']
-
-                sub_documents.extend(deeper_sub_documents)
-                prev_sub_doc_id = sub_doc_id
-
-            all_sub_documents.extend(sub_documents)
-
-        return all_sub_documents
-
-    def assign_child(self, doc_dict):
-        for k, v in doc_dict.items():
-            parent_id = v.metadata.get('parent_node')
-            if parent_id:
-                parent = doc_dict[parent_id]
-                if 'child_nodes' not in parent.metadata:
-                    parent.metadata['child_nodes'] = [k]
+        Args:
+          data: mapping from filename -> list of page-dicts, each with
+                'page_content' and 'metadata'.
+          pss: if False, skip all chunking and just output each page as a
+               single chunk (in AutoMerger’s dict format).
+        """
+        try:
+            for filename, pages in data.items():
+                if pss:
+                    # full Automerger recursive chunking
+                    chunks = self._process_document(pages, filename)
                 else:
-                    parent.metadata['child_nodes'].append(k)
+                    # NO chunking: emit each page as one chunk
+                    chunks = []
+                    for page in pages:
+                        doc_id = str(uuid.uuid4())
+                        md = page.get("metadata", {}).copy()
+                        md.update({
+                            "doc_id": doc_id,
+                            "file_name": filename,
+                            "level": 0,
+                            "type": "doc",
+                            "parent_node": None,
+                            "prev_node": None,
+                            "next_node": None,
+                            "child_nodes": None,
+                            "chunking_type": "automerger",
+                        })
+                        chunks.append({
+                            "content": page["page_content"],
+                            "metadata": md,
+                        })
 
-    def assign_next(self, doc_dict):
-        for k, v in doc_dict.items():
-            prev_id = v.metadata.get('prev_node')
-            if prev_id:
-                doc_dict[prev_id].metadata['next_node'] = k
-
-    def fill_missing_rels(self, doc_dict):
-        for k, v in doc_dict.items():
-            v.metadata.setdefault('prev_node', None)
-            v.metadata.setdefault('next_node', None)
-            v.metadata.setdefault('parent_node', None)
-            v.metadata.setdefault('child_nodes', None)
-
-    def _create_chunks(self, documents, config):
-        doc_dict = {}
-        chunks = []
-
-        all_documents = self._recursively_split_documents(documents, config, level=0)
-
-        if config['preprocessing'].get('meta_enrich'):
-            meta_documents = self._recursively_split_documents_with_meta(documents, config, level=0)
-            all_documents.extend(meta_documents)
-
-        period, date, company_name = self.entity_extractor.extract_metadata_entities(documents[0].page_content)
-
-        for doc in all_documents:
-            doc_id = doc.metadata["doc_id"]
-            doc.metadata['period'] = period
-            doc.metadata['date'] = date
-            doc.metadata['company_name'] = company_name
-            doc.metadata['chunking_type'] = "automerger"
-            doc_dict[doc_id] = doc
-            chunks.append({'content': doc.page_content, 'metadata': doc.metadata})
-
-        self.assign_child(doc_dict)
-        self.assign_next(doc_dict)
-        self.fill_missing_rels(doc_dict)
-
-        doc_store = InMemoryDocstore(doc_dict)
-
-        index_save_path = self.config["vectorstore"]["index_save_path"]
-        os.makedirs(index_save_path, exist_ok=True)
-        docstore_path = os.path.join(index_save_path, "docstore.pkl")
-
-        if os.path.exists(docstore_path):
-            with open(docstore_path, 'rb') as f:
-                existing_doc_store = pickle.load(f)
-            if not isinstance(existing_doc_store, InMemoryDocstore):
-                raise TypeError("Loaded object is not an InMemoryDocstore")
-        else:
-            existing_doc_store = InMemoryDocstore({})
-
-        existing_doc_store._dict.update(doc_store._dict)
-
-        with open(docstore_path, 'wb') as f:
-            pickle.dump(existing_doc_store, f)
-
-        self.s3_util.upload_file(
-            f"{index_save_path}/docstore.pkl",
-            f"{self.config['data']['s3_folder']}/Active/{self.config['project']['usecase']}/docstore.pkl"
-        )
-
-        return chunks
-
-    def _recursively_split_documents_with_meta(self, documents, config, level, parent_doc_id=None, summ="", ner=""):
-        if level >= len(self.chunk_sizes):
-            return []
-
-        chunk_size = self.chunk_sizes[level]
-        text_splitter = self._get_splitter(chunk_size)
-        all_sub_documents = []
-        prev_sub_doc_id = None
-
-        for document in documents:
-            chunks = text_splitter.split_text(document.page_content)
-            sub_documents = []
-            last_id = None
-
-            for i, chunk in enumerate(chunks):
-                if level == 0:
-                    summ = self.text_summmarizer.summarize_earnings_call(chunk)
-                    ner = self.entity_extractor.extract_ner_entities(chunk)
-
-                sub_doc_id = self._generate_uuid()
-                metadata = document.metadata.copy()
-                if config['preprocessing'].get('meta_enrich'):
-                    metadata.update({
-                        "doc_id": sub_doc_id,
-                        "parent_node": parent_doc_id,
-                        "prev_node": prev_sub_doc_id,
-                        "level": level,
-                        "summary": summ,
-                        "ner": ner,
-                        "type": "meta_enrichment"
-                    })
-
-                sub_doc = Document(page_content=chunk, metadata=metadata)
-                sub_documents.append(sub_doc)
-
-                deeper_sub_documents = self._recursively_split_documents_with_meta(
-                    [sub_doc], config, level + 1, sub_doc_id, summ=summ, ner=ner
+                # now push into your Datastax (or FAISS) list exactly
+                self.all_doc_chunks_datastax.extend(
+                    self._prepare_datastax_chunks(chunks)
                 )
 
-                if deeper_sub_documents:
-                    deeper_sub_documents[0].metadata['prev_node'] = last_id
-                    last_id = deeper_sub_documents[-1].metadata['doc_id']
+            logger.info(
+                f"Created {len(self.all_doc_chunks_datastax)} chunks "
+                f"({'chunked' if pss else 'un-chunked'})"
+            )
+            return self.all_doc_chunks_datastax
 
-                sub_documents.extend(deeper_sub_documents)
-                prev_sub_doc_id = sub_doc_id
+        except Exception as e:
+            logger.error(f"Error in chunk creation: {e}")
+            raise
 
-            all_sub_documents.extend(sub_documents)
-
-        return all_sub_documents
-
-    def get_leaf_nodes(self, docstore):
-        texts, metas, doc_ids = [], [], []
-        for k, v in docstore._dict.items():
-            if v.metadata['child_nodes'] is None:
-                texts.append(v.page_content)
-                metas.append(v.metadata)
-                doc_ids.append(k)
-        return texts, metas, doc_ids
-
-    def get_node_for_hyde(self, docstore):
-        texts, metas, doc_ids = [], [], []
-        for k, v in docstore._dict.items():
-            if v.metadata['level'] == 0:
-                v.metadata['type'] = 'hyde'
-                texts.append(self.prompt_instance.hyde_chunking(v.page_content))
-                metas.append(v.metadata)
-                doc_ids.append(k)
-        return texts, metas, doc_ids
-
-
----
-
-✅ What’s Changed:
-
-get_dynamic_chunk_sizes() makes level 1 and 2 sizes based on level 0’s length.
-
-Top-level (level 0) is not chunked — just used as a whole parent chunk.
-
-Fully preserves child/parent relationships.
-
-
-Let me know if you want this chunker integrated with a pipeline or test case.
-
+    def _process_document(
+        self,
+        pages: List[Dict[str, Any]],
+        filename: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Wrap into your AutoMergeChunker.
+        """
+        return self.auto_merger._create_chunks(pages, self.config)
