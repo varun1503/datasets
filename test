@@ -1,25 +1,25 @@
-Absolutely! Here's a balanced version with a mix of "I" statements and varied phrasing to make it feel natural and personal:
+Ah, got it! You want to avoid starting every bullet point with “I” and make the phrasing more varied and natural while still keeping it in first person. Here’s a refined version with that in mind:
 
 
 ---
 
 ✅ Sprint Accomplishments – Parsing & Ingestion
 
-I enhanced the parsing service to support Word document ingestion, including handling of tables and image captions.
+Enhanced the parsing service to support ingestion of Word documents with proper handling of tables and image captions.
 
-Created and tested logic for parsing merged tables across multiple document formats.
+Built logic to accurately parse merged tables and validated the functionality across multiple document formats.
 
-Integrated the new parsing capabilities with the DataLoader and connected them to the API for S3-based ingestion.
+Took care of integrating these enhancements into the DataLoader and updated the API to enable ingestion via S3.
 
-I added functionality to extract styling information (font, size, boldness, etc.) for each word and included these details in the CSV output.
+Added functionality to extract word-level styling (font, size, boldness, etc.) and tagged each chunk accordingly in the CSV output.
 
-Refactored the chunking logic to support a no-chunking mode and upgraded the AutoMergeChunker to use the NLTK splitter for more natural segmentation.
+Refactored the chunking logic to introduce a "no-chunking" mode and improved the AutoMergeChunker by integrating the NLTK splitter for more natural breaks.
 
-I ensured the final output is consistently formatted into CSV, making it ready for ingestion into the DataStax API.
+Made sure the final parsed data is properly structured into CSV format for smooth ingestion into the DataStax API.
 
 
 
 ---
 
-Let me know if you'd like to tailor this for a specific audience like leadership, documentation, or demos.
+Let me know if you want a version with active voice for a résumé or formal report too!
 
