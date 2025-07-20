@@ -1,47 +1,15 @@
-from docx.table import Table as DocxTable
-
-def parse_with_merged_cells(self, table: DocxTable):
+def get_dynamic_chunk_sizes(self, content: str):
     """
-    Parse 'table' honoring vertical merges, and whenever we see a nested
-    table in a cell, *skip* its text here and recurse to pull it out below.
+    Top-level is full content. The rest are based on a fixed ratio.
     """
-    parsed_rows = []
+    top_level_len = len(content)  # Level 0 chunk size (entire doc)
+    
+    if top_level_len <= 1000:
+        return [top_level_len, 500, 250]  # Very small doc
 
-    # --- Stage 1: Outer table, skipping any cell with a nested table ---
-    for row in table.rows:
-        row_data = []
-        for col_idx, cell in enumerate(row.cells):
-            # If this cell *contains* a nested table, skip its text entirely
-            if cell.tables:
-                continue
+    ratio = (1, 0.5, 0.25)  # Equivalent to 4096:2048:1024 pattern
+    level_0 = top_level_len
+    level_1 = int(level_0 * ratio[1])
+    level_2 = int(level_0 * ratio[2])
 
-            # Otherwise do your normal vMerge logic...
-            tc   = cell._tc
-            tcPr = tc.tcPr
-            vmerge = tcPr.vMerge if (tcPr is not None and tcPr.vMerge is not None) else None
-
-            if vmerge is not None:
-                if vmerge.val is None or vmerge.val == 'continue':
-                    row_data.append(self.merged_cells_tracker.get(col_idx, ""))
-                else:  # restart
-                    text = self.get_cell_text(cell)
-                    self.merged_cells_tracker[col_idx] = text
-                    row_data.append(text)
-            else:
-                text = self.get_cell_text(cell)
-                self.merged_cells_tracker[col_idx] = text
-                row_data.append(text)
-
-        # only append if there's any real text left
-        if any(cell.strip() for cell in row_data):
-            parsed_rows.append(row_data)
-
-    # --- Stage 2: Recurse into any nested tables and append their rows ---
-    for row in table.rows:
-        for cell in row.cells:
-            for nested_tbl in cell.tables:
-                # This will parse the nested table (and any deeper nesting too)
-                nested_rows = self.parse_with_merged_cells(nested_tbl)
-                parsed_rows.extend(nested_rows)
-
-    return parsed_rows
+    return [level_0, level_1, level_2]
