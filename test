@@ -1,53 +1,31 @@
-Absolutely!
-Here’s how to save your batch_payload to a file, and then how to load and send it in another script or notebook.
+# main.py
 
+import os
+from utils.kafka_producer import KafkaProducerUtils
 
----
+# Sample config, secrets, and environment variables
+config = {
+    "BOOTSTRAP_SERVER": "localhost:9092",
+    "KAFKA_CONFIG_PATH": "/path/to/kafka/config",
+    "EMBEDDING_TOPIC_NAME": "sample-topic"
+}
 
-1. Save batch_payload to a local JSON file
+secrets = {
+    "SSL_PASSWORD": "your_ssl_password"
+}
 
-Add this right after you create batch_payload:
+env = {
+    "BOOTSTRAP_SERVER": config["BOOTSTRAP_SERVER"],
+    "KAFKA_CONFIG_PATH": config["KAFKA_CONFIG_PATH"],
+    "EMBEDDING_TOPIC_NAME": config["EMBEDDING_TOPIC_NAME"]
+}
 
-import json
+# Initialize the Kafka producer
+producer_util = KafkaProducerUtils(config, secrets, env)
 
-# Save batch_payload to a file (e.g., 'batch_payload.json')
-with open("batch_payload.json", "w", encoding="utf-8") as f:
-    json.dump(batch_payload, f, ensure_ascii=False, indent=2)
-print("Saved batch_payload.json")
+# Publish a test message
+message = {"text": "Hello Kafka!"}
+producer_util.publish_message(message)
 
-
----
-
-2. Load and send in a separate script (or notebook cell)
-
-You can use this in a new Python file, script, or notebook:
-
-import json
-import requests
-
-# Load the batch payload
-with open("batch_payload.json", "r", encoding="utf-8") as f:
-    payload = json.load(f)
-
-# Change the URL to your actual endpoint!
-url = "http://localhost:8000/ingest-batch"
-
-response = requests.post(
-    url,
-    json=payload,
-    headers={"Content-Type": "application/json"}
-)
-
-print("Status code:", response.status_code)
-print("Response:", response.text)
-
-
----
-
-Summary Table
-
-
----
-
-Let me know if you want a version using CSV, or a custom filename/path!
-
+# Close connection
+producer_util.close_kafka_connection()
