@@ -1,2 +1,22 @@
-config_dict = {section: dict(config.items(section)) for section in config.sections()}
-print(config_dict)
+import json
+import os
+
+input_path = "data.tct"
+output_path = "data.json"
+
+records = []
+
+with open(input_path, "r") as file:
+    for line in file:
+        if "=" in line:
+            record = {}
+            for pair in line.strip().split(";"):
+                if "=" in pair:
+                    k, v = pair.split("=", 1)
+                    record[k.strip()] = v.strip()
+            records.append(record)
+
+with open(output_path, "w") as f:
+    json.dump(records, f, indent=4)
+
+print(f"✅ Converted and saved to {os.path.abspath(output_path)}")
