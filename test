@@ -1,13 +1,14 @@
-from datetime import datetime
+Sure! Here's a professional and clear rephrasing of your message:
 
-# Add timestamp
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-csv_filename = f"{filename}_{timestamp}_preprocess.csv"
 
-output_path = os.path.join(root_dir, csv_filename)
-df.to_csv(output_path, index=False)
+---
 
-s3_path = str(Path(self.config["s3_path"]["preprocessing"]))
-# self.s3_object.upload_file(output_path, s3_path)
+The issue is still not resolved. I’m unable to generate the certificate because it requires JDK, and although Sai Kamal has generated it, there seems to be an issue with the internal AMEX certificate (.pem).
 
-return s3_path, csv_filename
+On the deployment side, the preprocessing module has been successfully deployed. However, there's a minor issue — we need to set the username and password in GitHub. Since I don’t have access, Nirban will take care of it once he’s available.
+
+
+---
+
+Let me know if you’d like to send this as a Slack message, email, or Jira comment — I can tailor it accordingly.
+
