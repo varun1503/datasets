@@ -1,22 +1,13 @@
-import json
-import os
+from datetime import datetime
 
-input_path = "data.tct"
-output_path = "data.json"
+# Add timestamp
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+csv_filename = f"{filename}_{timestamp}_preprocess.csv"
 
-records = []
+output_path = os.path.join(root_dir, csv_filename)
+df.to_csv(output_path, index=False)
 
-with open(input_path, "r") as file:
-    for line in file:
-        if "=" in line:
-            record = {}
-            for pair in line.strip().split(";"):
-                if "=" in pair:
-                    k, v = pair.split("=", 1)
-                    record[k.strip()] = v.strip()
-            records.append(record)
+s3_path = str(Path(self.config["s3_path"]["preprocessing"]))
+# self.s3_object.upload_file(output_path, s3_path)
 
-with open(output_path, "w") as f:
-    json.dump(records, f, indent=4)
-
-print(f"✅ Converted and saved to {os.path.abspath(output_path)}")
+return s3_path, csv_filename
