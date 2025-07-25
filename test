@@ -1,14 +1,15 @@
-Sure! Here's a professional and clear rephrasing of your message:
+import ssl
 
+# Paths from your configuration
+ssl_cafile = r'C:\Users\vvaishy\Documents\hpt_rasa\mrmg_preprocess\600004454-chunking\resources\kafka\E1\Amex_Internal_Root_CA.pem'
+ssl_certfile = r'C:\Users\vvaishy\Documents\hpt_rasa\mrmg_preprocess\600004454-chunking\resources\kafka\E1\certificate.pem'
+ssl_keyfile = r'C:\Users\vvaishy\Documents\hpt_rasa\mrmg_preprocess\600004454-chunking\resources\kafka\E1\keystore.pem'
+ssl_password = 'mrmg-kafka'  # optional: remove if no password
 
----
+try:
+    context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=ssl_cafile)
+    context.load_cert_chain(certfile=ssl_certfile, keyfile=ssl_keyfile, password=ssl_password)
 
-The issue is still not resolved. I’m unable to generate the certificate because it requires JDK, and although Sai Kamal has generated it, there seems to be an issue with the internal AMEX certificate (.pem).
-
-On the deployment side, the preprocessing module has been successfully deployed. However, there's a minor issue — we need to set the username and password in GitHub. Since I don’t have access, Nirban will take care of it once he’s available.
-
-
----
-
-Let me know if you’d like to send this as a Slack message, email, or Jira comment — I can tailor it accordingly.
-
+    print("✅ SSL context successfully created.")
+except Exception as e:
+    print("❌ SSL context creation failed:", e)
