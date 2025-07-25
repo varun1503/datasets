@@ -1,1 +1,1 @@
-kafka-topics.sh --bootstrap-server cesharedkafka3-dev.aexp.com:4492 --list --command-config client.properties
+openssl s_client -connect cesharedkafka3-dev.aexp.com:4492 -CAfile "C:\Users\vvaishy\Documents\hpt_rasa\mrmg_preprocess\600004454-chunking\resources\kafka\E1\Amex_Internal_Root_CA.pem"
