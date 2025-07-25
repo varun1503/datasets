@@ -1,1 +1,11 @@
-openssl s_client -connect cesharedkafka3-dev.aexp.com:4492 -CAfile "C:\Users\vvaishy\Documents\hpt_rasa\mrmg_preprocess\600004454-chunking\resources\kafka\E1\Amex_Internal_Root_CA.pem"
+producer_configs = {
+    "bootstrap_servers": "cesharedkafka3-dev.aexp.com:4492",
+    "security_protocol": "SSL",
+    "ssl_cafile": r"C:\Users\vvaishy\Documents\hpt_rasa\mrmg_preprocess\600004454-chunking\resources\kafka\E1\Amex_Internal_Root_CA.pem",
+    "ssl_certfile": r"C:\Users\vvaishy\Documents\hpt_rasa\mrmg_preprocess\600004454-chunking\resources\kafka\E1\certificate.pem",
+    "ssl_keyfile": r"C:\Users\vvaishy\Documents\hpt_rasa\mrmg_preprocess\600004454-chunking\resources\kafka\E1\keystore.pem",
+    "ssl_password": "mrmg-kafka",
+    "ssl_check_hostname": True,
+    "key_serializer": lambda k: k.encode("utf-8"),
+    "value_serializer": lambda v: v.encode("utf-8"),
+}
