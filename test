@@ -1,39 +1,110 @@
+Thanks for the debug trace — this gives clarity. Your error is:
+
+Failed to wrap socket in SSLContext!
+
+This usually means one of the following is wrong with the certificate setup:
+
+
+---
+
+✅ Checklist to Fix "Failed to wrap socket in SSLContext"
+
+1. Check File Paths
+
+Make sure all paths in your config are absolute and exist:
+
+'ssl_cafile':     'C:/Users/vvaishy/Documents/hpt_rasa/mrmg_preprocess/600004454-chunking/resources/kafka/E1/Amex_Internal_Root_CA.pem',
+'ssl_certfile':  'C:/Users/vvaishy/Documents/hpt_rasa/mrmg_preprocess/600004454-chunking/resources/kafka/E1/certificate.pem',
+'ssl_keyfile':   'C:/Users/vvaishy/Documents/hpt_rasa/mrmg_preprocess/600004454-chunking/resources/kafka/E1/keystore.pem',
+'ssl_password':  'mrmg-kafka',
+
+> 💡 Use forward slashes (/) in Python, even on Windows — or use r'C:\path\to\file'.
+
+
+
+
+---
+
+2. Confirm File Validity
+
+Run these checks on your terminal:
+
+openssl x509 -in certificate.pem -text -noout
+openssl rsa -in keystore.pem -check
+openssl verify -CAfile Amex_Internal_Root_CA.pem certificate.pem
+
+Make sure:
+
+Certificate is valid
+
+Key is valid
+
+Cert is signed by the CA
+
+
+
+---
+
+3. Match Cert & Key
+
+Check that the certificate and private key match:
+
+openssl x509 -noout -modulus -in certificate.pem | openssl md5
+openssl rsa -noout -modulus -in keystore.pem | openssl md5
+
+> 🔐 These values must match.
+
+
+
+
+---
+
+4. Debug SSLContext Manually (Minimal Example)
+
+Try this small test:
+
+import ssl
+
+context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+context.load_cert_chain(certfile='certificate.pem', keyfile='keystore.pem', password='mrmg-kafka')
+context.load_verify_locations(cafile='Amex_Internal_Root_CA.pem')
+
+print("✅ SSL Context created successfully.")
+
+If this fails, your certificate/key are not working.
+
+
+---
+
+5. Disable Hostname Check (for testing only)
+
+In your config:
+
+'ssl_check_hostname': False
+
+
+---
+
+6. Final Kafka Producer Config
+
 from kafka import KafkaProducer
-import logging
 
-# Optional: enable debug logging
-logging.basicConfig(level=logging.INFO)
+producer_config = {
+    'bootstrap_servers': 'cesharedkafka3-dev.aexp.com:4492',
+    'security_protocol': 'SSL',
+    'ssl_cafile': 'C:/.../Amex_Internal_Root_CA.pem',
+    'ssl_certfile': 'C:/.../certificate.pem',
+    'ssl_keyfile': 'C:/.../keystore.pem',
+    'ssl_password': 'mrmg-kafka',
+    'ssl_check_hostname': False,
+    'key_serializer': lambda k: k.encode('utf-8'),
+    'value_serializer': lambda v: v.encode('utf-8')
+}
 
-def get_kafka_producer():
-    producer_config = {
-        "bootstrap_servers": "cesharedkafka3-dev.aexp.com:4492",
-        "security_protocol": "SSL",
-        "ssl_cafile": r"C:\Users\vvaishy\Documents\hpt_rasa\mrmg_preprocess\600004454-chunking\resources\kafka\E1\Amex_Internal_Root_CA.pem",
-        "ssl_certfile": r"C:\Users\vvaishy\Documents\hpt_rasa\mrmg_preprocess\600004454-chunking\resources\kafka\E1\certificate.pem",
-        "ssl_keyfile": r"C:\Users\vvaishy\Documents\hpt_rasa\mrmg_preprocess\600004454-chunking\resources\kafka\E1\keystore.pem",
-        "ssl_password": "mrmg-kafka",
-        "ssl_check_hostname": True,
-        "key_serializer": lambda k: k.encode("utf-8"),
-        "value_serializer": lambda v: v.encode("utf-8"),
-    }
+producer = KafkaProducer(**producer_config)
 
-    return KafkaProducer(**producer_config)
 
-def main():
-    topic = "IPC1-SharedV3_600004454_chunking"
-    producer = get_kafka_producer()
+---
 
-    test_key = "test-key"
-    test_value = "Hello from local Kafka SSL producer!"
+Let me know if you want me to generate a script to validate all certs + match moduli and attempt Kafka connect step-by-step.
 
-    try:
-        future = producer.send(topic, key=test_key, value=test_value)
-        result = future.get(timeout=10)
-        print(f"✅ Successfully sent message to {topic}: {result}")
-    except Exception as e:
-        print(f"❌ Failed to send message: {e}")
-    finally:
-        producer.close()
-
-if __name__ == "__main__":
-    main()
