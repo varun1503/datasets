@@ -1,15 +1,26 @@
+from kafka import KafkaProducer
 import ssl
 
-# Paths from your configuration
+bootstrap_servers = 'cesharedkafka3-dev.aexp.com:4492'
+
 ssl_cafile = r'C:\Users\vvaishy\Documents\hpt_rasa\mrmg_preprocess\600004454-chunking\resources\kafka\E1\Amex_Internal_Root_CA.pem'
 ssl_certfile = r'C:\Users\vvaishy\Documents\hpt_rasa\mrmg_preprocess\600004454-chunking\resources\kafka\E1\certificate.pem'
 ssl_keyfile = r'C:\Users\vvaishy\Documents\hpt_rasa\mrmg_preprocess\600004454-chunking\resources\kafka\E1\keystore.pem'
-ssl_password = 'mrmg-kafka'  # optional: remove if no password
+ssl_password = 'mrmg-kafka'
 
-try:
-    context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=ssl_cafile)
-    context.load_cert_chain(certfile=ssl_certfile, keyfile=ssl_keyfile, password=ssl_password)
+context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=ssl_cafile)
+context.load_cert_chain(certfile=ssl_certfile, keyfile=ssl_keyfile, password=ssl_password)
 
-    print("✅ SSL context successfully created.")
-except Exception as e:
-    print("❌ SSL context creation failed:", e)
+producer = KafkaProducer(
+    bootstrap_servers=bootstrap_servers,
+    security_protocol="SSL",
+    ssl_context=context,
+    key_serializer=lambda k: k.encode("utf-8"),
+    value_serializer=lambda v: v.encode("utf-8")
+)
+
+# Try sending a test message
+producer.send("test-topic", key="test-key", value="test-message")
+producer.flush()
+
+print("✅ Kafka test message sent.")
