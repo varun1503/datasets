@@ -1,172 +1,64 @@
-import json
-import threading
-import time
-from concurrent.futures import ThreadPoolExecutor
-from kafka import KafkaConsumer
-from kafka.errors import KafkaError
-
+import os
 from app.chunking.chunking_main import Chunking
-from app.processors.process import process_file
-from app.utils import base64_utils
+from app.processors.dataloader import DataLoader
+from app.processors.data_preprocessing import Preprocessing
 from app.utils.elf_logging import logger
 
-# Thread pool and shutdown signal
-executor = ThreadPoolExecutor(max_workers=5)
-shutdown_event = threading.Event()
 
+def process_file(processor: Chunking, message: dict) -> int:
+    """
+    Handles DOCX file: extraction, preprocessing, chunking.
 
-def process_message(consumer, message, env, string_template_query_utils, kafka_producer):
-    job_id = message.get("job_id", "UNKNOWN")
+    Args:
+        processor: Chunking instance
+        message: Kafka message with file metadata
+
+    Returns:
+        Total number of chunks created
+    """
     try:
-        message["job_type"] = "chunking"
-        message["job_status"] = "Started"
+        ext = os.path.splitext(message.get("file_name", ""))[1].lower()
+        if ext != ".docx":
+            logger.error(f"Unsupported file type: {ext}")
+            raise ValueError(f"Unsupported file extension: {ext}")
 
-        if message.get("env") != env:
-            raise ValueError(f"message env '{message.get('env')}' does not match local env '{env}'")
-
-        # Check if chunk already processed
+        # Step 1: Load and parse the document
         try:
-            result = string_template_query_utils.run_single_query(
-                "app/templates/chunking.stg",
-                "check_for_chunk_no",
-                "template_input",
-                message,
-                "select",
-                True
+            parsed_data_obj = DataLoader()
+            parsed_data = parsed_data_obj.docx_extraction(
+                message["s3_path"], save_images=True
             )
+            logger.info("DOCX parsing completed.")
         except Exception as e:
-            logger.exception(f"Template check_for_chunk_no failed for job_id: {job_id}")
-            raise RuntimeError("Template execution failed.") from e
+            logger.exception("Failed during DOCX parsing")
+            raise RuntimeError("DOCX parsing failed") from e
 
-        if len(result) > 0:
-            logger.info(f"Chunks already processed for job_id: {job_id}")
-            return
-
-        logger.info(f"Chunking started for job_id: {job_id}")
-        message["is_completed"] = False
-
-        # Insert job stage status as "Started"
+        # Step 2: Preprocess the parsed content
         try:
-            string_template_query_utils.run_single_query(
-                "app/templates/chunking.stg",
-                "insert_job_stage_status",
-                "template_input",
-                message,
-                "insert",
-                True
-            )
+            preprocess_obj = Preprocessing()
+            process_data = preprocess_obj.preprocess_content_chunks(parsed_data)
+            logger.info("Preprocessing of content chunks completed.")
         except Exception as e:
-            logger.exception(f"Failed to log job start status for job_id: {job_id}")
-            raise RuntimeError("Job stage log (start) failed") from e
+            logger.exception("Failed during content preprocessing")
+            raise RuntimeError("Preprocessing failed") from e
 
-        # Perform chunking
-        message["file_path"] = f"input_files/{message['file_name']}"
-        chunking = Chunking(producer_utils=kafka_producer)
-
+        # Step 3: Structure into sections for chunking
         try:
-            message["total_chunks"] = process_file(chunking, message)
+            pre_chunk = preprocess_obj.chunk_document(process_data)
+            logger.info("Document chunking preparation completed.")
         except Exception as e:
-            logger.exception(f"Chunking failed for job_id: {job_id}")
-            raise RuntimeError("Chunking logic failed") from e
+            logger.exception("Failed during chunk structure preparation")
+            raise RuntimeError("Chunk document formatting failed") from e
 
-        message["is_completed"] = True
-        message["job_status"] = "Completed"
-
-        # Insert job stage status as "Completed"
+        # Step 4: Create and publish chunks
         try:
-            string_template_query_utils.run_single_query(
-                "app/templates/chunking.stg",
-                "insert_job_stage_status",
-                "template_input",
-                message,
-                "insert",
-                True
-            )
+            total_chunks = processor.automerger_chunking(pre_chunk, message)
+            logger.info(f"Chunking completed. Total chunks: {total_chunks}")
+            return total_chunks
         except Exception as e:
-            logger.exception(f"Failed to log job complete status for job_id: {job_id}")
-            raise RuntimeError("Job stage log (complete) failed") from e
-
-        logger.info(f"Chunking completed for job_id: {job_id}")
+            logger.exception("Failed during AutoMerge chunking")
+            raise RuntimeError("AutoMerge chunking failed") from e
 
     except Exception as e:
-        logger.exception(f"[ERROR] Chunking failed for job_id: {job_id}")
-        if message.get("env") == env:
-            message["error_message"] = base64_utils.base64_encode(str(e))
-            message["job_status"] = "Failed"
-            try:
-                string_template_query_utils.run_single_query(
-                    "app/templates/chunking.stg",
-                    "insert_job_stage_status",
-                    "template_input",
-                    message,
-                    "insert",
-                    True
-                )
-            except Exception:
-                logger.exception(f"Failed to insert failure status for job_id: {job_id}")
-    finally:
-        try:
-            consumer.commit()
-        except Exception:
-            logger.exception("Kafka consumer commit failed")
-
-
-def heartbeat(consumer):
-    while not shutdown_event.is_set():
-        try:
-            consumer._client.poll(timeout_ms=100)
-            time.sleep(1)
-        except Exception:
-            logger.exception("Heartbeat thread failure")
-
-
-def consume_messages(i, config, secrets, env, kafka_producer, string_template_query_utils):
-    consumer_configs = {
-        "bootstrap_servers": config[env]["BOOTSTRAP_SERVER"],
-        "security_protocol": "SSL",
-        "ssl_check_hostname": True,
-        "ssl_cafile": f"{config[env]['KAFKA_CONFIG_PATH']}/Amex_Internal_Root_CA.pem",
-        "ssl_certfile": f"{config[env]['KAFKA_CONFIG_PATH']}/certificate.pem",
-        "ssl_keyfile": f"{config[env]['KAFKA_CONFIG_PATH']}/keystore.pem",
-        "ssl_password": secrets.get("SSL_PASSWORD").data,
-        "auto_offset_reset": "latest",
-        "enable_auto_commit": False,
-        "group_id": f"{config[env]['CHUNKING_GROUP_ID']}_{env}",
-        "key_deserializer": lambda k: k.decode("utf-8") if k else None,
-        "value_deserializer": lambda v: json.loads(v.decode("utf-8")),
-    }
-
-    try:
-        logger.info("Initializing Kafka Consumer...")
-        consumer = KafkaConsumer(config[env]["CHUNKING_TOPIC_NAME"], **consumer_configs)
-        logger.info("Kafka Consumer initialized.")
-
-        heartbeat_thread = threading.Thread(target=heartbeat, args=(consumer,), daemon=True)
-        heartbeat_thread.start()
-
-        while not shutdown_event.is_set():
-            try:
-                msg_pack = consumer.poll(timeout_ms=1000)
-                for tp, messages in msg_pack.items():
-                    for message in messages:
-                        logger.info(f"Consumer {i} - Consumed message:\n{message.value}")
-                        executor.submit(
-                            process_message,
-                            consumer, message.value, env, string_template_query_utils, kafka_producer
-                        )
-            except KafkaError:
-                logger.exception("Kafka error occurred during polling")
-            except Exception:
-                logger.exception("Unexpected error in consumer loop")
-
-    except Exception:
-        logger.exception("Kafka Consumer initialization failed")
-    finally:
-        shutdown_event.set()
-        try:
-            consumer.close()
-            logger.info("Kafka Consumer closed.")
-        except Exception:
-            logger.exception("Error while closing Kafka consumer")
-        executor.shutdown(wait=True)
-        logger.info("Executor shutdown complete.")
+        logger.exception(f"process_file failed for file: {message.get('file_name', 'UNKNOWN')}")
+        raise
