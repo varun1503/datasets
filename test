@@ -1,64 +1,36 @@
-import os
-from app.chunking.chunking_main import Chunking
-from app.processors.dataloader import DataLoader
-from app.processors.data_preprocessing import Preprocessing
+import nest_asyncio
+from safechain.lcel import model
 from app.utils.elf_logging import logger
 
+nest_asyncio.apply()
 
-def process_file(processor: Chunking, message: dict) -> int:
-    """
-    Handles DOCX file: extraction, preprocessing, chunking.
 
-    Args:
-        processor: Chunking instance
-        message: Kafka message with file metadata
+class ModelInvoker:
+    """Wrapper for invoking safechain LLM models with instruction chaining."""
 
-    Returns:
-        Total number of chunks created
-    """
-    try:
-        ext = os.path.splitext(message.get("file_name", ""))[1].lower()
-        if ext != ".docx":
-            logger.error(f"Unsupported file type: {ext}")
-            raise ValueError(f"Unsupported file extension: {ext}")
+    def model_call(self, model_index: str, instruction_prompt, input_text: str) -> str:
+        """
+        Executes a model chain call.
 
-        # Step 1: Load and parse the document
+        Args:
+            model_index (str): Model identifier to load from safechain.
+            instruction_prompt: Prompt or instruction chain to prepend.
+            input_text (str): User input to feed into the model.
+
+        Returns:
+            str: Cleaned model output.
+
+        Raises:
+            RuntimeError: If any part of the call fails.
+        """
         try:
-            parsed_data_obj = DataLoader()
-            parsed_data = parsed_data_obj.docx_extraction(
-                message["s3_path"], save_images=True
-            )
-            logger.info("DOCX parsing completed.")
-        except Exception as e:
-            logger.exception("Failed during DOCX parsing")
-            raise RuntimeError("DOCX parsing failed") from e
+            logger.info(f"Invoking model [{model_index}]...")
+            chain = instruction_prompt | model(model_index)
+            response = chain.invoke(input_text)
+            output = getattr(response, "content", "").replace('\n', '')
+            logger.info(f"Model [{model_index}] invocation successful.")
+            return output
 
-        # Step 2: Preprocess the parsed content
-        try:
-            preprocess_obj = Preprocessing()
-            process_data = preprocess_obj.preprocess_content_chunks(parsed_data)
-            logger.info("Preprocessing of content chunks completed.")
         except Exception as e:
-            logger.exception("Failed during content preprocessing")
-            raise RuntimeError("Preprocessing failed") from e
-
-        # Step 3: Structure into sections for chunking
-        try:
-            pre_chunk = preprocess_obj.chunk_document(process_data)
-            logger.info("Document chunking preparation completed.")
-        except Exception as e:
-            logger.exception("Failed during chunk structure preparation")
-            raise RuntimeError("Chunk document formatting failed") from e
-
-        # Step 4: Create and publish chunks
-        try:
-            total_chunks = processor.automerger_chunking(pre_chunk, message)
-            logger.info(f"Chunking completed. Total chunks: {total_chunks}")
-            return total_chunks
-        except Exception as e:
-            logger.exception("Failed during AutoMerge chunking")
-            raise RuntimeError("AutoMerge chunking failed") from e
-
-    except Exception as e:
-        logger.exception(f"process_file failed for file: {message.get('file_name', 'UNKNOWN')}")
-        raise
+            logger.exception(f"Model [{model_index}] invocation failed.")
+            raise RuntimeError(f"Model call failed for {model_index}") from e
