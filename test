@@ -1,36 +1,6 @@
-import nest_asyncio
-from safechain.lcel import model
-from app.utils.elf_logging import logger
+import traceback
 
-nest_asyncio.apply()
-
-
-class ModelInvoker:
-    """Wrapper for invoking safechain LLM models with instruction chaining."""
-
-    def model_call(self, model_index: str, instruction_prompt, input_text: str) -> str:
-        """
-        Executes a model chain call.
-
-        Args:
-            model_index (str): Model identifier to load from safechain.
-            instruction_prompt: Prompt or instruction chain to prepend.
-            input_text (str): User input to feed into the model.
-
-        Returns:
-            str: Cleaned model output.
-
-        Raises:
-            RuntimeError: If any part of the call fails.
-        """
-        try:
-            logger.info(f"Invoking model [{model_index}]...")
-            chain = instruction_prompt | model(model_index)
-            response = chain.invoke(input_text)
-            output = getattr(response, "content", "").replace('\n', '')
-            logger.info(f"Model [{model_index}] invocation successful.")
-            return output
-
-        except Exception as e:
-            logger.exception(f"Model [{model_index}] invocation failed.")
-            raise RuntimeError(f"Model call failed for {model_index}") from e
+@app.on_event("shutdown")
+async def shutdown_event():
+    logger.warning("🔻 Shutdown triggered — beginning cleanup...")
+    logger.debug("Shutdown stack trace:\n" + "".join(traceback.format_stack()))
