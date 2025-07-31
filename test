@@ -1,6 +1,79 @@
-import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import defaultdict
+from typing import List, Dict
+import time
+import logging
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    logger.warning("🔻 Shutdown triggered — beginning cleanup...")
-    logger.debug("Shutdown stack trace:\n" + "".join(traceback.format_stack()))
+logger = logging.getLogger(__name__)
+
+class BatchedLLMInvoker:
+    def __init__(self, max_workers: int = 5, sleep_every_n: int = 10):
+        self.max_workers = max_workers
+        self.sleep_every_n = sleep_every_n
+        self.image_call_count = 0
+        self.invoker = ModelInvoker()
+
+    def _llm_single_call(self, payload: Dict) -> Dict:
+        model_index = payload.get("model_index", "gpt-40")
+        instruction_prompt = payload.get("prompt", "")
+        input_nodes = payload.get("input_nodes", {})
+        result = {"input": input_nodes, "output": "None"}
+
+        try:
+            output = self.invoker.model_call(model_index, instruction_prompt, input_nodes)
+            result["output"] = output
+        except Exception as e:
+            logger.exception(f"LLM call failed for input: {input_nodes}")
+            result["error"] = str(e)
+        finally:
+            self.image_call_count += 1
+            if self.image_call_count % self.sleep_every_n == 0:
+                time.sleep(10)
+        return result
+
+    def invoke_batch(self, payload_list: List[Dict]) -> List[Dict]:
+        results = []
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = [executor.submit(self._llm_single_call, payload) for payload in payload_list]
+            for future in as_completed(futures):
+                results.append(future.result())
+        return results
+
+
+
+def enrich_chunks_with_llm(preprocessed_chunks: List[Dict], prompt_image: str, max_workers: int = 5) -> List[Dict]:
+    """
+    This function takes preprocessed chunks and enriches their image_context
+    by calling the LLM on each image using multithreading.
+    """
+    llm_batcher = BatchedLLMInvoker(max_workers=max_workers)
+    payloads = []
+    chunk_image_map = []
+
+    # Step 1: Create input payloads and track which image belongs to which chunk
+    for idx, chunk in enumerate(preprocessed_chunks):
+        images = chunk.get("image_context", [])
+        for base64_image in images:
+            payloads.append({
+                "model_index": "gpt-40",
+                "prompt": prompt_image,
+                "input_nodes": {"base_64_encoded_image": base64_image}
+            })
+            chunk_image_map.append((idx, base64_image))
+
+    # Step 2: Invoke LLM in batch
+    results = llm_batcher.invoke_batch(payloads)
+
+    # Step 3: Merge LLM results back into original chunks
+    chunk_image_outputs = defaultdict(list)
+    for (chunk_idx, base64_img), result in zip(chunk_image_map, results):
+        chunk_image_outputs[chunk_idx].append({
+            "base64": base64_img,
+            "llm_output": result.get("output", "None")
+        })
+
+    # Step 4: Update chunks
+    for idx, enriched_images in chunk_image_outputs.items():
+        preprocessed_chunks[idx]["image_context"] = enriched_images
+
+    return preprocessed_chunks
