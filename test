@@ -124,3 +124,127 @@ class Chunking:
                 batch = []
 
         return len(chunks)
+import configparser
+import os
+import threading
+import traceback
+import time
+
+from fastapi import FastAPI
+from jproperties import Properties
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from starlette.middleware.cors import CORSMiddleware
+
+from app.utils.elf_logging import logger
+from app.utils.kafka_consumer import consume_messages
+from app.utils.kafka_producer import KafkaProducerUtils
+from app.utils.string_template_query_utils import StringTemplateQueryUtils
+
+app = FastAPI()
+
+# CORS settings
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=".*",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Safe wrapper for each Kafka thread to catch exceptions
+def consume_thread_safe(i, config, secrets, env, producer, query_utils):
+    try:
+        consume_messages(i, config, secrets, env, producer, query_utils)
+    except Exception as e:
+        logger.exception(f"Kafka consumer thread {i} crashed: {e}")
+
+@app.on_event("startup")
+async def startup_event():
+    try:
+        # Load config and secrets
+        config = configparser.ConfigParser()
+        config.read(r"resources/application.properties")
+
+        secrets = Properties()
+        with open("secrets_folder/secrets", 'rb') as config_file:
+            secrets.load(config_file)
+
+        env = secrets.get("ENV").data
+
+        # Set environment variables
+        os.environ['S3_REGION_NAME'] = secrets.get('S3_REGION_NAME').data
+        os.environ['S3_BUCKET_NAME'] = secrets.get('S3_BUCKET_NAME').data
+        os.environ['S3_ACCESS_KEY'] = secrets.get('S3_ACCESS_KEY').data
+        os.environ['S3_SECRET_KEY'] = secrets.get('S3_SECRET_KEY').data
+        os.environ["CONSUMER_INTEGRATION_ID"] = secrets.get("CONSUMER_INTEGRATION_ID").data
+        os.environ["CONSUMER_SECRET"] = secrets.get("CONSUMER_SECRET").data
+        os.environ["CONFIG_PATH"] = f"resources/safechain_config_{env.lower()}.yml"
+
+        # Kafka producer
+        kafka_producer = KafkaProducerUtils(config, secrets, env)
+        app.state.kafka_producer = kafka_producer
+
+        # Postgres DB engine
+        database_url = f"postgresql+psycopg2://{secrets.get('POSTGRES_DB_USERNAME').data}:{secrets.get('POSTGRES_DB_PASSWORD').data}@{config[env]['HOSTNAME']}:5432/{config[env]['DATABASE_NAME']}"
+        logger.info("Creating Postgres Engine...")
+        engine = create_engine(
+            database_url,
+            pool_size=15,
+            max_overflow=2,
+            pool_recycle=1800,
+            pool_pre_ping=True,
+            pool_timeout=30
+        )
+        app.state.engine = engine
+        logger.info("Postgres Engine created successfully")
+
+        # SQLAlchemy session utility
+        session_local = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        string_template_query_utils = StringTemplateQueryUtils(session_local)
+
+        # Start Kafka consumer threads
+        threads = []
+        consumer_group_size = int(config[env]["CONSUMER_GROUP_SIZE"])
+        logger.info(f"Starting {consumer_group_size} Kafka consumers...")
+        for i in range(consumer_group_size):
+            thread = threading.Thread(
+                target=consume_thread_safe,
+                args=(i, config, secrets, env, kafka_producer, string_template_query_utils),
+                daemon=True  # Optional: set daemon so it exits with app
+            )
+            threads.append(thread)
+            thread.start()
+            logger.info(f"Consumer thread {i} started.")
+            time.sleep(0.2)  # Prevent CPU spike by spacing thread startup
+
+    except Exception as e:
+        logger.exception("Startup failed. Application will not proceed.")
+        raise  # Ensures FastAPI doesn't falsely show READY
+
+@app.get("/")
+async def home():
+    return {"response": "Home Page"}
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    logger.warning("Shutdown triggered — beginning cleanup...")
+    logger.debug("Shutdown stack trace:\n" + "".join(traceback.format_stack()))
+
+    if hasattr(app.state, "kafka_producer"):
+        try:
+            app.state.kafka_producer.close_kafka_connection()
+            logger.info("Kafka Producer closed on shutdown")
+        except Exception as e:
+            logger.error(f"Error closing Kafka producer: {e}")
+
+    if hasattr(app.state, "engine"):
+        try:
+            app.state.engine.dispose()
+            logger.info("SQLAlchemy engine disposed cleanly on shutdown")
+        except Exception as e:
+            logger.error(f"Error disposing engine: {e}")
