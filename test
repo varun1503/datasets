@@ -1,79 +1,126 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from collections import defaultdict
-from typing import List, Dict
+import uuid
 import time
-import logging
+import copy
+from typing import Dict, List, Any
+from app.chunking.automerger import AutoMergeChunker
+from aida_genai_core.nlp.remove_pii import remove_pii
+from app.utils.elf_logging import logger
 
-logger = logging.getLogger(__name__)
 
-class BatchedLLMInvoker:
-    def __init__(self, max_workers: int = 5, sleep_every_n: int = 10):
-        self.max_workers = max_workers
-        self.sleep_every_n = sleep_every_n
-        self.image_call_count = 0
-        self.invoker = ModelInvoker()
+class Chunking:
+    def __init__(self, producer_utils=None):
+        self.auto_merger = AutoMergeChunker()
+        self.all_chunks_child = []
+        self.hyde_chunks_store = []
+        self.separators = ['\\\n\\\n', '\\\n', ' ', '.', '?', '!', ',', ';', ':']
+        self.producer_utils = producer_utils
 
-    def _llm_single_call(self, payload: Dict) -> Dict:
-        model_index = payload.get("model_index", "gpt-40")
-        instruction_prompt = payload.get("prompt", "")
-        input_nodes = payload.get("input_nodes", {})
-        result = {"input": input_nodes, "output": "None"}
-
+    def create_chunks(self, data: Dict[str, List[Dict[str, Any]]], chunking: bool = True) -> List[Dict[str, Any]]:
         try:
-            output = self.invoker.model_call(model_index, instruction_prompt, input_nodes)
-            result["output"] = output
+            for filename, pages in data.items():
+                if chunking:
+                    chunks = self._process_document(pages, filename)
+                else:
+                    chunks = []
+                    for page in pages:
+                        doc_id = str(uuid.uuid4())
+                        md = page.metadata.copy()
+                        md.update({
+                            "doc_id": doc_id,
+                            "file_name": filename,
+                            "level": 2,
+                            "type": "doc",
+                            "parent_node": None,
+                            "prev_node": None,
+                            "next_node": None,
+                            "child_nodes": None,
+                            "chunking_type": "No chunking",
+                        })
+                        chunks.append({
+                            "content": page.page_content,
+                            "metadata": md,
+                        })
+
+                self.all_chunks_child.extend(self._prepare_datastax_chunks(chunks))
+
+            logger.info(f"Created {len(self.all_chunks_child)} chunks ({'chunked' if chunking else 'un-chunked'})")
+            return self.all_chunks_child
+
         except Exception as e:
-            logger.exception(f"LLM call failed for input: {input_nodes}")
-            result["error"] = str(e)
-        finally:
-            self.image_call_count += 1
-            if self.image_call_count % self.sleep_every_n == 0:
-                time.sleep(10)
-        return result
+            logger.error(f"Error in chunk creation: {e}")
+            raise
 
-    def invoke_batch(self, payload_list: List[Dict]) -> List[Dict]:
-        results = []
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = [executor.submit(self._llm_single_call, payload) for payload in payload_list]
-            for future in as_completed(futures):
-                results.append(future.result())
-        return results
+    def _prepare_datastax_chunks(self, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return [
+            {
+                'content': chunk['content'],
+                'metadata': {
+                    k: str(v) if not isinstance(v, (str, int, float, bool)) else v
+                    for k, v in chunk['metadata'].items()
+                }
+            }
+            for chunk in chunks if chunk['metadata'].get('level') == 2
+        ]
 
+    def _process_document(self, pages: List[Dict[str, Any]], filename: str) -> List[Dict[str, Any]]:
+        return self.auto_merger._create_chunks(pages)
 
+    def automerger_chunking(self, docs: Dict[str, List[Dict[str, Any]]], message: Dict[str, Any]) -> int:
+        chunks = self.create_chunks(data=docs, chunking=True)
+        file_name = chunks[0]["metadata"].get("source", "unknown")
+        logger.info(f"Processed {file_name}: {len(chunks)} chunks")
 
-def enrich_chunks_with_llm(preprocessed_chunks: List[Dict], prompt_image: str, max_workers: int = 5) -> List[Dict]:
-    """
-    This function takes preprocessed chunks and enriches their image_context
-    by calling the LLM on each image using multithreading.
-    """
-    llm_batcher = BatchedLLMInvoker(max_workers=max_workers)
-    payloads = []
-    chunk_image_map = []
+        batch = []
+        batch_size = 5
 
-    # Step 1: Create input payloads and track which image belongs to which chunk
-    for idx, chunk in enumerate(preprocessed_chunks):
-        images = chunk.get("image_context", [])
-        for base64_image in images:
-            payloads.append({
-                "model_index": "gpt-40",
-                "prompt": prompt_image,
-                "input_nodes": {"base_64_encoded_image": base64_image}
-            })
-            chunk_image_map.append((idx, base64_image))
+        for i, chunk in enumerate(chunks):
+            metadata = chunk.get("metadata", {})
+            data = {
+                "type": metadata.get("type", ""),
+                "text": chunk.get("content", ""),
+                "chunked_content": chunk.get("content", ""),
+                "chunked_content_clean": remove_pii(str(chunk.get("content", ""))),
+                "doc_id": metadata.get("doc_id", ""),
+                "filename": metadata.get("source", ""),
+                "filetype": metadata.get("type", ""),
+                "parent_node": metadata.get("parent_node", ""),
+                "prev_node": metadata.get("prev_node", ""),
+                "level": metadata.get("level", ""),
+                "child_nodes": str(metadata.get("child_nodes", "")),
+                "next_node": metadata.get("next_node", ""),
+                "source": metadata.get("source", ""),
+                "period": metadata.get("period", ""),
+                "date": metadata.get("date", ""),
+                "heading": metadata.get("heading", ""),
+                "subheading": metadata.get("subheading", ""),
+                "table": metadata.get("table", ""),
+                "image_context": metadata.get("image_context", ""),  # no base64
+                "tmrc_checklist": metadata.get("tmrc_checklist", ""),
+                "section": metadata.get("section", ""),
+                "subsection": metadata.get("subsection", ""),
+                "caption": metadata.get("caption", ""),
+                "style": metadata.get("style", ""),
+                "style_extracted": metadata.get("style_extracted", ""),
+                "company_name": metadata.get("company_name", ""),
+                "start_index": 0,
+                "end_index": len(chunk.get("content", "")),
+                "doc_format": "docx",
+                "input_type": "doc"
+            }
 
-    # Step 2: Invoke LLM in batch
-    results = llm_batcher.invoke_batch(payloads)
+            batch.append(data)
 
-    # Step 3: Merge LLM results back into original chunks
-    chunk_image_outputs = defaultdict(list)
-    for (chunk_idx, base64_img), result in zip(chunk_image_map, results):
-        chunk_image_outputs[chunk_idx].append({
-            "base64": base64_img,
-            "llm_output": result.get("output", "None")
-        })
+            if (i + 1) % batch_size == 0 or (i + 1) == len(chunks):
+                try:
+                    message_copy = copy.deepcopy(message)
+                    message_copy["total_chunks"] = len(chunks)
+                    message_copy["chunk_no"] = i + 1
+                    message_copy["input_data"] = batch
+                    self.producer_utils.publish_message(message_copy)
+                    logger.info(f"Published chunk batch {i + 1}/{len(chunks)}")
+                    time.sleep(0.2)  # Throttle to reduce CPU spike
+                except Exception as e:
+                    logger.exception(f"Failed to publish chunk batch {i + 1}: {str(e)}")
+                batch = []
 
-    # Step 4: Update chunks
-    for idx, enriched_images in chunk_image_outputs.items():
-        preprocessed_chunks[idx]["image_context"] = enriched_images
-
-    return preprocessed_chunks
+        return len(chunks)
