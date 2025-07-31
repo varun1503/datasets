@@ -1,67 +1,9 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict
-import logging
+import json
 
-logger = logging.getLogger(__name__)
-
-class BatchedLLMInvoker:
-    def __init__(self, max_workers: int = 5):
-        self.max_workers = max_workers
-        self.invoker = ModelInvoker()
-
-    def _llm_single_call(self, payload: Dict) -> str:
-        try:
-            return self.invoker.model_call(
-                model_index=payload["model_index"],
-                instruction_prompt=payload["prompt"],
-                input_text=payload["input_nodes"]["base_64_encoded_image"]
-            )
-        except Exception as e:
-            logger.error(f"LLM call failed for input: {payload['input_nodes']}")
-            return "None"
-
-    def invoke_batch(self, payload_list: List[Dict], batch_size: int = 5) -> List[str]:
-        results = []
-        total = len(payload_list)
-
-        for i in range(0, total, batch_size):
-            batch = payload_list[i:i + batch_size]
-            logger.info(f"Invoking batch {i // batch_size + 1} of {((total - 1) // batch_size) + 1}")
-            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                futures = [executor.submit(self._llm_single_call, payload) for payload in batch]
-                for future in as_completed(futures):
-                    results.append(future.result())
-
-        return results
-
-from collections import defaultdict
-from typing import List, Dict
-
-def enrich_chunks_with_llm(preprocessed_chunks: List[Dict], prompt_image: str, max_workers: int = 5) -> List[Dict]:
-    llm_batcher = BatchedLLMInvoker(max_workers=max_workers)
-    payloads = []
-    chunk_image_map = []
-
-    # Prepare payloads for each image
-    for idx, chunk in enumerate(preprocessed_chunks):
-        for base64_image in chunk.get("image_context", []):
-            payloads.append({
-                "model_index": "gpt-40",
-                "prompt": prompt_image,
-                "input_nodes": {"base_64_encoded_image": base64_image}
-            })
-            chunk_image_map.append(idx)
-
-    # Invoke in batches
-    results = llm_batcher.invoke_batch(payloads, batch_size=5)
-
-    # Map LLM results back to chunks
-    chunk_output_map = defaultdict(list)
-    for chunk_idx, output in zip(chunk_image_map, results):
-        chunk_output_map[chunk_idx].append(output)
-
-    # Replace image_context with only LLM outputs
-    for idx, outputs in chunk_output_map.items():
-        preprocessed_chunks[idx]["image_context"] = outputs
-
-    return preprocessed_chunks
+def save_chunks_to_file(preprocess_chunk, file_path="preprocess_chunk_output.txt"):
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(preprocess_chunk, f, indent=2, ensure_ascii=False)
+        print(f"✅ Chunks saved to {file_path}")
+    except Exception as e:
+        print(f"❌ Failed to save chunks: {e}")
