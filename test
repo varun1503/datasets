@@ -1,6 +1,5 @@
-from typing import List, Dict
-from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Dict
 import logging
 
 logger = logging.getLogger(__name__)
@@ -8,22 +7,18 @@ logger = logging.getLogger(__name__)
 class BatchedLLMInvoker:
     def __init__(self, max_workers: int = 5):
         self.max_workers = max_workers
+        self.invoker = ModelInvoker()
 
-    def _llm_single_call(self, payload: Dict) -> Dict:
-        model_index = payload.get("model_index", "gpt-40")
-        instruction_prompt = payload.get("prompt", "")
-        input_nodes = payload.get("input_nodes", {})
-        result = {"output": "None"}
-
+    def _llm_single_call(self, payload: Dict) -> str:
         try:
-            from safechain.lcel import model
-            chain = instruction_prompt | model(model_index)
-            response = chain.invoke(input_nodes)
-            result["output"] = getattr(response, "content", "").replace("\n", "")
+            return self.invoker.model_call(
+                model_index=payload["model_index"],
+                instruction_prompt=payload["prompt"],
+                input_text=payload["input_nodes"]["base_64_encoded_image"]
+            )
         except Exception as e:
-            logger.exception(f"LLM call failed for input: {input_nodes}")
-            result["output"] = "None"
-        return result
+            logger.error(f"LLM call failed for input: {payload['input_nodes']}")
+            return "None"
 
     def invoke_batch(self, payload_list: List[Dict], batch_size: int = 5) -> List[str]:
         results = []
@@ -35,17 +30,19 @@ class BatchedLLMInvoker:
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                 futures = [executor.submit(self._llm_single_call, payload) for payload in batch]
                 for future in as_completed(futures):
-                    result = future.result()
-                    results.append(result.get("output", "None"))
+                    results.append(future.result())
 
         return results
 
+from collections import defaultdict
+from typing import List, Dict
 
 def enrich_chunks_with_llm(preprocessed_chunks: List[Dict], prompt_image: str, max_workers: int = 5) -> List[Dict]:
     llm_batcher = BatchedLLMInvoker(max_workers=max_workers)
     payloads = []
     chunk_image_map = []
 
+    # Prepare payloads for each image
     for idx, chunk in enumerate(preprocessed_chunks):
         for base64_image in chunk.get("image_context", []):
             payloads.append({
@@ -55,14 +52,16 @@ def enrich_chunks_with_llm(preprocessed_chunks: List[Dict], prompt_image: str, m
             })
             chunk_image_map.append(idx)
 
+    # Invoke in batches
     results = llm_batcher.invoke_batch(payloads, batch_size=5)
 
-    # Group results per chunk index
+    # Map LLM results back to chunks
     chunk_output_map = defaultdict(list)
     for chunk_idx, output in zip(chunk_image_map, results):
         chunk_output_map[chunk_idx].append(output)
 
+    # Replace image_context with only LLM outputs
     for idx, outputs in chunk_output_map.items():
-        preprocessed_chunks[idx]["image_context"] = outputs  # Only llm_output strings
+        preprocessed_chunks[idx]["image_context"] = outputs
 
     return preprocessed_chunks
