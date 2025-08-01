@@ -1,14 +1,60 @@
-def upload_fileobj(self, fileobj, s3_path):
-    try:
-        logger.info(f"Uploading in-memory object to S3 at: {s3_path}...")
-        self.s3_client.upload_fileobj(fileobj, self.bucket_name, s3_path)
-        logger.info("In-memory file uploaded successfully!")
-    except NoCredentialsError as e:
-        logger.error(f"AWS Credentials not found: {e}")
-        raise HTTPException(status_code=500, detail="AWS Credentials are missing or invalid.")
-    except ClientError as e:
-        logger.error(f"S3 client error: {e}")
-        raise HTTPException(status_code=500, detail="S3 upload failed due to client error.")
-    except Exception as e:
-        logger.error(f"Unexpected error during in-memory file upload: {e}")
-        raise HTTPException(status_code=500, detail="Internal Server Error during file upload.")
+Here’s a clean and professional rephrasing of the tasks you've completed, formatted as numbered points:
+
+
+---
+
+Work Completed:
+
+1. Tollgating - Preprocessing Enhancements:
+
+Enhanced the data parsing service to handle captions and table data.
+
+Incorporated support for extracting and tagging each text style, including inline formatting.
+
+Updated and optimized the data_preprocessing module.
+
+Integrated dynamic chunking functionality using the AutoMerger component.
+
+
+
+2. Kafka-Based Indexing Service:
+
+Understood and documented the Kafka workflow used across services.
+
+Set up and tested Kafka producer and consumer in the local environment.
+
+Developed and integrated three core services: chunking, embedding, and ingestion.
+
+Successfully integrated Kafka into the chunking and embedding pipeline.
+
+Deployed the complete pipeline on the E1 platform.
+
+Verified service functionality with session management.
+
+Implemented multithreading support and Kafka integration in the chunking service.
+
+Refactored AutoMerger, DataLoader, and preprocessing components to support Kafka-based ingestion.
+
+
+
+3. Playbook - Initial Drafting:
+
+Initiated the creation of the RMG playbook.
+
+Started drafting the following sections:
+
+Business Vision
+
+Business Architecture
+
+Technical Architecture
+
+
+
+
+
+
+---
+
+Let me know if you'd like this formatted as a markdown file or included in a report.
+
