@@ -1,9 +1,14 @@
-import json
-
-def save_chunks_to_file(preprocess_chunk, file_path="preprocess_chunk_output.txt"):
+def upload_fileobj(self, fileobj, s3_path):
     try:
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(preprocess_chunk, f, indent=2, ensure_ascii=False)
-        print(f"✅ Chunks saved to {file_path}")
+        logger.info(f"Uploading in-memory object to S3 at: {s3_path}...")
+        self.s3_client.upload_fileobj(fileobj, self.bucket_name, s3_path)
+        logger.info("In-memory file uploaded successfully!")
+    except NoCredentialsError as e:
+        logger.error(f"AWS Credentials not found: {e}")
+        raise HTTPException(status_code=500, detail="AWS Credentials are missing or invalid.")
+    except ClientError as e:
+        logger.error(f"S3 client error: {e}")
+        raise HTTPException(status_code=500, detail="S3 upload failed due to client error.")
     except Exception as e:
-        print(f"❌ Failed to save chunks: {e}")
+        logger.error(f"Unexpected error during in-memory file upload: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error during file upload.")
