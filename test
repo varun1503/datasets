@@ -1,49 +1,56 @@
-Here's a professionally rephrased version of your completed work, formatted for a sprint meeting update with clear, structured points:
+Here’s a short and inclusive description for each table shown in your MRMG user session (v1) data model:
 
 
 ---
 
-Sprint Work Completed – MRMG Integration Pipeline:
+1. model_details
 
-1. Kafka Integration with Indexing Pipeline:
-
-Configured and validated the Kafka setup for the MRMG indexing pipeline.
-
-Successfully ran the end-to-end pipeline locally before deploying it on the E1 environment.
-
-
-
-2. Development of Chunking Service:
-
-Built a robust chunking service capable of parsing Word .docx files.
-
-Integrated data preprocessing and the AutoMerger-based dynamic chunking logic.
-
-Enabled Kafka-based message publishing of the ready chunks to downstream embedding and ingestion services.
-
-
-
-3. Multithreading for Image Processing:
-
-Implemented multithreading logic to efficiently process images within Word documents.
-
-Significantly reduced the ingestion time by parallelizing image handling.
-
-Refactored the ingestion service to integrate with MRMG’s Datastax-based pipeline and ensured compatibility.
-
-
-
-4. End-to-End Service Testing in E1:
-
-Conducted comprehensive testing of all three services—chunking, embedding, and ingestion—within the E1 environment.
-
-Verified functionality under MRMG’s session management framework to ensure seamless integration and stability.
-
-
-
+Description: Stores master information about each model — including identifiers, version, impacted business areas, owner groups, validation teams, scope, algorithm, and technical details.
+Purpose: Acts as the central reference for model metadata used across the MRMG process.
 
 
 ---
 
-Let me know if you want this added to a slide or formatted for Jira/confluence.
+2. stages_mrmg
+
+Description: Tracks different workflow stages within a model session — including session ID, stage name, additional details, status, and timestamps.
+Purpose: Manages the progression of a model through its defined stages in the MRMG lifecycle.
+
+
+---
+
+3. tollgate_msgs
+
+Description: Captures messages and validation details for tollgate checkpoints — such as verdicts, reasons, checklist status, context, model type, and comments.
+Purpose: Serves as the audit trail and validation log for tollgate decisions.
+
+
+---
+
+4. user_files_mrmg
+
+Description: Stores metadata about user-uploaded files — including file name, path in S3, type, associated stage, and additional information.
+Purpose: Tracks supporting documents and files associated with MRMG stages.
+
+
+---
+
+5. mrmg_jobs
+
+Description: Maintains details of MRMG processing jobs — including job IDs, stage association, execution times, status, and related tollgate message IDs.
+Purpose: Enables monitoring and tracking of backend job execution for MRMG activities.
+
+
+---
+
+6. llm_job_stage
+
+Description: Stores LLM (Large Language Model) job stage details — including stage name, errors, additional data, and creation time.
+Purpose: Tracks LLM-driven process stages and related execution results.
+
+
+---
+
+If you want, I can also create an ER diagram-style summary showing table relationships in a more readable format.
+Do you want me to prepare that?
 
