@@ -1,56 +1,8 @@
-Here’s a short and inclusive description for each table shown in your MRMG user session (v1) data model:
+You can rephrase your message as:
+
+> Hi @Manoj Kumar, I’ve completed the first draft of the EA playbook. I’ll refine it further based on my understanding. Please share your valuable feedback so we can improve it together.
 
 
----
 
-1. model_details
-
-Description: Stores master information about each model — including identifiers, version, impacted business areas, owner groups, validation teams, scope, algorithm, and technical details.
-Purpose: Acts as the central reference for model metadata used across the MRMG process.
-
-
----
-
-2. stages_mrmg
-
-Description: Tracks different workflow stages within a model session — including session ID, stage name, additional details, status, and timestamps.
-Purpose: Manages the progression of a model through its defined stages in the MRMG lifecycle.
-
-
----
-
-3. tollgate_msgs
-
-Description: Captures messages and validation details for tollgate checkpoints — such as verdicts, reasons, checklist status, context, model type, and comments.
-Purpose: Serves as the audit trail and validation log for tollgate decisions.
-
-
----
-
-4. user_files_mrmg
-
-Description: Stores metadata about user-uploaded files — including file name, path in S3, type, associated stage, and additional information.
-Purpose: Tracks supporting documents and files associated with MRMG stages.
-
-
----
-
-5. mrmg_jobs
-
-Description: Maintains details of MRMG processing jobs — including job IDs, stage association, execution times, status, and related tollgate message IDs.
-Purpose: Enables monitoring and tracking of backend job execution for MRMG activities.
-
-
----
-
-6. llm_job_stage
-
-Description: Stores LLM (Large Language Model) job stage details — including stage name, errors, additional data, and creation time.
-Purpose: Tracks LLM-driven process stages and related execution results.
-
-
----
-
-If you want, I can also create an ER diagram-style summary showing table relationships in a more readable format.
-Do you want me to prepare that?
+Do you want me to also make it more formal and professional for workplace communication?
 
