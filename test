@@ -1,24 +1,87 @@
-def get_table_columns(session, keyspace_name: str, table_name: str) -> list:
+def create_knw_str_table_and_indexes(session) -> None:
     """
-    Get all column names for a given table in a Cassandra keyspace.
+    Create model_validation.knw_str and its SAI indexes if they don't exist.
+    Schema:
+      PK: (prtn_id text, rw_id timeuuid)
+      Vector col: vctr_d VECTOR<FLOAT, 3072>
+      Filters: us_cs_id (INT), entries(mtd_vl_tx) for map filters
+    """
+    # 1) Table
+    session.execute("""
+    CREATE TABLE IF NOT EXISTS model_validation.knw_str (
+        prtn_id     text,
+        rw_id       timeuuid,
+        bdy_blb_tx  text,
+        crt_ts      timestamp,
+        mtd_vl_tx   map<text, text>,
+        smry_blb_tx text,
+        us_cs_id    int,
+        us_cs_nm    text,
+        vctr_d      vector<float, 3072>,
+        PRIMARY KEY (prtn_id, rw_id)
+    ) WITH comment = 'Knowledge store vectors'
+      AND compression = {'chunk_length_in_kb': '64', 'class': 'org.apache.cassandra.io.compress.LZ4Compressor'}
+      AND speculative_retry = '99PERCENTILE'
+      AND min_index_interval = 256;
+    """)
 
-    Args:
-        session: Cassandra DB session object.
-        keyspace_name (str): The name of the keyspace.
-        table_name (str): The name of the table.
+    # 2) Indexes
+    # (a) ANN vector index on vctr_d
+    session.execute("""
+    CREATE CUSTOM INDEX IF NOT EXISTS knw_str_vctr_d_sai
+    ON model_validation.knw_str (vctr_d)
+    USING 'StorageAttachedIndex';
+    """)
 
-    Returns:
-        list: List of column names as strings.
+    # (b) Filter on us_cs_id
+    session.execute("""
+    CREATE CUSTOM INDEX IF NOT EXISTS knw_str_us_cs_id_sai
+    ON model_validation.knw_str (us_cs_id)
+    USING 'StorageAttachedIndex';
+    """)
+
+    # (c) Filter on map entries like mtd_vl_tx['doc_type'] = 'pdf'
+    session.execute("""
+    CREATE CUSTOM INDEX IF NOT EXISTS knw_str_mtd_vl_tx_entry_sai
+    ON model_validation.knw_str (entries(mtd_vl_tx))
+    USING 'StorageAttachedIndex';
+    """)
+
+
+def ann_retrieve_knw_str(
+    session,
+    partition_id: str,
+    use_case_id: int,
+    vector: list[float],
+    limit: int = 3,
+    metadata_map_filters: dict[str, str] | None = None,  # e.g. {"doc_type":"pdf","region":"US"}
+):
     """
-    query = f"""
-    SELECT column_name
-    FROM system_schema.columns
-    WHERE keyspace_name = '{keyspace_name}'
-      AND table_name = '{table_name}';
+    Run an ANN search on model_validation.knw_str.
+
+    Requirements (satisfied by the creator function above):
+      - SAI index on vctr_d
+      - SAI index on us_cs_id (unless it's part of the fully specified PK)
+      - SAI index on entries(mtd_vl_tx) if you pass metadata_map_filters
+
+    Returns: Result rows from session.execute()
     """
-    try:
-        result = session.execute(query)
-        return [row.column_name for row in result]
-    except Exception as e:
-        print(f"❌ Failed to fetch columns for {keyspace_name}.{table_name}: {e}")
-        return []
+    vector_str = "[" + ",".join(f"{v:.6f}" for v in vector) + "]"
+
+    where = [f"prtn_id = '{partition_id}'", f"us_cs_id = {use_case_id}"]
+    if metadata_map_filters:
+        for k, v in metadata_map_filters.items():
+            where.append(f"mtd_vl_tx['{k}'] = '{v}'")
+
+    where_sql = " AND ".join(where)
+
+    cql = f"""
+    SELECT rw_id, bdy_blb_tx, crt_ts, mtd_vl_tx, smry_blb_tx, us_cs_id, us_cs_nm,
+           similarity_cosine(vctr_d, {vector_str}) AS score
+    FROM model_validation.knw_str
+    WHERE {where_sql}
+    ORDER BY vctr_d ANN OF {vector_str}
+    LIMIT {limit};
+    """.strip()
+
+    return session.execute(cql)
