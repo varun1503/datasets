@@ -1,1 +1,13 @@
 table_query = f"select * from gn_vctr.knw_str where us_cs_id={self.use_case_id} and embd_mdl_dm_n>={self.embedding_size} ALLOW FILTERING;"
+def get_all_tables_in_keyspace(session, keyspace_name):
+    query = f"""
+    SELECT table_name
+    FROM system_schema.tables
+    WHERE keyspace_name = '{keyspace_name}';
+    """
+    result = session.execute(query)
+    return [row.table_name for row in result]
+
+# Example usage
+tables = get_all_tables_in_keyspace(self.db_session, 'gn_vctr')
+print("Tables in keyspace 'gn_vctr':", tables)
