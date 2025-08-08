@@ -1,25 +1,24 @@
-def get_vector_table_metadata(session, use_case_id: int, embedding_size: int) -> list:
+def get_table_columns(session, keyspace_name: str, table_name: str) -> list:
     """
-    Fetch metadata rows from gn_vctr.knw_str based on use case ID and minimum embedding size.
+    Get all column names for a given table in a Cassandra keyspace.
 
     Args:
         session: Cassandra DB session object.
-        use_case_id (int): Use case ID to filter.
-        embedding_size (int): Minimum embedding dimension.
+        keyspace_name (str): The name of the keyspace.
+        table_name (str): The name of the table.
 
     Returns:
-        list: List of row objects containing table metadata.
+        list: List of column names as strings.
     """
     query = f"""
-    SELECT *
-    FROM gn_vctr.knw_str
-    WHERE us_cs_id = {use_case_id}
-      AND embd_mdl_dm_n >= {embedding_size}
-    ALLOW FILTERING;
+    SELECT column_name
+    FROM system_schema.columns
+    WHERE keyspace_name = '{keyspace_name}'
+      AND table_name = '{table_name}';
     """
     try:
         result = session.execute(query)
-        return list(result)  # Convert to list for easier reuse
+        return [row.column_name for row in result]
     except Exception as e:
-        print(f"❌ Failed to fetch metadata from gn_vctr.knw_str: {e}")
+        print(f"❌ Failed to fetch columns for {keyspace_name}.{table_name}: {e}")
         return []
