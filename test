@@ -1,87 +1,28 @@
-def create_knw_str_table_and_indexes(session) -> None:
-    """
-    Create model_validation.knw_str and its SAI indexes if they don't exist.
-    Schema:
-      PK: (prtn_id text, rw_id timeuuid)
-      Vector col: vctr_d VECTOR<FLOAT, 3072>
-      Filters: us_cs_id (INT), entries(mtd_vl_tx) for map filters
-    """
-    # 1) Table
-    session.execute("""
-    CREATE TABLE IF NOT EXISTS model_validation.knw_str (
-        prtn_id     text,
-        rw_id       timeuuid,
-        bdy_blb_tx  text,
-        crt_ts      timestamp,
-        mtd_vl_tx   map<text, text>,
-        smry_blb_tx text,
-        us_cs_id    int,
-        us_cs_nm    text,
-        vctr_d      vector<float, 3072>,
-        PRIMARY KEY (prtn_id, rw_id)
-    ) WITH comment = 'Knowledge store vectors'
-      AND compression = {'chunk_length_in_kb': '64', 'class': 'org.apache.cassandra.io.compress.LZ4Compressor'}
-      AND speculative_retry = '99PERCENTILE'
-      AND min_index_interval = 256;
-    """)
+def get_document_df(self, parse_for_llm: bool = False) -> pd.DataFrame:
+    if self.clean_document_df is None:
+        return pd.DataFrame()
 
-    # 2) Indexes
-    # (a) ANN vector index on vctr_d
-    session.execute("""
-    CREATE CUSTOM INDEX IF NOT EXISTS knw_str_vctr_d_sai
-    ON model_validation.knw_str (vctr_d)
-    USING 'StorageAttachedIndex';
-    """)
+    df = self.clean_document_df.copy()
 
-    # (b) Filter on us_cs_id
-    session.execute("""
-    CREATE CUSTOM INDEX IF NOT EXISTS knw_str_us_cs_id_sai
-    ON model_validation.knw_str (us_cs_id)
-    USING 'StorageAttachedIndex';
-    """)
+    # --- attach TOC columns (section_name, section_number) ---
+    # self.raw_document_df[self.toc_label_colname] already holds the cleaned section name
+    df["toc_section_name"] = df[self.toc_label_colname]
 
-    # (c) Filter on map entries like mtd_vl_tx['doc_type'] = 'pdf'
-    session.execute("""
-    CREATE CUSTOM INDEX IF NOT EXISTS knw_str_mtd_vl_tx_entry_sai
-    ON model_validation.knw_str (entries(mtd_vl_tx))
-    USING 'StorageAttachedIndex';
-    """)
+    # Map name -> number using the generated TOC
+    if self.toc_section_name_2_number_map:
+        df["toc_section_number"] = df["toc_section_name"].map(self.toc_section_name_2_number_map)
+    else:
+        df["toc_section_number"] = None
 
+    # Optional LLM formatting: convert DataFrame payloads to markdown
+    if parse_for_llm:
+        df[self.content_colname] = [
+            None
+            if x is None
+            else (
+                (x[0], x[1].to_markdown()) if hasattr(x[1], "to_markdown") else (x[0], x[1])
+            )
+            for x in df[self.content_colname].tolist()
+        ]
 
-def ann_retrieve_knw_str(
-    session,
-    partition_id: str,
-    use_case_id: int,
-    vector: list[float],
-    limit: int = 3,
-    metadata_map_filters: dict[str, str] | None = None,  # e.g. {"doc_type":"pdf","region":"US"}
-):
-    """
-    Run an ANN search on model_validation.knw_str.
-
-    Requirements (satisfied by the creator function above):
-      - SAI index on vctr_d
-      - SAI index on us_cs_id (unless it's part of the fully specified PK)
-      - SAI index on entries(mtd_vl_tx) if you pass metadata_map_filters
-
-    Returns: Result rows from session.execute()
-    """
-    vector_str = "[" + ",".join(f"{v:.6f}" for v in vector) + "]"
-
-    where = [f"prtn_id = '{partition_id}'", f"us_cs_id = {use_case_id}"]
-    if metadata_map_filters:
-        for k, v in metadata_map_filters.items():
-            where.append(f"mtd_vl_tx['{k}'] = '{v}'")
-
-    where_sql = " AND ".join(where)
-
-    cql = f"""
-    SELECT rw_id, bdy_blb_tx, crt_ts, mtd_vl_tx, smry_blb_tx, us_cs_id, us_cs_nm,
-           similarity_cosine(vctr_d, {vector_str}) AS score
-    FROM model_validation.knw_str
-    WHERE {where_sql}
-    ORDER BY vctr_d ANN OF {vector_str}
-    LIMIT {limit};
-    """.strip()
-
-    return session.execute(cql)
+    return df
