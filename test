@@ -1,8 +1,1 @@
-You can rephrase your message as:
-
-> Hi @Manoj Kumar, I’ve completed the first draft of the EA playbook. I’ll refine it further based on my understanding. Please share your valuable feedback so we can improve it together.
-
-
-
-Do you want me to also make it more formal and professional for workplace communication?
-
+table_query = f"select * from gn_vctr.knw_str where us_cs_id={self.use_case_id} and embd_mdl_dm_n>={self.embedding_size} ALLOW FILTERING;"
