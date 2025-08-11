@@ -1,28 +1,13 @@
-def get_document_df(self, parse_for_llm: bool = False) -> pd.DataFrame:
-    if self.clean_document_df is None:
-        return pd.DataFrame()
+import asyncio
+from app.embedding import Embed
 
-    df = self.clean_document_df.copy()
+async def main():
+    eb_object = Embed("text-embedding")
+    batch = [{"chunked_content": "test1234"}]  # adjust to whatever your method expects
 
-    # --- attach TOC columns (section_name, section_number) ---
-    # self.raw_document_df[self.toc_label_colname] already holds the cleaned section name
-    df["toc_section_name"] = df[self.toc_label_colname]
+    # If embedding_call is async and accepts the batch:
+    result = await eb_object.embedding_call(batch)
+    print("successfully", result)
 
-    # Map name -> number using the generated TOC
-    if self.toc_section_name_2_number_map:
-        df["toc_section_number"] = df["toc_section_name"].map(self.toc_section_name_2_number_map)
-    else:
-        df["toc_section_number"] = None
-
-    # Optional LLM formatting: convert DataFrame payloads to markdown
-    if parse_for_llm:
-        df[self.content_colname] = [
-            None
-            if x is None
-            else (
-                (x[0], x[1].to_markdown()) if hasattr(x[1], "to_markdown") else (x[0], x[1])
-            )
-            for x in df[self.content_colname].tolist()
-        ]
-
-    return df
+if __name__ == "__main__":
+    asyncio.run(main())
