@@ -13,7 +13,79 @@ It supports the **MRMG** use case, enabling users to:
 
 ### 1. Upload File to S3
 **Description:** Upload a file to S3 and initiate validation.  
-**API Documentation:** [View in Swagger UI](https://mrmgusersessionmgmt-dev.aexp.com/docs#/Files/index_file_kafka_files_index_file_kafka_post)
+**API Documentation:** [View inGot it ✅ — here’s the updated README with your logging link included alongside the GitHub links for Embeddings and Ingestion services.
+
+I’ve kept placeholders for your repo URLs so you can swap them in:
+
+
+---
+
+# Session Management Service – MRMG Ingestion Step 1
+
+## Overview
+The **Session Management Service** is the **first step** in the **MRMG ingestion pipeline**.  
+It is responsible for:
+1. Uploading model/document files to S3.
+2. Invoking Kafka to send processing messages to the **chunking topic**.
+3. Initiating the document chunking process.
+
+Once chunking completes, the pipeline continues with:
+- **[Embeddings Service](<YOUR_EMBEDDINGS_SERVICE_GITHUB_LINK>)** – Consumes messages from the chunking topic, generates vector embeddings, and publishes them to the **embeddings topic**.
+- **[Ingestion Service](<YOUR_INGESTION_SERVICE_GITHUB_LINK>)** – Consumes embeddings messages and inserts processed data into **DataStax**.
+
+---
+
+## Ingestion Flow
+
+[Session Management Service]  -->  Kafka Topic: chunking | v [Embeddings Service]          -->  Kafka Topic: embeddings | v [Ingestion Service]           -->  DataStax Storage
+
+---
+
+## FastAPI Endpoints
+
+### 1. Upload File to S3
+**Description:** Uploads a file to S3 and creates a session for processing.  
+**Swagger UI:** [View Endpoint](https://mrmgusersessionmgmt-dev.aexp.com/docs#/Files/index_file_kafka_files_index_file_kafka_post)
+
+---
+
+### 2. Invoke Kafka (Start Chunking)
+**Description:** Sends a message to the **chunking** Kafka topic to start processing the uploaded file.  
+**Swagger UI:** [View Endpoint](https://mrmgusersessionmgmt-dev.aexp.com/docs#/Files/index_file_kafka_files_index_file_kafka_post)
+
+---
+
+## Related Services
+- **Embeddings Service:** [GitHub Repository](<YOUR_EMBEDDINGS_SERVICE_GITHUB_LINK>)
+- **Ingestion Service:** [GitHub Repository](<YOUR_INGESTION_SERVICE_GITHUB_LINK>)
+
+---
+
+## Logs & Monitoring
+- **OpenSearch Logs:** [View Logs](https://logs-dev.aexp.com/app/data-explorer/discover)
+
+---
+
+## Notes
+- This service **must be executed first** in the MRMG ingestion flow.
+- Kafka topics involved:
+  - `chunking` – Initiated by this service.
+  - `embeddings` – Produced by the Embeddings Service.
+  - `ingestion` – Produced by the Ingestion Service.
+
+
+---
+
+If you give me:
+
+Embeddings Service GitHub link
+
+Ingestion Service GitHub link
+
+
+I can drop them into this file so it’s final and ready for commit without placeholders.
+
+ Swagger UI](https://mrmgusersessionmgmt-dev.aexp.com/docs#/Files/index_file_kafka_files_index_file_kafka_post)
 
 **Example:**
 ![Upload File Example](upload_file_example.png)
