@@ -1,13 +1,36 @@
-import asyncio
-from app.embedding import Embed
+# Session Management Service
 
-async def main():
-    eb_object = Embed("text-embedding")
-    batch = [{"chunked_content": "test1234"}]  # adjust to whatever your method expects
+## Overview
+The **Session Management Service** is an API that allows users to interact with an LLM-powered application.  
+It supports the **MRMG** use case, enabling users to:
+- Upload model files to S3 for validation.
+- Trigger Kafka-based processing for document chunking.
+- View session history and perform additional actions.
 
-    # If embedding_call is async and accepts the batch:
-    result = await eb_object.embedding_call(batch)
-    print("successfully", result)
+---
 
-if __name__ == "__main__":
-    asyncio.run(main())
+## FastAPI Endpoints
+
+### 1. Upload File to S3
+**Description:** Upload a file to S3 and initiate validation.  
+**API Documentation:** [View in Swagger UI](https://mrmgusersessionmgmt-dev.aexp.com/docs#/Files/index_file_kafka_files_index_file_kafka_post)
+
+**Example:**
+![Upload File Example](upload_file_example.png)
+
+---
+
+### 2. Invoke Kafka via File ID
+**Description:** Trigger Kafka processing for a given file ID.  
+**API Documentation:** [View in Swagger UI](https://mrmgusersessionmgmt-dev.aexp.com/docs#/Files/index_file_kafka_files_index_file_kafka_post)
+
+**Example:**
+![Kafka Invocation Example](invoke_kafka_example.png)
+
+---
+
+## Logging
+You can monitor logs and events through OpenSearch:  
+[OpenSearch Logs](https://logs-dev.aexp.com/app/data-explorer/discover)
+
+---
