@@ -14,7 +14,114 @@ def save_chunks_to_csv(input_data: pd.DataFrame, csv_path: str) -> str:
     docx_type = "docx"
 
     for _, chunk in input_data.iterrows():
-        # Handle content as a tuple: (kind, value)
+        # Handle content as a Here’s a clean, safe refactor. It:
+
+Fills any missing/empty values with the string "None".
+
+Handles content safely (expects a (kind, value) pair).
+
+Initializes batch correctly.
+
+Publishes in batches of 5 (same as yours) but won’t crash if producer_utils is None.
+
+
+import os
+import pandas as pd
+from typing import Dict, Any, List
+from app.utils.elf_logging import logger
+
+def _str_or_none(v) -> str:
+    """Return stringified value or 'None' if value is missing/falsey."""
+    if v is None:
+        return "None"
+    if isinstance(v, str):
+        return v if v.strip() else "None"
+    # For non-strings, coerce to str (e.g., numbers, dicts) but treat falsey specially
+    return str(v) if v != "" else "None"
+
+class GranulerMessage:
+    def __init__(self, message: Dict[str, Any], producer_utils=None):
+        self.message = message or {}
+        self.producer_utils = producer_utils
+
+    def publish_messag_granular(self, input_data: pd.DataFrame) -> int:
+        """
+        Build granular payload rows from `input_data` and publish in batches of 5.
+        Any missing/empty field is stored as 'None' (string).
+        Returns the total number of chunks processed.
+        """
+        if input_data is None or len(input_data) == 0:
+            logger.warning("publish_messag_granular: input_data is empty.")
+            return 0
+
+        stage_id = _str_or_none(self.message.get("stage_id"))
+        # document_name on first row; fallback to 'None'
+        first_row = input_data.iloc[0]
+        file_name = _str_or_none(first_row.get("document_name"))
+        docx_type = "docx"
+
+        logger.info(f"Processed {file_name}: {len(input_data)} chunks")
+
+        batch: List[Dict[str, Any]] = []
+
+        for i, chunk in input_data.iterrows():
+            # Safe content parsing: expect ('table'|'image'|..., value)
+            table_val = "None"
+            image_val = "None"
+            content = chunk.get("content", None)
+            if isinstance(content, (list, tuple)) and len(content) >= 2:
+                kind, value = content[0], content[1]
+                if kind == "table":
+                    table_val = _str_or_none(value)
+                elif kind == "image":
+                    image_val = _str_or_none(value)
+
+            paragraph_text = chunk.get("paragraph_content", "")
+            paragraph_text = paragraph_text if isinstance(paragraph_text, str) else str(paragraph_text)  # keep empty ok
+            end_index = len(paragraph_text or "")
+
+            data = {
+                "type": docx_type,
+                "chunked_content": _str_or_none(paragraph_text),
+                "filename": file_name,
+                "stage_id": stage_id,
+                "filetype": docx_type,
+                "source": file_name,
+                "section_name": _str_or_none(chunk.get("toc_section_name")),
+                "section_number": _str_or_none(chunk.get("toc_section_number")),
+                "list_ID": _str_or_none(chunk.get("toc_section_number")),  # kept aligned with your code
+                "table": table_val,
+                "image_context": image_val,   # (no base64)
+                "style": _str_or_none(chunk.get("style")),
+                "style_extracted": _str_or_none(chunk.get("style_extracted")),
+                "start_index": 0,
+                "end_index": end_index,
+                "doc_format": "docx",
+                "input_type": "doc",
+            }
+
+            batch.append(data)
+
+            # publish every 5 or at the end
+            is_last = (i + 1) == len(input_data)
+            if ((i + 1) % 5 == 0) or is_last:
+                self.message["total_chunks"] = len(input_data)
+                self.message["chunk_no"] = i + 1
+                self.message["input_data"] = batch
+
+                if self.producer_utils:
+                    try:
+                        self.producer_utils.publish_message(self.message)
+                    except Exception as e:
+                        logger.exception(f"Failed to publish batch ending at chunk {i+1}: {e}")
+
+                batch = []
+
+        return len(input_data)
+
+If you also want this to save a CSV locally in the same pass, say the word and I’ll add a csv_path parameter that writes the exact rows being published.
+
+: (kind, value)
         content_kind = None
         content_value = None
         if 'content' in chunk and isinstance(chunk['content'], (list, tuple)) and len(chunk['content']) >= 2:
