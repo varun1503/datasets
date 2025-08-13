@@ -1,75 +1,41 @@
 import pandas as pd
-from typing import Union, List, Dict, Any
+from typing import List, Dict, Any
 
-def enrich_df_images_with_llm(
+def enrich_df_images_with_llm_from_tuple(
     df: pd.DataFrame,
-    image_col: str = "image",
+    content_col: str = "content",
     max_workers: int = 10,
     batch_size: int = 5
 ) -> pd.DataFrame:
     """
-    For each row in df[image_col], call the LLM with the base64 image(s) and
-    replace the column value with the LLM response(s).
-      - If the cell contains a single base64 string -> replace with a single string (LLM output).
-      - If the cell contains a list of base64 strings -> replace with a list of strings (LLM outputs).
-      - If the cell is NaN/None/empty -> leave as-is.
-
-    Returns a copy of the input DataFrame with the column updated.
+    For each row in df[content_col]:
+      - If it's a tuple ('image', base64), send base64 to LLM and replace with ('image', LLM_output).
+      - If it's any other type (e.g., ('table', data)), leave unchanged.
+    
+    Returns a new DataFrame with updated tuples in `content_col`.
     """
     df_out = df.copy()
 
     llm_batcher = BatchedLLMInvoker(max_workers=max_workers)
 
     payloads: List[Dict[str, Any]] = []
-    row_map: List[Dict[str, Any]] = []  # keeps (row_index, count, is_list)
+    row_map: List[int] = []
 
-    def _valid(img: Any) -> bool:
-        return isinstance(img, str) and len(img.strip()) > 0
+    # Collect payloads for only 'image' tuples
+    for idx, cell in df_out[content_col].items():
+        if isinstance(cell, tuple) and len(cell) == 2 and cell[0] == "image" and isinstance(cell[1], str):
+            payloads.append({"input_nodes": {"base_64_encoded_image": cell[1]}})
+            row_map.append(idx)
 
-    # Collect payloads in original order
-    for row_idx, cell in df_out[image_col].items():
-        # Case 1: list of base64 images
-        if isinstance(cell, list):
-            imgs = [img for img in cell if _valid(img)]
-            if imgs:
-                for img in imgs:
-                    payloads.append({"input_nodes": {"base_64_encoded_image": img}})
-                row_map.append({"row_idx": row_idx, "count": len(imgs), "is_list": True})
-            else:
-                # nothing to do; leave as-is
-                pass
-
-        # Case 2: single base64 string
-        elif _valid(cell):
-            payloads.append({"input_nodes": {"base_64_encoded_image": cell}})
-            row_map.append({"row_idx": row_idx, "count": 1, "is_list": False})
-
-        # Case 3: None/NaN/empty -> leave as-is
-        else:
-            continue
-
-    # If no payloads, just return copy
+    # If no image tuples found, return as is
     if not payloads:
         return df_out
 
-    # Invoke LLM in batches
+    # Invoke LLM
     results: List[str] = llm_batcher.invoke_batch(payloads, batch_size=batch_size)
 
-    # Stitch results back to rows
-    cursor = 0
-    for entry in row_map:
-        cnt = entry["count"]
-        row_idx = entry["row_idx"]
-        is_list = entry["is_list"]
-
-        outputs = results[cursor:cursor + cnt]
-        cursor += cnt
-
-        if is_list:
-            # list-in -> list-out
-            df_out.at[row_idx, image_col] = outputs
-        else:
-            # single-in -> single-out
-            df_out.at[row_idx, image_col] = outputs[0] if outputs else None
+    # Replace in DataFrame
+    for idx, output in zip(row_map, results):
+        df_out.at[idx, content_col] = ("image", output)
 
     return df_out
