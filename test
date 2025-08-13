@@ -1,20 +1,4 @@
-import os
-import pandas as pd
-from typing import Dict, Any, List
-
-def save_chunks_to_csv(input_data: pd.DataFrame, csv_path: str) -> str:
-    """
-    Build rows exactly like your publish loop and save to a local CSV.
-    Returns the absolute path of the saved CSV.
-    """
-    rows: List[Dict[str, Any]] = []
-
-    # Infer a filename once (fall back to "None" like your code)
-    file_name = input_data.iloc[0]['document_name'] if input_data.iloc[0].get('document_name') else "None"
-    docx_type = "docx"
-
-    for _, chunk in input_data.iterrows():
-        # Handle content as a Here’s a clean, safe refactor. It:
+Here’s a clean, safe refactor. It:
 
 Fills any missing/empty values with the string "None".
 
@@ -108,6 +92,19 @@ class GranulerMessage:
                 self.message["total_chunks"] = len(input_data)
                 self.message["chunk_no"] = i + 1
                 self.message["input_data"] = batch
+
+                if self.producer_utils:
+                    try:
+                        self.producer_utils.publish_message(self.message)
+                    except Exception as e:
+                        logger.exception(f"Failed to publish batch ending at chunk {i+1}: {e}")
+
+                batch = []
+
+        return len(input_data)
+
+If you also want this to save a CSV locally in the same pass, say the word and I’ll add a csv_path parameter that writes the exact rows being published.
+
 
                 if self.producer_utils:
                     try:
