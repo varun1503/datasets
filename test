@@ -1,26 +1,15 @@
-Here’s a clean, safe refactor. It:
-
-Fills any missing/empty values with the string "None".
-
-Handles content safely (expects a (kind, value) pair).
-
-Initializes batch correctly.
-
-Publishes in batches of 5 (same as yours) but won’t crash if producer_utils is None.
-
-
 import os
 import pandas as pd
 from typing import Dict, Any, List
 from app.utils.elf_logging import logger
 
 def _str_or_none(v) -> str:
-    """Return stringified value or 'None' if value is missing/falsey."""
+    """Return a clean string, or 'None' if missing/empty."""
     if v is None:
         return "None"
     if isinstance(v, str):
-        return v if v.strip() else "None"
-    # For non-strings, coerce to str (e.g., numbers, dicts) but treat falsey specially
+        s = v.strip()
+        return s if s else "None"
     return str(v) if v != "" else "None"
 
 class GranulerMessage:
@@ -28,18 +17,23 @@ class GranulerMessage:
         self.message = message or {}
         self.producer_utils = producer_utils
 
-    def publish_messag_granular(self, input_data: pd.DataFrame) -> int:
+    def publish_messag_granular(self, input_data: pd.DataFrame, csv_path: str = "./chunks_output.csv") -> int:
         """
-        Build granular payload rows from `input_data` and publish in batches of 5.
-        Any missing/empty field is stored as 'None' (string).
+        Build granular payload rows from `input_data`, publish in batches of 5,
+        and save all rows to a local CSV at `csv_path`.
+        All missing/empty fields are stored as the string 'None'.
         Returns the total number of chunks processed.
         """
         if input_data is None or len(input_data) == 0:
             logger.warning("publish_messag_granular: input_data is empty.")
+            # still write an empty CSV so callers have a file to inspect
+            csv_path = os.path.abspath(csv_path)
+            os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+            pd.DataFrame([]).to_csv(csv_path, index=False)
+            logger.info(f"✅ CSV saved (empty) at: {csv_path}")
             return 0
 
         stage_id = _str_or_none(self.message.get("stage_id"))
-        # document_name on first row; fallback to 'None'
         first_row = input_data.iloc[0]
         file_name = _str_or_none(first_row.get("document_name"))
         docx_type = "docx"
@@ -47,6 +41,7 @@ class GranulerMessage:
         logger.info(f"Processed {file_name}: {len(input_data)} chunks")
 
         batch: List[Dict[str, Any]] = []
+        rows_for_csv: List[Dict[str, Any]] = []
 
         for i, chunk in input_data.iterrows():
             # Safe content parsing: expect ('table'|'image'|..., value)
@@ -61,7 +56,8 @@ class GranulerMessage:
                     image_val = _str_or_none(value)
 
             paragraph_text = chunk.get("paragraph_content", "")
-            paragraph_text = paragraph_text if isinstance(paragraph_text, str) else str(paragraph_text)  # keep empty ok
+            if not isinstance(paragraph_text, str):
+                paragraph_text = str(paragraph_text)
             end_index = len(paragraph_text or "")
 
             data = {
@@ -84,6 +80,7 @@ class GranulerMessage:
                 "input_type": "doc",
             }
 
+            rows_for_csv.append(data)
             batch.append(data)
 
             # publish every 5 or at the end
@@ -101,55 +98,10 @@ class GranulerMessage:
 
                 batch = []
 
-        return len(input_data)
-
-If you also want this to save a CSV locally in the same pass, say the word and I’ll add a csv_path parameter that writes the exact rows being published.
-
-
-                if self.producer_utils:
-                    try:
-                        self.producer_utils.publish_message(self.message)
-                    except Exception as e:
-                        logger.exception(f"Failed to publish batch ending at chunk {i+1}: {e}")
-
-                batch = []
+        # Save all rows to CSV
+        csv_path = os.path.abspath(csv_path)
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+        pd.DataFrame(rows_for_csv).to_csv(csv_path, index=False)
+        logger.info(f"✅ CSV saved at: {csv_path}")
 
         return len(input_data)
-
-If you also want this to save a CSV locally in the same pass, say the word and I’ll add a csv_path parameter that writes the exact rows being published.
-
-: (kind, value)
-        content_kind = None
-        content_value = None
-        if 'content' in chunk and isinstance(chunk['content'], (list, tuple)) and len(chunk['content']) >= 2:
-            content_kind, content_value = chunk['content'][0], chunk['content'][1]
-
-        row = {
-            "type": docx_type,
-            "chunked_content": chunk.get("paragraph_content", ""),
-            "filename": file_name,
-            "stage_id": None,  # add if you want a constant or column
-            "filetype": docx_type,
-            "source": file_name,
-            "section_name": chunk.get("toc_section_name", "None"),
-            "section_number": chunk.get("toc_section_number", "None"),
-            "list_ID": chunk.get("toc_section_number", "None"),   # kept same as your code
-            "table": content_value if content_kind == "table" else None,
-            "image_context": content_value if content_kind == "image" else None,
-            "style": chunk.get("style", ""),
-            "style_extracted": chunk.get("style_extracted", ""),
-            "start_index": 0,
-            "end_index": len(chunk.get("paragraph_content", "")),
-            "doc_format": "docx",
-            "input_type": "doc"
-        }
-        rows.append(row)
-
-    df_out = pd.DataFrame(rows)
-
-    # Ensure folder exists and save
-    csv_path = os.path.abspath(csv_path)
-    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-    df_out.to_csv(csv_path, index=False)
-
-    return csv_path
