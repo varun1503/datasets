@@ -1,3 +1,6 @@
+Perfect — here’s the refactor that also writes the exact published rows to a local CSV.
+It keeps your batching (5), fills all missing values with "None" (string), and won’t crash if producer_utils is None.
+
 import os
 import pandas as pd
 from typing import Dict, Any, List
@@ -105,3 +108,12 @@ class GranulerMessage:
         logger.info(f"✅ CSV saved at: {csv_path}")
 
         return len(input_data)
+
+How to use
+
+gm = GranulerMessage(message={"stage_id": "ING-001"}, producer_utils=my_kafka_producer)
+count = gm.publish_messag_granular(df_chunks, csv_path="./outputs/chunks_export.csv")
+print("Processed:", count)
+
+If you want me to append to the CSV instead of overwriting, or to auto-generate a unique filename, say the word and I’ll tweak it.
+
