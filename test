@@ -1,108 +1,75 @@
-# Session Management Service
+import pandas as pd
+from typing import Union, List, Dict, Any
 
-## Overview
-The **Session Management Service** is an API that allows users to interact with an LLM-powered application.  
-It supports the **MRMG** use case, enabling users to:
-- Upload model files to S3 for validation.
-- Trigger Kafka-based processing for document chunking.
-- View session history and perform additional actions.
+def enrich_df_images_with_llm(
+    df: pd.DataFrame,
+    image_col: str = "image",
+    max_workers: int = 10,
+    batch_size: int = 5
+) -> pd.DataFrame:
+    """
+    For each row in df[image_col], call the LLM with the base64 image(s) and
+    replace the column value with the LLM response(s).
+      - If the cell contains a single base64 string -> replace with a single string (LLM output).
+      - If the cell contains a list of base64 strings -> replace with a list of strings (LLM outputs).
+      - If the cell is NaN/None/empty -> leave as-is.
 
----
+    Returns a copy of the input DataFrame with the column updated.
+    """
+    df_out = df.copy()
 
-## FastAPI Endpoints
+    llm_batcher = BatchedLLMInvoker(max_workers=max_workers)
 
-### 1. Upload File to S3
-**Description:** Upload a file to S3 and initiate validation.  
-**API Documentation:** [View inGot it ✅ — here’s the updated README with your logging link included alongside the GitHub links for Embeddings and Ingestion services.
+    payloads: List[Dict[str, Any]] = []
+    row_map: List[Dict[str, Any]] = []  # keeps (row_index, count, is_list)
 
-I’ve kept placeholders for your repo URLs so you can swap them in:
+    def _valid(img: Any) -> bool:
+        return isinstance(img, str) and len(img.strip()) > 0
 
+    # Collect payloads in original order
+    for row_idx, cell in df_out[image_col].items():
+        # Case 1: list of base64 images
+        if isinstance(cell, list):
+            imgs = [img for img in cell if _valid(img)]
+            if imgs:
+                for img in imgs:
+                    payloads.append({"input_nodes": {"base_64_encoded_image": img}})
+                row_map.append({"row_idx": row_idx, "count": len(imgs), "is_list": True})
+            else:
+                # nothing to do; leave as-is
+                pass
 
----
+        # Case 2: single base64 string
+        elif _valid(cell):
+            payloads.append({"input_nodes": {"base_64_encoded_image": cell}})
+            row_map.append({"row_idx": row_idx, "count": 1, "is_list": False})
 
-# Session Management Service – MRMG Ingestion Step 1
+        # Case 3: None/NaN/empty -> leave as-is
+        else:
+            continue
 
-## Overview
-The **Session Management Service** is the **first step** in the **MRMG ingestion pipeline**.  
-It is responsible for:
-1. Uploading model/document files to S3.
-2. Invoking Kafka to send processing messages to the **chunking topic**.
-3. Initiating the document chunking process.
+    # If no payloads, just return copy
+    if not payloads:
+        return df_out
 
-Once chunking completes, the pipeline continues with:
-- **[Embeddings Service](<YOUR_EMBEDDINGS_SERVICE_GITHUB_LINK>)** – Consumes messages from the chunking topic, generates vector embeddings, and publishes them to the **embeddings topic**.
-- **[Ingestion Service](<YOUR_INGESTION_SERVICE_GITHUB_LINK>)** – Consumes embeddings messages and inserts processed data into **DataStax**.
+    # Invoke LLM in batches
+    results: List[str] = llm_batcher.invoke_batch(payloads, batch_size=batch_size)
 
----
+    # Stitch results back to rows
+    cursor = 0
+    for entry in row_map:
+        cnt = entry["count"]
+        row_idx = entry["row_idx"]
+        is_list = entry["is_list"]
 
-## Ingestion Flow
+        outputs = results[cursor:cursor + cnt]
+        cursor += cnt
 
-[Session Management Service]  -->  Kafka Topic: chunking | v [Embeddings Service]          -->  Kafka Topic: embeddings | v [Ingestion Service]           -->  DataStax Storage
+        if is_list:
+            # list-in -> list-out
+            df_out.at[row_idx, image_col] = outputs
+        else:
+            # single-in -> single-out
+            df_out.at[row_idx, image_col] = outputs[0] if outputs else None
 
----
-
-## FastAPI Endpoints
-
-### 1. Upload File to S3
-**Description:** Uploads a file to S3 and creates a session for processing.  
-**Swagger UI:** [View Endpoint](https://mrmgusersessionmgmt-dev.aexp.com/docs#/Files/index_file_kafka_files_index_file_kafka_post)
-
----
-
-### 2. Invoke Kafka (Start Chunking)
-**Description:** Sends a message to the **chunking** Kafka topic to start processing the uploaded file.  
-**Swagger UI:** [View Endpoint](https://mrmgusersessionmgmt-dev.aexp.com/docs#/Files/index_file_kafka_files_index_file_kafka_post)
-
----
-
-## Related Services
-- **Embeddings Service:** [GitHub Repository](<YOUR_EMBEDDINGS_SERVICE_GITHUB_LINK>)
-- **Ingestion Service:** [GitHub Repository](<YOUR_INGESTION_SERVICE_GITHUB_LINK>)
-
----
-
-## Logs & Monitoring
-- **OpenSearch Logs:** [View Logs](https://logs-dev.aexp.com/app/data-explorer/discover)
-
----
-
-## Notes
-- This service **must be executed first** in the MRMG ingestion flow.
-- Kafka topics involved:
-  - `chunking` – Initiated by this service.
-  - `embeddings` – Produced by the Embeddings Service.
-  - `ingestion` – Produced by the Ingestion Service.
-
-
----
-
-If you give me:
-
-Embeddings Service GitHub link
-
-Ingestion Service GitHub link
-
-
-I can drop them into this file so it’s final and ready for commit without placeholders.
-
- Swagger UI](https://mrmgusersessionmgmt-dev.aexp.com/docs#/Files/index_file_kafka_files_index_file_kafka_post)
-
-**Example:**
-![Upload File Example](upload_file_example.png)
-
----
-
-### 2. Invoke Kafka via File ID
-**Description:** Trigger Kafka processing for a given file ID.  
-**API Documentation:** [View in Swagger UI](https://mrmgusersessionmgmt-dev.aexp.com/docs#/Files/index_file_kafka_files_index_file_kafka_post)
-
-**Example:**
-![Kafka Invocation Example](invoke_kafka_example.png)
-
----
-
-## Logging
-You can monitor logs and events through OpenSearch:  
-[OpenSearch Logs](https://logs-dev.aexp.com/app/data-explorer/discover)
-
----
+    return df_out
