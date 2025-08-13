@@ -1,119 +1,16 @@
-Perfect — here’s the refactor that also writes the exact published rows to a local CSV.
-It keeps your batching (5), fills all missing values with "None" (string), and won’t crash if producer_utils is None.
-
-import os
 import pandas as pd
-from typing import Dict, Any, List
-from app.utils.elf_logging import logger
 
-def _str_or_none(v) -> str:
-    """Return a clean string, or 'None' if missing/empty."""
-    if v is None:
-        return "None"
-    if isinstance(v, str):
-        s = v.strip()
-        return s if s else "None"
-    return str(v) if v != "" else "None"
+# Show all columns
+pd.set_option('display.max_columns', None)
 
-class GranulerMessage:
-    def __init__(self, message: Dict[str, Any], producer_utils=None):
-        self.message = message or {}
-        self.producer_utils = producer_utils
+# Show all rows
+pd.set_option('display.max_rows', None)
 
-    def publish_messag_granular(self, input_data: pd.DataFrame, csv_path: str = "./chunks_output.csv") -> int:
-        """
-        Build granular payload rows from `input_data`, publish in batches of 5,
-        and save all rows to a local CSV at `csv_path`.
-        All missing/empty fields are stored as the string 'None'.
-        Returns the total number of chunks processed.
-        """
-        if input_data is None or len(input_data) == 0:
-            logger.warning("publish_messag_granular: input_data is empty.")
-            # still write an empty CSV so callers have a file to inspect
-            csv_path = os.path.abspath(csv_path)
-            os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-            pd.DataFrame([]).to_csv(csv_path, index=False)
-            logger.info(f"✅ CSV saved (empty) at: {csv_path}")
-            return 0
+# Make sure column width isn't cut off
+pd.set_option('display.max_colwidth', None)
 
-        stage_id = _str_or_none(self.message.get("stage_id"))
-        first_row = input_data.iloc[0]
-        file_name = _str_or_none(first_row.get("document_name"))
-        docx_type = "docx"
+# No row/column truncation in the output
+pd.set_option('display.expand_frame_repr', False)
 
-        logger.info(f"Processed {file_name}: {len(input_data)} chunks")
-
-        batch: List[Dict[str, Any]] = []
-        rows_for_csv: List[Dict[str, Any]] = []
-
-        for i, chunk in input_data.iterrows():
-            # Safe content parsing: expect ('table'|'image'|..., value)
-            table_val = "None"
-            image_val = "None"
-            content = chunk.get("content", None)
-            if isinstance(content, (list, tuple)) and len(content) >= 2:
-                kind, value = content[0], content[1]
-                if kind == "table":
-                    table_val = _str_or_none(value)
-                elif kind == "image":
-                    image_val = _str_or_none(value)
-
-            paragraph_text = chunk.get("paragraph_content", "")
-            if not isinstance(paragraph_text, str):
-                paragraph_text = str(paragraph_text)
-            end_index = len(paragraph_text or "")
-
-            data = {
-                "type": docx_type,
-                "chunked_content": _str_or_none(paragraph_text),
-                "filename": file_name,
-                "stage_id": stage_id,
-                "filetype": docx_type,
-                "source": file_name,
-                "section_name": _str_or_none(chunk.get("toc_section_name")),
-                "section_number": _str_or_none(chunk.get("toc_section_number")),
-                "list_ID": _str_or_none(chunk.get("toc_section_number")),  # kept aligned with your code
-                "table": table_val,
-                "image_context": image_val,   # (no base64)
-                "style": _str_or_none(chunk.get("style")),
-                "style_extracted": _str_or_none(chunk.get("style_extracted")),
-                "start_index": 0,
-                "end_index": end_index,
-                "doc_format": "docx",
-                "input_type": "doc",
-            }
-
-            rows_for_csv.append(data)
-            batch.append(data)
-
-            # publish every 5 or at the end
-            is_last = (i + 1) == len(input_data)
-            if ((i + 1) % 5 == 0) or is_last:
-                self.message["total_chunks"] = len(input_data)
-                self.message["chunk_no"] = i + 1
-                self.message["input_data"] = batch
-
-                if self.producer_utils:
-                    try:
-                        self.producer_utils.publish_message(self.message)
-                    except Exception as e:
-                        logger.exception(f"Failed to publish batch ending at chunk {i+1}: {e}")
-
-                batch = []
-
-        # Save all rows to CSV
-        csv_path = os.path.abspath(csv_path)
-        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-        pd.DataFrame(rows_for_csv).to_csv(csv_path, index=False)
-        logger.info(f"✅ CSV saved at: {csv_path}")
-
-        return len(input_data)
-
-How to use
-
-gm = GranulerMessage(message={"stage_id": "ING-001"}, producer_utils=my_kafka_producer)
-count = gm.publish_messag_granular(df_chunks, csv_path="./outputs/chunks_export.csv")
-print("Processed:", count)
-
-If you want me to append to the CSV instead of overwriting, or to auto-generate a unique filename, say the word and I’ll tweak it.
-
+# Now print your DataFrame
+print(df)  # or just df in a cell
