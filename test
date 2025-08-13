@@ -1,41 +1,51 @@
+import os
 import pandas as pd
-from typing import List, Dict, Any
+from typing import Dict, Any, List
 
-def enrich_df_images_with_llm_from_tuple(
-    df: pd.DataFrame,
-    content_col: str = "content",
-    max_workers: int = 10,
-    batch_size: int = 5
-) -> pd.DataFrame:
+def save_chunks_to_csv(input_data: pd.DataFrame, csv_path: str) -> str:
     """
-    For each row in df[content_col]:
-      - If it's a tuple ('image', base64), send base64 to LLM and replace with ('image', LLM_output).
-      - If it's any other type (e.g., ('table', data)), leave unchanged.
-    
-    Returns a new DataFrame with updated tuples in `content_col`.
+    Build rows exactly like your publish loop and save to a local CSV.
+    Returns the absolute path of the saved CSV.
     """
-    df_out = df.copy()
+    rows: List[Dict[str, Any]] = []
 
-    llm_batcher = BatchedLLMInvoker(max_workers=max_workers)
+    # Infer a filename once (fall back to "None" like your code)
+    file_name = input_data.iloc[0]['document_name'] if input_data.iloc[0].get('document_name') else "None"
+    docx_type = "docx"
 
-    payloads: List[Dict[str, Any]] = []
-    row_map: List[int] = []
+    for _, chunk in input_data.iterrows():
+        # Handle content as a tuple: (kind, value)
+        content_kind = None
+        content_value = None
+        if 'content' in chunk and isinstance(chunk['content'], (list, tuple)) and len(chunk['content']) >= 2:
+            content_kind, content_value = chunk['content'][0], chunk['content'][1]
 
-    # Collect payloads for only 'image' tuples
-    for idx, cell in df_out[content_col].items():
-        if isinstance(cell, tuple) and len(cell) == 2 and cell[0] == "image" and isinstance(cell[1], str):
-            payloads.append({"input_nodes": {"base_64_encoded_image": cell[1]}})
-            row_map.append(idx)
+        row = {
+            "type": docx_type,
+            "chunked_content": chunk.get("paragraph_content", ""),
+            "filename": file_name,
+            "stage_id": None,  # add if you want a constant or column
+            "filetype": docx_type,
+            "source": file_name,
+            "section_name": chunk.get("toc_section_name", "None"),
+            "section_number": chunk.get("toc_section_number", "None"),
+            "list_ID": chunk.get("toc_section_number", "None"),   # kept same as your code
+            "table": content_value if content_kind == "table" else None,
+            "image_context": content_value if content_kind == "image" else None,
+            "style": chunk.get("style", ""),
+            "style_extracted": chunk.get("style_extracted", ""),
+            "start_index": 0,
+            "end_index": len(chunk.get("paragraph_content", "")),
+            "doc_format": "docx",
+            "input_type": "doc"
+        }
+        rows.append(row)
 
-    # If no image tuples found, return as is
-    if not payloads:
-        return df_out
+    df_out = pd.DataFrame(rows)
 
-    # Invoke LLM
-    results: List[str] = llm_batcher.invoke_batch(payloads, batch_size=batch_size)
+    # Ensure folder exists and save
+    csv_path = os.path.abspath(csv_path)
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    df_out.to_csv(csv_path, index=False)
 
-    # Replace in DataFrame
-    for idx, output in zip(row_map, results):
-        df_out.at[idx, content_col] = ("image", output)
-
-    return df_out
+    return csv_path
