@@ -1,16 +1,120 @@
-import pandas as pd
+def process_message(consumer, message, env, string_template_query_utils, kafka_producer):
+    try:
+        # do not mutate early until env is verified
+        if message.get("env") != env:
+            logger.error(f"message env '{message.get('env')}' does not match local env '{env}'")
+            return
 
-# Show all columns
-pd.set_option('display.max_columns', None)
+        message["job_type"] = "chunking"
+        message["job_status"] = "Started"
 
-# Show all rows
-pd.set_option('display.max_rows', None)
+        # skip if already processed
+        already = string_template_query_utils.run_single_query(
+            "app/templates/chunking.stg",
+            "check_for_chunk_no",
+            "template_input",
+            message,
+            "select",
+            True
+        )
+        if len(already) != 0:
+            logger.info(f"Chunks already processed for job_id: {message['job_id']}")
+            return
 
-# Make sure column width isn't cut off
-pd.set_option('display.max_colwidth', None)
+        logger.info(f"Chunking started for job_id: {message['job_id']}")
+        message["is_completed"] = False
+        string_template_query_utils.run_single_query(
+            "app/templates/chunking.stg",
+            "insert_job_stage_status",
+            "template_input",
+            message,
+            "insert",
+            True
+        )
 
-# No row/column truncation in the output
-pd.set_option('display.expand_frame_repr', False)
+        # helper to run a single mode and record status
+        def run_mode(mode_name: str) -> int:
+            # copy the message to keep per-mode fields clean in logs/db
+            msg = dict(message)
+            msg["chunking_type"] = mode_name
+            logger.info(f"Starting {mode_name} chunking for job_id: {msg['job_id']}")
 
-# Now print your DataFrame
-print(df)  # or just df in a cell
+            if mode_name == "granular":
+                chunking = GranulerMessage(msg, producer_utils=kafka_producer)
+                total = process_file_granular(chunking, msg)
+            elif mode_name == "automerger":
+                chunking = Chunking(msg, producer_utils=kafka_producer)
+                total = process_file(chunking, msg)
+            else:
+                raise ValueError(f"Unknown chunking mode: {mode_name}")
+
+            msg["total_chunks"] = total
+            msg["is_completed"] = True
+            msg["job_status"] = "Completed"
+
+            # IMPORTANT: was "message" (string) earlier; corrected to msg
+            string_template_query_utils.run_single_query(
+                "app/templates/chunking.stg",
+                "insert_job_stage_status",
+                "template_input",
+                msg,
+                "insert",
+                True
+            )
+            logger.info(f"Chunking completed for job_id: {msg['job_id']}, mode={mode_name}, total_chunks={total}")
+            return total
+
+        # decide what to run
+        ctype = str(config.get("chunking", {}).get("type", "automerger")).lower()
+        total_counts = {}
+
+        if ctype == "granular":
+            total_counts["granular"] = run_mode("granular")
+        elif ctype in ("automerger", "auto", "merger"):
+            total_counts["automerger"] = run_mode("automerger")
+        elif ctype in ("both", "all"):
+            # run both sequentially: granular then automerger
+            total_counts["granular"] = run_mode("granular")
+            total_counts["automerger"] = run_mode("automerger")
+        else:
+            raise ValueError(f"Unsupported chunking.type '{ctype}'. Expected 'granular', 'automerger', or 'both'.")
+
+        # summary status for the overall job
+        message["job_status"] = "Completed"
+        message["is_completed"] = True
+        message["chunking_type"] = ctype
+        # store per-mode totals as JSON for convenience
+        message["total_chunks"] = json.dumps(total_counts)
+
+        string_template_query_utils.run_single_query(
+            "app/templates/chunking.stg",
+            "insert_job_stage_status",
+            "template_input",
+            message,
+            "insert",
+            True
+        )
+        logger.info(
+            f"All chunking completed for job_id: {message['job_id']} with totals {total_counts} (type={ctype})"
+        )
+
+    except Exception as e:
+        logger.error(e, exc_info=True)
+        try:
+            if message.get("env") == env:
+                message["error_message"] = base64_utils.base64_encode(str(e))
+                message["job_status"] = "Failed"
+                message["is_completed"] = True
+                string_template_query_utils.run_single_query(
+                    "app/templates/chunking.stg",
+                    "insert_job_stage_status",
+                    "template_input",
+                    message,
+                    "insert",
+                    True
+                )
+        finally:
+            pass
+    finally:
+        # commit the offset for this message after processing attempt
+        consumer.commit()
