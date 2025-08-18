@@ -1,53 +1,32 @@
-Here’s a rephrased one-pager summary for your scrum meeting:
+import re
+import unicodedata
 
+class Preprocessing:
+    def __init__(self):
+        self.s3_object = S3Utils()
 
----
+    def clean_paragraph_text(self, text: str) -> str:
+        """
+        Cleans a paragraph by:
+        - Normalizing unicode (NFKC)
+        - Removing newlines and extra blank lines
+        - Replacing non-breaking spaces
+        - Collapsing multiple spaces/tabs into one
+        - Stripping leading/trailing whitespace
+        """
+        if not isinstance(text, str):
+            return ""
 
-MRMG EA Playbook – Business Vision & Architectures
+        s = unicodedata.normalize("NFKC", text)
 
-1. Business Vision
-We are creating the MRMG EA Playbook – Business Vision document, which defines the overall direction and alignment for MRMG initiatives.
+        # Normalize spaces/newlines
+        s = s.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+        s = s.replace("\xa0", " ")  # non-breaking space → normal space
 
-2. Business Architecture
-This section outlines:
+        # Collapse multiple whitespace (spaces, tabs, etc.) into one
+        s = re.sub(r"\s+", " ", s)
 
-Level 0 Business Flow – high-level process view.
+        # Strip leading/trailing
+        s = s.strip()
 
-Customer Journey – mapping customer interactions across touchpoints.
-
-Domain APIs – defining business capabilities and API domains.
-
-
-3. Technical Architecture
-Focus areas include:
-
-Architecture Levels & Data Flow – system interactions and integration.
-
-API Interfaces – defining technical touchpoints.
-
-Buy–Build–Reuse Assessment – technology strategy for implementation.
-
-
-4. Information Architecture
-Covers:
-
-Data Platform Architecture – foundational data systems.
-
-Data Lifecycle Management – governance from creation to archival.
-
-Physical Design – storage, models, and structures.
-
-
-5. Operational & Security Architecture
-Two integrated areas:
-
-Operational – High availability, fault tolerance, observability, and change management.
-
-Security – Security design, data protection, and cyberthreat defense.
-
-
-
----
-
-Would you like me to also condense this into a very short 3–4 bullet “talking points” version so you can read it quickly in the scrum without going into detail?
-
+        return s
