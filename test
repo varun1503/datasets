@@ -181,3 +181,13 @@ class Preprocessing:
 
         dict_chunk = {preprocess_chunk[0]["Source"]: final_chunk} if preprocess_chunk else {}
         return dict_chunk
+
+import json
+
+def save_dict_chunk(dict_chunk, file_path="dict_chunk_output.json"):
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(dict_chunk, f, indent=2, ensure_ascii=False)
+        print(f"✅ Dict chunk saved to {file_path}")
+    except Exception as e:
+        print(f"❌ Failed to save: {e}")
