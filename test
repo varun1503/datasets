@@ -1,32 +1,183 @@
+from langchain.schema import Document
 import re
 import unicodedata
+import nest_asyncio
+nest_asyncio.apply()
+from app.utils.s3_storage import S3Utils
 
 class Preprocessing:
     def __init__(self):
         self.s3_object = S3Utils()
 
+    def convert_table_to_json(self, tables):
+        json_tables = []
+        for table in tables:
+            if not table or len(table) < 2:
+                continue
+            header = table[0]
+            rows = table[1:]
+            try:
+                table_json = [dict(zip(header, row)) for row in rows]
+            except Exception:
+                table_json = table  # fallback
+            json_tables.append(table_json)
+        return json_tables if json_tables else None
+
     def clean_paragraph_text(self, text: str) -> str:
-        """
-        Cleans a paragraph by:
-        - Normalizing unicode (NFKC)
-        - Removing newlines and extra blank lines
-        - Replacing non-breaking spaces
-        - Collapsing multiple spaces/tabs into one
-        - Stripping leading/trailing whitespace
-        """
         if not isinstance(text, str):
             return ""
-
         s = unicodedata.normalize("NFKC", text)
-
-        # Normalize spaces/newlines
         s = s.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
-        s = s.replace("\xa0", " ")  # non-breaking space → normal space
-
-        # Collapse multiple whitespace (spaces, tabs, etc.) into one
-        s = re.sub(r"\s+", " ", s)
-
-        # Strip leading/trailing
-        s = s.strip()
-
+        s = s.replace("\xa0", " ")                    # nbsp → space
+        s = re.sub(r"\s+", " ", s).strip()           # collapse spaces
         return s
+
+    def preprocess_content_chunks(self, content):
+        preprocess_chunk = []
+        current_source = content[0].get("source", None) if content else None
+
+        current_heading = None
+        current_subheading = None
+        section = None
+        subsection = None
+
+        # lists we accumulate
+        paragraph_parts = []          # ← use list, not string
+        current_tables = []
+        current_base64 = []
+        current_caption = []
+        style_extracted = []
+        style = []
+
+        tmrc_checklist = None
+        last_was_heading = False
+
+        def flush_chunk():
+            nonlocal paragraph_parts, current_tables, current_base64
+            nonlocal tmrc_checklist, current_caption, style, style_extracted
+
+            has_para = any(p for p in paragraph_parts)
+            if has_para or current_tables or current_base64 or tmrc_checklist or current_caption:
+                paragraph = " ".join(p.strip() for p in paragraph_parts if p).strip()
+                paragraph = paragraph if paragraph else None
+
+                chunk = {
+                    "heading": current_heading,
+                    "subheading": current_subheading,
+                    "section": section,
+                    "subsection": subsection,
+                    "paragraph": paragraph,
+                    "table": self.convert_table_to_json(current_tables) if current_tables else None,
+                    "image_context": current_base64 if current_base64 else None,
+                    "caption": current_caption if current_caption else None,
+                    "tmrc_checklist": tmrc_checklist if tmrc_checklist else None,
+                    "Source": current_source,
+                    "style": style if style else None,
+                    "style_extracted": style_extracted if style_extracted else None,
+                }
+                preprocess_chunk.append(chunk)
+
+            # Reset accumulators (keep types consistent)
+            paragraph_parts = []
+            current_tables = []
+            current_base64 = []
+            current_caption = []
+            style_extracted = []
+            style = []
+            tmrc_checklist = None
+
+        for item in content:
+            item_type = item.get("type")
+            current_source = item.get("source", current_source)
+
+            # --- Heading Level 1 ---
+            if item_type == "heading" and item.get("level") == 1:
+                flush_chunk()
+                current_heading = item.get("text")
+                current_subheading = None
+                section = item.get("section")
+                subsection = None
+                last_was_heading = True
+                if item.get("style"):
+                    style.append(item.get("style"))
+
+            # --- Heading Level 2 ---
+            elif item_type == "heading" and item.get("level") == 2:
+                flush_chunk()
+                current_subheading = item.get("text")
+                subsection = item.get("section")
+                last_was_heading = True
+                if item.get("style"):
+                    style.append(item.get("style"))
+
+            # --- Paragraph ---
+            elif item_type == "paragraph":
+                raw_text = item.get("text", "")
+                text = self.clean_paragraph_text(raw_text)
+                if text:
+                    paragraph_parts.append(text)     # ← no "+= ' '"
+                    last_was_heading = False
+
+                if item.get("style_extract"):
+                    style_extracted.extend(item.get("style_extract") or [])
+                if item.get("caption") is not None:
+                    current_caption.append(item.get("caption"))
+                if item.get("style"):
+                    style.append(item.get("style"))
+
+            # --- Table ---
+            elif item_type == "table":
+                if last_was_heading and tmrc_checklist is None:
+                    if item.get("style"):
+                        style.extend(item.get("style") or [])
+                    tmrc_checklist = item.get("data", [])
+                    last_was_heading = False
+                else:
+                    current_tables.append(item.get("data", []))
+                    if item.get("style"):
+                        style.append(item.get("style"))
+
+            # --- Image ---
+            elif item_type == "image":
+                if item.get("style"):
+                    style.extend(item.get("style") or [])
+                context = (item.get("image_context") or "").strip()
+                if context:
+                    current_base64.append(context)
+                last_was_heading = False
+
+        flush_chunk()
+        return preprocess_chunk
+
+    def chunk_document(self, preprocess_chunk):
+        final_chunk = []
+
+        for i in range(1, len(preprocess_chunk)):
+            chunk = preprocess_chunk[i]
+            if not isinstance(chunk, dict):
+                continue
+
+            # ensure metadata exists
+            metadata = chunk.get("metadata", {})
+            chunk["metadata"] = metadata
+
+            metadata.update({
+                "heading": chunk.get("heading"),
+                "subheading": chunk.get("subheading"),
+                "table": chunk.get("table"),
+                "image_context": chunk.get("image_context"),
+                "tmrc_checklist": chunk.get("tmrc_checklist"),
+                "source": chunk.get("Source"),
+                "section": chunk.get("section"),
+                "subsection": chunk.get("subsection"),
+                "caption": chunk.get("caption"),
+                "style": chunk.get("style"),
+                "style_extracted": chunk.get("style_extracted"),
+            })
+
+            text = chunk.get("paragraph") or "None"
+            doc = Document(page_content=text, metadata=metadata)
+            final_chunk.append(doc)
+
+        dict_chunk = {preprocess_chunk[0]["Source"]: final_chunk} if preprocess_chunk else {}
+        return dict_chunk
