@@ -1,52 +1,77 @@
+# pip install python-docx
+
 import ast
-from typing import List, Dict, Any
+from typing import Any, Dict, List, Tuple, Union
 from docx import Document
 from docx.shared import Pt, RGBColor
 
 
-# ----------- Helpers --------------------------------------------------------
+# ==========================
+# Parsing helpers
+# ==========================
 
-def safe_eval(val):
-    """Parse possibly double-escaped string into Python objects."""
-    if val is None:
-        return None
-    if isinstance(val, (list, dict)):
-        return val
-    if not isinstance(val, str) or not val.strip():
-        return val
+def _safe_eval(v: Any) -> Any:
+    """
+    Parse possibly double-escaped string into Python objects.
+    - If v is already list/dict -> return as is
+    - Try ast.literal_eval once, if result is still a string, try again
+    - Otherwise return original
+    """
+    if v is None or isinstance(v, (list, dict)):
+        return v
+    if not isinstance(v, str) or not v.strip():
+        return v
     try:
-        parsed = ast.literal_eval(val)
-        if isinstance(parsed, str):  # sometimes still a string
+        x = ast.literal_eval(v)
+        if isinstance(x, str):
             try:
-                return ast.literal_eval(parsed)
+                return ast.literal_eval(x)
             except Exception:
-                return parsed
-        return parsed
+                return x
+        return x
     except Exception:
-        return val
+        return v
 
 
-def parse_smry_blb(smry_str: str):
-    """Return (para_styles, runs) from smry_blb_tx string."""
-    outer = safe_eval(smry_str)
-    para_styles, runs = [], []
+def _parse_style_runs(
+    raw_field: Any,
+    style_key: str = "style",
+    runs_key: str = "style_extracted",
+) -> Tuple[List[str], List[Dict[str, Any]]]:
+    """
+    raw_field is your 'smry_blb_tx' giant string, which represents a dict:
+      {'style': "['Heading 2','Normal',...]", 'style_extracted': "[{...}, ...]"}
+    Returns:
+      (paragraph_styles, run_fragments)
+    """
+    outer = _safe_eval(raw_field)
+    para_styles: List[str] = []
+    runs: List[Dict[str, Any]] = []
 
     if isinstance(outer, dict):
-        styles = safe_eval(outer.get("style"))
-        if isinstance(styles, list):
-            para_styles = [str(s) for s in styles]
+        styles_val = _safe_eval(outer.get(style_key))
+        if isinstance(styles_val, list):
+            para_styles = [str(s) for s in styles_val]
+        elif isinstance(styles_val, str):
+            sv = _safe_eval(styles_val)
+            if isinstance(sv, list):
+                para_styles = [str(s) for s in sv]
 
-        style_ex = safe_eval(outer.get("style_extracted"))
-        if isinstance(style_ex, list):
-            for r in style_ex:
+        runs_val = _safe_eval(outer.get(runs_key))
+        if isinstance(runs_val, list):
+            for r in runs_val:
                 runs.append(r if isinstance(r, dict) else {"text": str(r)})
 
     return para_styles, runs
 
 
-def apply_run_format(run, frag: Dict[str, Any]):
+# ==========================
+# Formatting helpers
+# ==========================
+
+def _apply_run_format(run, frag: Dict[str, Any]) -> None:
     """Apply character-level formatting to a run."""
-    run.text = frag.get("text", "")
+    run.text = frag.get("text", "") or ""
 
     if frag.get("bold") is not None:
         run.bold = bool(frag["bold"])
@@ -56,80 +81,142 @@ def apply_run_format(run, frag: Dict[str, Any]):
         run.underline = bool(frag["underline"])
 
     fs = frag.get("font_size")
-    if fs:
+    if fs is not None:
         try:
             run.font.size = Pt(float(fs))
         except Exception:
             pass
+
     if frag.get("font_name"):
         run.font.name = str(frag["font_name"])
 
     color = frag.get("color")
     if color:
         try:
-            hexcolor = str(color).lstrip("#")
-            run.font.color.rgb = RGBColor.from_string(hexcolor)
+            run.font.color.rgb = RGBColor.from_string(str(color).lstrip("#"))
         except Exception:
             pass
 
 
-def pick_block_style(para_styles: List[str]) -> str:
-    """Choose paragraph style (map list paragraphs to bullet list)."""
+def _pick_par_style(para_styles: List[str], list_style_name: str, default_par_style: str) -> str:
+    """
+    Choose a paragraph style for Word.
+    - If first style contains 'list' -> map to list_style_name
+    - Else use first style
+    - Else default
+    """
     if para_styles:
         s0 = str(para_styles[0])
-        if "list" in s0.lower():
-            return "List Bullet"
-        return s0
-    return "Normal"
+        return list_style_name if "list" in s0.lower() else s0
+    return default_par_style
 
 
-# ----------- Main Writer ----------------------------------------------------
+# ==========================
+# Main builder
+# ==========================
 
-def write_doc_from_records(records: List[Dict[str, Any]], out_path="rebuilt.docx"):
+def build_docx(
+    records: Union[List[Dict[str, Any]], Dict[str, Any]],
+    out_path: str = "Full_Rebuild.docx",
+    *,
+    # field names (override if yours differ)
+    smry_field: str = "smry_blb_tx",
+    body_field: str = "bdy_blb_tx",
+    style_key: str = "style",
+    runs_key: str = "style_extracted",
+    heading_key: str = "heading",
+    subheading_key: str = "subheading",
+    section_key: str = "section",
+    subsection_key: str = "subsection",
+    # behavior
+    include_headings: bool = True,
+    list_style_name: str = "List Bullet",
+    default_par_style: str = "Normal",
+) -> str:
     """
-    Convert all parsed records into a Word document.
-    Inserts heading/subheading hierarchy, then formatted paragraph text.
+    Rebuild a .docx from your in-memory dataset (list[dict] or single dict).
+    - Inserts headings/subheadings with section numbers if present.
+    - Reconstructs paragraphs from styled runs in smry_blb_tx.
+    - Falls back to bdy_blb_tx if styled runs are missing.
     """
+    # Accept a single dict too
+    if isinstance(records, dict):
+        records = [records]
+
     doc = Document()
 
     for rec in records:
-        heading = rec.get("heading")
-        subheading = rec.get("subheading")
-        section = rec.get("section")
-        subsection = rec.get("subsection")
+        # Optional heading/subheading lines
+        if include_headings:
+            sec = rec.get(section_key, "") or ""
+            heading = rec.get(heading_key, "") or ""
+            subsec = rec.get(subsection_key, "") or ""
+            subheading = rec.get(subheading_key, "") or ""
 
-        # Insert headings if present
-        if heading:
-            doc.add_heading(f"{section} {heading}".strip(), level=1)
-        if subheading:
-            doc.add_heading(f"{subsection} {subheading}".strip(), level=2)
+            if heading:
+                doc.add_heading(f"{sec} {heading}".strip(), level=1)
+            if subheading:
+                doc.add_heading(f"{subsec} {subheading}".strip(), level=2)
 
-        # Build paragraph from smry_blb_tx
-        para_styles, runs = parse_smry_blb(rec.get("smry_blb_tx"))
+        # Build paragraph from styled summary; else use body text
+        para_styles, runs = _parse_style_runs(rec.get(smry_field), style_key, runs_key)
+
         if runs:
             p = doc.add_paragraph()
             try:
-                p.style = pick_block_style(para_styles)
+                p.style = _pick_par_style(para_styles, list_style_name, default_par_style)
             except Exception:
-                p.style = "Normal"
+                p.style = default_par_style
+
             for frag in runs:
-                apply_run_format(p.add_run(), frag)
+                _apply_run_format(p.add_run(), frag)
+
         else:
-            # fallback to plain text body blob
-            if rec.get("bdy_blb_tx"):
-                doc.add_paragraph(rec["bdy_blb_tx"], style="Normal")
+            txt = rec.get(body_field)
+            if txt:
+                doc.add_paragraph(txt, style=default_par_style)
 
     doc.save(out_path)
     return out_path
 
 
-# ---------------- Example Usage ----------------
+# ==========================
+# Example usage
+# ==========================
 if __name__ == "__main__":
-    import json
+    # Example: replace `records` with your actual in-memory variable
+    # (list of dicts OR a single dict). The sample below mirrors your structure.
+    records = [
+        {
+            "heading": "5 Model Data",
+            "subheading": "5.4 Model Data Documentation",
+            "section": "5",
+            "subsection": "5.4",
+            "bdy_blb_tx": "Fallback plain text if styled runs are unavailable.",
+            "smry_blb_tx": (
+                "{'style': \"['Heading 2', 'Normal', 'List Paragraph']\", "
+                "'style_extracted': \"["
+                "{\\'text\\': \\'The variable tracking for this model \\\\', \\'bold\\': None, \\'italic\\': None, \\'underline\\': None, \\'font_size\\': 10.0, \\'font_name\\': \\'BentonSans Book\\'},"
+                "{\\'text\\': \\'will be\\', \\'bold\\': None, \\'italic\\': None, \\'underline\\': None, \\'font_size\\': 10.0, \\'font_name\\': \\'BentonSans Book\\'},"
+                "{\\'text\\': \\' integrated with Continuous Data Integrity Tracking platform (CDIT).\\', \\'bold\\': None, \\'italic\\': None, \\'underline\\': None, \\'font_size\\': 10.0, \\'font_name\\': \\'BentonSans Book\\'}"
+                "]\"}"
+            ),
+        }
+    ]
 
-    # load your file (the uploaded JSON-like file with many records)
-    with open("your_records.json", "r", encoding="utf-8") as f:
-        data = json.load(f)   # should be a list of dicts
-
-    out_path = write_doc_from_records(data, "Full_Rebuild.docx")
-    print("Saved:", out_path)
+    path = build_docx(
+        records,
+        out_path="Reconstructed.docx",
+        smry_field="smry_blb_tx",
+        body_field="bdy_blb_tx",
+        style_key="style",
+        runs_key="style_extracted",
+        heading_key="heading",
+        subheading_key="subheading",
+        section_key="section",
+        subsection_key="subsection",
+        include_headings=True,
+        list_style_name="List Bullet",   # change to your corporate list style if needed
+        default_par_style="Normal",
+    )
+    print("Saved:", path)
