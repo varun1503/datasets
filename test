@@ -1,114 +1,47 @@
-from langchain.schema import Document
-import re
-import unicodedata
-import nest_asyncio
-nest_asyncio.apply()
-from app.utils.s3_storage import S3Utils
+import requests
+import json
 
-class Preprocessing:
-    def __init__(self):
-        self.s3_object = S3Utils()
+def call_api(url: str, payload: dict = None, headers: dict = None, method: str = "POST"):
+    """
+    Call an API endpoint.
 
-    def convert_table_to_json(self, tables):
-        json_tables = []
-        for table in tables:
-            if not table or len(table) < 2:
-                continue
-            header = table[0]
-            rows = table[1:]
-            try:
-                table_json = [dict(zip(header, row)) for row in rows]
-            except Exception:
-                table_json = table  # fallback
-            json_tables.append(table_json)
-        return json_tables if json_tables else None
+    Args:
+        url (str): The API endpoint URL
+        payload (dict, optional): The request body (for POST/PUT). Defaults to None.
+        headers (dict, optional): HTTP headers. Defaults to {"Content-Type": "application/json"}.
+        method (str, optional): HTTP method (GET, POST, PUT, DELETE). Defaults to "POST".
 
-    def clean_paragraph_text(self, text: str) -> str:
-        if not isinstance(text, str):
-            return ""
-        s = unicodedata.normalize("NFKC", text)
-        s = s.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
-        s = s.replace("\xa0", " ")                    # nbsp → space
-        s = re.sub(r"\s+", " ", s).strip()           # collapse spaces
-        return s
+    Returns:
+        dict: JSON response from the API or error message
+    """
+    if headers is None:
+        headers = {"Content-Type": "application/json"}
 
-    def preprocess_content_chunks(self, content):
-        preprocess_chunk = []
-        current_source = content[0].get("source", None) if content else None
+    try:
+        if method.upper() == "GET":
+            response = requests.get(url, params=payload, headers=headers, timeout=30)
+        elif method.upper() == "POST":
+            response = requests.post(url, json=payload, headers=headers, timeout=30)
+        elif method.upper() == "PUT":
+            response = requests.put(url, json=payload, headers=headers, timeout=30)
+        elif method.upper() == "DELETE":
+            response = requests.delete(url, headers=headers, timeout=30)
+        else:
+            return {"error": f"Unsupported method: {method}"}
 
-        current_heading = None
-        current_subheading = None
-        section = None
-        subsection = None
+        response.raise_for_status()
+        return response.json()
 
-        # lists we accumulate
-        paragraph_parts = []          # ← use list, not string
-        current_tables = []
-        current_base64 = []
-        current_caption = []
-        style_extracted = []
-        style = []
+    except requests.exceptions.RequestException as e:
+        return {"error": str(e)}
 
-        tmrc_checklist = None
-        last_was_heading = False
 
-        def flush_chunk():
-            nonlocal paragraph_parts, current_tables, current_base64
-            nonlocal tmrc_checklist, current_caption, style, style_extracted
-
-            has_para = any(p for p in paragraph_parts)
-            if has_para or current_tables or current_base64 or tmrc_checklist or current_caption:
-                paragraph = " ".join(p.strip() for p in paragraph_parts if p).strip()
-                paragraph = paragraph if paragraph else None
-
-                chunk = {
-                    "heading": current_heading,
-                    "subheading": current_subheading,
-                    "section": section,
-                    "subsection": subsection,
-                    "paragraph": paragraph,
-                    "table": self.convert_table_to_json(current_tables) if current_tables else None,
-                    "image_context": current_base64 if current_base64 else None,
-                    "caption": current_caption if current_caption else None,
-                    "tmrc_checklist": tmrc_checklist if tmrc_checklist else None,
-                    "Source": current_source,
-                    "style": style if style else None,
-                    "style_extracted": style_extracted if style_extracted else None,
-                }
-                preprocess_chunk.append(chunk)
-
-            # Reset accumulators (keep types consistent)
-            paragraph_parts = []
-            current_tables = []
-            current_base64 = []
-            current_caption = []
-            style_extracted = []
-            style = []
-            tmrc_checklist = None
-
-        for item in content:
-            item_type = item.get("type")
-            current_source = item.get("source", current_source)
-
-            # --- Heading Level 1 ---
-            if item_type == "heading" and item.get("level") == 1:
-                flush_chunk()
-                current_heading = item.get("text")
-                current_subheading = None
-                section = item.get("section")
-                subsection = None
-                last_was_heading = True
-                if item.get("style"):
-                    style.append(item.get("style"))
-
-            # --- Heading Level 2 ---
-            elif item_type == "heading" and item.get("level") == 2:
-                flush_chunk()
-                current_subheading = item.get("text")
-                subsection = item.get("section")
-                last_was_heading = True
-                if item.get("style"):
-                    style.append(item.get("style"))
+# Example usage:
+if __name__ == "__main__":
+    api_url = "https://httpbin.org/post"  # test API endpoint
+    data = {"message": "Hello from Python!"}
+    result = call_api(api_url, payload=data, method="POST")
+    print(json.dumps(result, indent=2))                    style.append(item.get("style"))
 
             # --- Paragraph ---
             elif item_type == "paragraph":
