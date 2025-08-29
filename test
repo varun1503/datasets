@@ -1,44 +1,135 @@
-import requests
-import json
+import ast
+from typing import List, Dict, Any
+from docx import Document
+from docx.shared import Pt, RGBColor
 
-def call_api(url: str, payload: dict = None, headers: dict = None, method: str = "POST"):
-    """
-    Call an API endpoint.
 
-    Args:
-        url (str): The API endpoint URL
-        payload (dict, optional): The request body (for POST/PUT). Defaults to None.
-        headers (dict, optional): HTTP headers. Defaults to {"Content-Type": "application/json"}.
-        method (str, optional): HTTP method (GET, POST, PUT, DELETE). Defaults to "POST".
+# ----------- Helpers --------------------------------------------------------
 
-    Returns:
-        dict: JSON response from the API or error message
-    """
-    if headers is None:
-        headers = {"Content-Type": "application/json"}
-
+def safe_eval(val):
+    """Parse possibly double-escaped string into Python objects."""
+    if val is None:
+        return None
+    if isinstance(val, (list, dict)):
+        return val
+    if not isinstance(val, str) or not val.strip():
+        return val
     try:
-        if method.upper() == "GET":
-            response = requests.get(url, params=payload, headers=headers, timeout=30)
-        elif method.upper() == "POST":
-            response = requests.post(url, json=payload, headers=headers, timeout=30)
-        elif method.upper() == "PUT":
-            response = requests.put(url, json=payload, headers=headers, timeout=30)
-        elif method.upper() == "DELETE":
-            response = requests.delete(url, headers=headers, timeout=30)
+        parsed = ast.literal_eval(val)
+        if isinstance(parsed, str):  # sometimes still a string
+            try:
+                return ast.literal_eval(parsed)
+            except Exception:
+                return parsed
+        return parsed
+    except Exception:
+        return val
+
+
+def parse_smry_blb(smry_str: str):
+    """Return (para_styles, runs) from smry_blb_tx string."""
+    outer = safe_eval(smry_str)
+    para_styles, runs = [], []
+
+    if isinstance(outer, dict):
+        styles = safe_eval(outer.get("style"))
+        if isinstance(styles, list):
+            para_styles = [str(s) for s in styles]
+
+        style_ex = safe_eval(outer.get("style_extracted"))
+        if isinstance(style_ex, list):
+            for r in style_ex:
+                runs.append(r if isinstance(r, dict) else {"text": str(r)})
+
+    return para_styles, runs
+
+
+def apply_run_format(run, frag: Dict[str, Any]):
+    """Apply character-level formatting to a run."""
+    run.text = frag.get("text", "")
+
+    if frag.get("bold") is not None:
+        run.bold = bool(frag["bold"])
+    if frag.get("italic") is not None:
+        run.italic = bool(frag["italic"])
+    if frag.get("underline") is not None:
+        run.underline = bool(frag["underline"])
+
+    fs = frag.get("font_size")
+    if fs:
+        try:
+            run.font.size = Pt(float(fs))
+        except Exception:
+            pass
+    if frag.get("font_name"):
+        run.font.name = str(frag["font_name"])
+
+    color = frag.get("color")
+    if color:
+        try:
+            hexcolor = str(color).lstrip("#")
+            run.font.color.rgb = RGBColor.from_string(hexcolor)
+        except Exception:
+            pass
+
+
+def pick_block_style(para_styles: List[str]) -> str:
+    """Choose paragraph style (map list paragraphs to bullet list)."""
+    if para_styles:
+        s0 = str(para_styles[0])
+        if "list" in s0.lower():
+            return "List Bullet"
+        return s0
+    return "Normal"
+
+
+# ----------- Main Writer ----------------------------------------------------
+
+def write_doc_from_records(records: List[Dict[str, Any]], out_path="rebuilt.docx"):
+    """
+    Convert all parsed records into a Word document.
+    Inserts heading/subheading hierarchy, then formatted paragraph text.
+    """
+    doc = Document()
+
+    for rec in records:
+        heading = rec.get("heading")
+        subheading = rec.get("subheading")
+        section = rec.get("section")
+        subsection = rec.get("subsection")
+
+        # Insert headings if present
+        if heading:
+            doc.add_heading(f"{section} {heading}".strip(), level=1)
+        if subheading:
+            doc.add_heading(f"{subsection} {subheading}".strip(), level=2)
+
+        # Build paragraph from smry_blb_tx
+        para_styles, runs = parse_smry_blb(rec.get("smry_blb_tx"))
+        if runs:
+            p = doc.add_paragraph()
+            try:
+                p.style = pick_block_style(para_styles)
+            except Exception:
+                p.style = "Normal"
+            for frag in runs:
+                apply_run_format(p.add_run(), frag)
         else:
-            return {"error": f"Unsupported method: {method}"}
+            # fallback to plain text body blob
+            if rec.get("bdy_blb_tx"):
+                doc.add_paragraph(rec["bdy_blb_tx"], style="Normal")
 
-        response.raise_for_status()
-        return response.json()
-
-    except requests.exceptions.RequestException as e:
-        return {"error": str(e)}
+    doc.save(out_path)
+    return out_path
 
 
-# Example usage:
+# ---------------- Example Usage ----------------
 if __name__ == "__main__":
-    api_url = "https://httpbin.org/post"  # test API endpoint
-    data = {"message": "Hello from Python!"}
-    result = call_api(api_url, payload=data, method="POST")
-    print(json.dumps(result, indent=2))
+    import json
+
+    # load your file (the uploaded JSON-like file with many records)
+    with open("your_records.json", "r", encoding="utf-8") as f:
+        data = json.load(f)   # should be a list of dicts
+
+    out_path = write_doc_from_records(data, "Full_Rebuild.docx")
+    print("Saved:", out_path)
