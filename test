@@ -1,113 +1,42 @@
-# pip install python-docx
-
-import ast
-from typing import Any, Dict, List, Tuple, Union
-from docx import Document
-from docx.shared import Pt, RGBColor
+Got it 👍 You want each of your three main points as separate scrum points, with sub-points under them. Here’s a structured one-pager for scrum:
 
 
-# ==========================
-# Parsing helpers
-# ==========================
+---
 
-def _safe_eval(v: Any) -> Any:
-    """
-    Parse possibly double-escaped string into Python objects.
-    - If v is already list/dict -> return as is
-    - Try ast.literal_eval once, if result is still a string, try again
-    - Otherwise return original
-    """
-    if v is None or isinstance(v, (list, dict)):
-        return v
-    if not isinstance(v, str) or not v.strip():
-        return v
-    try:
-        x = ast.literal_eval(v)
-        if isinstance(x, str):
-            try:
-                return ast.literal_eval(x)
-            except Exception:
-                return x
-        return x
-    except Exception:
-        return v
+Scrum One-Pager
+
+1. Validation Report Service for RAG PT
+
+Build dedicated validation report service.
+
+Define schema for input/output and error handling.
+
+Capture key metrics (accuracy, hallucination flags, latency).
 
 
-def _parse_style_runs(
-    raw_field: Any,
-    style_key: str = "style",
-    runs_key: str = "style_extracted",
-) -> Tuple[List[str], List[Dict[str, Any]]]:
-    """
-    raw_field is your 'smry_blb_tx' giant string, which represents a dict:
-      {'style': "['Heading 2','Normal',...]", 'style_extracted': "[{...}, ...]"}
-    Returns:
-      (paragraph_styles, run_fragments)
-    """
-    outer = _safe_eval(raw_field)
-    para_styles: List[str] = []
-    runs: List[Dict[str, Any]] = []
+2. Validation Report Nodes in LangGraph & New Flow
 
-    if isinstance(outer, dict):
-        styles_val = _safe_eval(outer.get(style_key))
-        if isinstance(styles_val, list):
-            para_styles = [str(s) for s in styles_val]
-        elif isinstance(styles_val, str):
-            sv = _safe_eval(styles_val)
-            if isinstance(sv, list):
-                para_styles = [str(s) for s in sv]
+Create LangGraph nodes: validate_input, validate_response, aggregate_report.
 
-        runs_val = _safe_eval(outer.get(runs_key))
-        if isinstance(runs_val, list):
-            for r in runs_val:
-                runs.append(r if isinstance(r, dict) else {"text": str(r)})
+Integrate nodes into existing flow.
 
-    return para_styles, runs
+Ensure consolidated report generation at run completion.
 
 
-# ==========================
-# Formatting helpers
-# ==========================
+3. Complete Flow Testing & E1 Deployment
 
-def _apply_run_format(run, frag: Dict[str, Any]) -> None:
-    """Apply character-level formatting to a run."""
-    run.text = frag.get("text", "") or ""
+Run end-to-end validation on sample dataset.
 
-    if frag.get("bold") is not None:
-        run.bold = bool(frag["bold"])
-    if frag.get("italic") is not None:
-        run.italic = bool(frag["italic"])
-    if frag.get("underline") is not None:
-        run.underline = bool(frag["underline"])
+Debug/fix blockers during flow execution.
 
-    fs = frag.get("font_size")
-    if fs is not None:
-        try:
-            run.font.size = Pt(float(fs))
-        except Exception:
-            pass
-
-    if frag.get("font_name"):
-        run.font.name = str(frag["font_name"])
-
-    color = frag.get("color")
-    if color:
-        try:
-            run.font.color.rgb = RGBColor.from_string(str(color).lstrip("#"))
-        except Exception:
-            pass
+Push final tested flow to E1 environment.
 
 
-def _pick_par_style(para_styles: List[str], list_style_name: str, default_par_style: str) -> str:
-    """
-    Choose a paragraph style for Word.
-    - If first style contains 'list' -> map to list_style_name
-    - Else use first style
-    - Else default
-    """
-    if para_styles:
-        s0 = str(para_styles[0])
-        return list_style_name if "list" in s0.lower() else s0
+
+---
+
+Do you want me to also make a visual sprint board style layout (like Jira story format with task/subtasks) so it looks ready for a scrum update?
+
     return default_par_style
 
 
