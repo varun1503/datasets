@@ -4,7 +4,7 @@ from docx import Document
 from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-def build_template_from_df(
+def build_template_with_df(
     df: pd.DataFrame,
     model: str,
     impact: str,
@@ -12,18 +12,10 @@ def build_template_from_df(
     save_dir: str = "base"
 ) -> str:
     """
-    Create a Validation Report template DOCX.
-    The number of 'Question N' blocks is determined by the rows in df.
-    
-    Args:
-        df: DataFrame containing mapping rows (each row = one Question).
-        model: "Business" or "Marketing"
-        impact: "C" (Critical), "M" (Moderate), "L" (Low)
-        scope: e.g. "V" for Vendor or "" for none
-        save_dir: folder where template will be saved
-    
-    Returns:
-        Path to the generated .docx file
+    Create a Validation Report DOCX directly from a DataFrame.
+    Each row contributes:
+      - Question i: <IMVP Question>
+      - Team response: <Answer>
     """
     os.makedirs(save_dir, exist_ok=True)
     fname = f"{model}_{impact}{('_' + scope) if scope else ''}.docx"
@@ -33,7 +25,7 @@ def build_template_from_df(
 
     # Title
     p = doc.add_paragraph()
-    run = p.add_run("Validation Report (Template)")
+    run = p.add_run("Validation Report (Auto Generated)")
     run.font.size = Pt(16)
     run.bold = True
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -43,15 +35,17 @@ def build_template_from_df(
     doc.add_paragraph(f"Model: {model} | Impact: {impact}{(' | Scope: ' + scope) if scope else ''}")
     doc.add_paragraph()
 
-    # Create Q blocks based on df rows
-    for i in range(1, len(df) + 1):
+    # Loop rows from DataFrame
+    for i, row in df.iterrows():
+        # Question
         q = doc.add_paragraph()
-        rq = q.add_run(f"Question {i}")
+        rq = q.add_run(f"Question {i+1}: {row['IMVP Question']}")
         rq.bold = True
         rq.font.size = Pt(12)
 
+        # Team response
         tr = doc.add_paragraph()
-        rr = tr.add_run("Team response:")
+        rr = tr.add_run(f"Team response: {row['Answer']}")
         rr.italic = True
 
         doc.add_paragraph()  # spacer
@@ -62,9 +56,9 @@ def build_template_from_df(
 
 # -------- Example usage --------
 if __name__ == "__main__":
-    # Load your mapping CSV
+    # Example: load mapping CSV that already has IMVP Question + Answer columns
     df = pd.read_csv("mapping/Business_C.csv")
 
-    # Build template with number of questions = len(df)
-    path = build_template_from_df(df, model="Business", impact="C", scope="")
+    # Build the template
+    path = build_template_with_df(df, model="Business", impact="C")
     print("Template saved at:", path)
