@@ -1,151 +1,70 @@
-Got it 👍 You want each of your three main points as separate scrum points, with sub-points under them. Here’s a structured one-pager for scrum:
+import os
+import pandas as pd
+from docx import Document
+from docx.shared import Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-
----
-
-Scrum One-Pager
-
-1. Validation Report Service for RAG PT
-
-Build dedicated validation report service.
-
-Define schema for input/output and error handling.
-
-Capture key metrics (accuracy, hallucination flags, latency).
-
-
-2. Validation Report Nodes in LangGraph & New Flow
-
-Create LangGraph nodes: validate_input, validate_response, aggregate_report.
-
-Integrate nodes into existing flow.
-
-Ensure consolidated report generation at run completion.
-
-
-3. Complete Flow Testing & E1 Deployment
-
-Run end-to-end validation on sample dataset.
-
-Debug/fix blockers during flow execution.
-
-Push final tested flow to E1 environment.
-
-
-
----
-
-Do you want me to also make a visual sprint board style layout (like Jira story format with task/subtasks) so it looks ready for a scrum update?
-
-    return default_par_style
-
-
-# ==========================
-# Main builder
-# ==========================
-
-def build_docx(
-    records: Union[List[Dict[str, Any]], Dict[str, Any]],
-    out_path: str = "Full_Rebuild.docx",
-    *,
-    # field names (override if yours differ)
-    smry_field: str = "smry_blb_tx",
-    body_field: str = "bdy_blb_tx",
-    style_key: str = "style",
-    runs_key: str = "style_extracted",
-    heading_key: str = "heading",
-    subheading_key: str = "subheading",
-    section_key: str = "section",
-    subsection_key: str = "subsection",
-    # behavior
-    include_headings: bool = True,
-    list_style_name: str = "List Bullet",
-    default_par_style: str = "Normal",
+def build_template_from_df(
+    df: pd.DataFrame,
+    model: str,
+    impact: str,
+    scope: str = "",
+    save_dir: str = "base"
 ) -> str:
     """
-    Rebuild a .docx from your in-memory dataset (list[dict] or single dict).
-    - Inserts headings/subheadings with section numbers if present.
-    - Reconstructs paragraphs from styled runs in smry_blb_tx.
-    - Falls back to bdy_blb_tx if styled runs are missing.
+    Create a Validation Report template DOCX.
+    The number of 'Question N' blocks is determined by the rows in df.
+    
+    Args:
+        df: DataFrame containing mapping rows (each row = one Question).
+        model: "Business" or "Marketing"
+        impact: "C" (Critical), "M" (Moderate), "L" (Low)
+        scope: e.g. "V" for Vendor or "" for none
+        save_dir: folder where template will be saved
+    
+    Returns:
+        Path to the generated .docx file
     """
-    # Accept a single dict too
-    if isinstance(records, dict):
-        records = [records]
+    os.makedirs(save_dir, exist_ok=True)
+    fname = f"{model}_{impact}{('_' + scope) if scope else ''}.docx"
+    out_path = os.path.join(save_dir, fname)
 
     doc = Document()
 
-    for rec in records:
-        # Optional heading/subheading lines
-        if include_headings:
-            sec = rec.get(section_key, "") or ""
-            heading = rec.get(heading_key, "") or ""
-            subsec = rec.get(subsection_key, "") or ""
-            subheading = rec.get(subheading_key, "") or ""
+    # Title
+    p = doc.add_paragraph()
+    run = p.add_run("Validation Report (Template)")
+    run.font.size = Pt(16)
+    run.bold = True
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    doc.add_paragraph()
 
-            if heading:
-                doc.add_heading(f"{sec} {heading}".strip(), level=1)
-            if subheading:
-                doc.add_heading(f"{subsec} {subheading}".strip(), level=2)
+    # Metadata line
+    doc.add_paragraph(f"Model: {model} | Impact: {impact}{(' | Scope: ' + scope) if scope else ''}")
+    doc.add_paragraph()
 
-        # Build paragraph from styled summary; else use body text
-        para_styles, runs = _parse_style_runs(rec.get(smry_field), style_key, runs_key)
+    # Create Q blocks based on df rows
+    for i in range(1, len(df) + 1):
+        q = doc.add_paragraph()
+        rq = q.add_run(f"Question {i}")
+        rq.bold = True
+        rq.font.size = Pt(12)
 
-        if runs:
-            p = doc.add_paragraph()
-            try:
-                p.style = _pick_par_style(para_styles, list_style_name, default_par_style)
-            except Exception:
-                p.style = default_par_style
+        tr = doc.add_paragraph()
+        rr = tr.add_run("Team response:")
+        rr.italic = True
 
-            for frag in runs:
-                _apply_run_format(p.add_run(), frag)
-
-        else:
-            txt = rec.get(body_field)
-            if txt:
-                doc.add_paragraph(txt, style=default_par_style)
+        doc.add_paragraph()  # spacer
 
     doc.save(out_path)
     return out_path
 
 
-# ==========================
-# Example usage
-# ==========================
+# -------- Example usage --------
 if __name__ == "__main__":
-    # Example: replace `records` with your actual in-memory variable
-    # (list of dicts OR a single dict). The sample below mirrors your structure.
-    records = [
-        {
-            "heading": "5 Model Data",
-            "subheading": "5.4 Model Data Documentation",
-            "section": "5",
-            "subsection": "5.4",
-            "bdy_blb_tx": "Fallback plain text if styled runs are unavailable.",
-            "smry_blb_tx": (
-                "{'style': \"['Heading 2', 'Normal', 'List Paragraph']\", "
-                "'style_extracted': \"["
-                "{\\'text\\': \\'The variable tracking for this model \\\\', \\'bold\\': None, \\'italic\\': None, \\'underline\\': None, \\'font_size\\': 10.0, \\'font_name\\': \\'BentonSans Book\\'},"
-                "{\\'text\\': \\'will be\\', \\'bold\\': None, \\'italic\\': None, \\'underline\\': None, \\'font_size\\': 10.0, \\'font_name\\': \\'BentonSans Book\\'},"
-                "{\\'text\\': \\' integrated with Continuous Data Integrity Tracking platform (CDIT).\\', \\'bold\\': None, \\'italic\\': None, \\'underline\\': None, \\'font_size\\': 10.0, \\'font_name\\': \\'BentonSans Book\\'}"
-                "]\"}"
-            ),
-        }
-    ]
+    # Load your mapping CSV
+    df = pd.read_csv("mapping/Business_C.csv")
 
-    path = build_docx(
-        records,
-        out_path="Reconstructed.docx",
-        smry_field="smry_blb_tx",
-        body_field="bdy_blb_tx",
-        style_key="style",
-        runs_key="style_extracted",
-        heading_key="heading",
-        subheading_key="subheading",
-        section_key="section",
-        subsection_key="subsection",
-        include_headings=True,
-        list_style_name="List Bullet",   # change to your corporate list style if needed
-        default_par_style="Normal",
-    )
-    print("Saved:", path)
+    # Build template with number of questions = len(df)
+    path = build_template_from_df(df, model="Business", impact="C", scope="")
+    print("Template saved at:", path)
