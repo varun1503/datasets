@@ -1,64 +1,30 @@
-import os
+from your_module import ModelDoc, ValReport
 import pandas as pd
-from docx import Document
-from docx.shared import Pt
-from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-def build_template_with_df(
-    df: pd.DataFrame,
-    model: str,
-    impact: str,
-    scope: str = "",
-    save_dir: str = "base"
-) -> str:
-    """
-    Create a Validation Report DOCX directly from a DataFrame.
-    Each row contributes:
-      - Question i: <IMVP Question>
-      - Team response: <Answer>
-    """
-    os.makedirs(save_dir, exist_ok=True)
-    fname = f"{model}_{impact}{('_' + scope) if scope else ''}.docx"
-    out_path = os.path.join(save_dir, fname)
+# Paths
+source_path = "MyModel.docx"
+template_path = "base/Business_C.docx"
+mapping_path = "mapping/Business_C.csv"
 
-    doc = Document()
+# Load docs
+source = ModelDoc(source_path)        # source model document
+dest = ValReport(template_path)       # base validation report
+mapping = pd.read_csv(mapping_path).fillna('').to_dict(orient='records')
 
-    # Title
-    p = doc.add_paragraph()
-    run = p.add_run("Validation Report (Auto Generated)")
-    run.font.size = Pt(16)
-    run.bold = True
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    doc.add_paragraph()
+# Iterate mapping
+for i, row in enumerate(mapping):
+    for s in reversed(row['sections'].split('; ')):
+        if not s:
+            continue
+        try:
+            section_title, c = source.copy_content(start=s)
+            dest.paste_content(c, row['text'], str(i+1))
+            dest.put_text(row['text'], f'Model Document Section: {section_title}', 'magenta')
+            dest.put_text(row['text'], row['Answer'], 'yellow')   # from CSV Answer column
+        except Exception as e:
+            dest.put_text(row['text'], f'ERROR: {s} → {e}', 'red')
 
-    # Metadata line
-    doc.add_paragraph(f"Model: {model} | Impact: {impact}{(' | Scope: ' + scope) if scope else ''}")
-    doc.add_paragraph()
-
-    # Loop rows from DataFrame
-    for i, row in df.iterrows():
-        # Question
-        q = doc.add_paragraph()
-        rq = q.add_run(f"Question {i+1}: {row['IMVP Question']}")
-        rq.bold = True
-        rq.font.size = Pt(12)
-
-        # Team response
-        tr = doc.add_paragraph()
-        rr = tr.add_run(f"Team response: {row['Answer']}")
-        rr.italic = True
-
-        doc.add_paragraph()  # spacer
-
-    doc.save(out_path)
-    return out_path
-
-
-# -------- Example usage --------
-if __name__ == "__main__":
-    # Example: load mapping CSV that already has IMVP Question + Answer columns
-    df = pd.read_csv("mapping/Business_C.csv")
-
-    # Build the template
-    path = build_template_with_df(df, model="Business", impact="C")
-    print("Template saved at:", path)
+# Save result
+out_file = "MyModel - Validation Report (Auto).docx"
+dest.save(out_file)
+print("✅ Validation Report generated:", out_file)
