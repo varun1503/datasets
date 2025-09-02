@@ -1,7 +1,232 @@
-Business Architecture - Creating the MRMG EA Playbook Business Vision and defining business-level architecture.
+import json
+import threading
+import time
+import traceback
+from concurrent.futures import ThreadPoolExecutor
 
-2. Technical Architecture - Designing dataflow, API interfaces, and performing buy/build/reuse assessment.
+from kafka import KafkaConsumer
 
-3. Information Architecture - Covering data platform architecture, data lifecycle, and physical design.
+from app.ingestion import Ingestion
+from app.utils import base64_utils
+from app.utils.elf_logging import logger
 
-Operational & Security Architecture - Addressing HA fault tolerance, observability, change management, security design, data protection, and cyber-threat protection.
+# ---------------------------------------------------------------------
+# GLOBALS
+# ---------------------------------------------------------------------
+executor = ThreadPoolExecutor(max_workers=5)
+shutdown = False
+
+
+# ---------------------------------------------------------------------
+# UTIL: log full tracebacks consistently
+# ---------------------------------------------------------------------
+def log_exception(msg: str):
+    logger.error("%s\n%s", msg, traceback.format_exc())
+
+
+# ---------------------------------------------------------------------
+# UTIL: capture exceptions from executor jobs (otherwise they vanish)
+# ---------------------------------------------------------------------
+def _log_future_error(fut):
+    exc = fut.exception()
+    if exc:
+        logger.error("Worker crashed: %r\n%s",
+                     exc,
+                     "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+
+
+# ---------------------------------------------------------------------
+# MESSAGE PROCESSOR
+# ---------------------------------------------------------------------
+def process_message(consumer, message, env, string_template_query_utils, secrets):
+    """
+    message is expected to be a dict (value_deserializer already json.loads in consumer).
+    """
+    try:
+        if not isinstance(message, dict):
+            raise TypeError(f"message should be dict after deserialization, got {type(message)}")
+
+        # Defensive defaults
+        message.setdefault("metadata_cols", [])
+        message.setdefault("chunking_type", "automerger")
+        message.setdefault("env", None)
+
+        message["job_type"] = "ingestion"
+        message["job_status"] = "Started"
+
+        if message["env"] == env and len(string_template_query_utils.run_single_query(
+                "app/templates/ingestion.stg",
+                "check_for_chunk_no",
+                "template_input",
+                message,
+                "select",
+                True
+        )) == 0:
+            message["is_completed"] = False
+            string_template_query_utils.run_single_query(
+                "app/templates/ingestion.stg",
+                "insert_job_stage_status",
+                "template_input",
+                message,
+                "insert",
+                True
+            )
+
+            # Build metadata columns based on chunking type
+            if message["chunking_type"] == "automerger":
+                base_cols = [
+                    "type", "doc_id", "heading", "subheading", "section", "subsection", "caption",
+                    "filename", "filetype", "doc_format", "stage_id", "parent_node", "prev_node",
+                    "level", "child_nodes", "next_node", "source", "period", "date", "company_name",
+                    "start_index", "end_index", "input_type", "chunking_method", "tmrc_checklist"
+                ]
+            elif message["chunking_type"] == "granular":
+                base_cols = [
+                    "type", "filename", "stage_id", "source", "list_level", "section_name", "section",
+                    "doc_format", "stage_id", "list_ID", "start_index", "end_index", "doc_format",
+                    "input_type", "doc_id", "chunking_method"
+                ]
+            else:
+                logger.warning("Unknown chunking_type '%s' – defaulting to automerger", message["chunking_type"])
+                base_cols = [
+                    "type", "doc_id", "heading", "subheading", "section", "subsection", "caption",
+                    "filename", "filetype", "doc_format", "stage_id", "parent_node", "prev_node",
+                    "level", "child_nodes", "next_node", "source", "period", "date", "company_name",
+                    "start_index", "end_index", "input_type", "chunking_method"
+                ]
+
+            message["metadata_col_names"] = base_cols + list(message["metadata_cols"] or [])
+
+            # Validate creds early (common cause of hidden failures)
+            user = secrets.get("LUMOS_USERNAME")
+            pwd = secrets.get("LUMOS_PASSWORD")
+            if not user or not user.data or not pwd or not pwd.data:
+                raise ValueError("Missing LUMOS_USERNAME or LUMOS_PASSWORD secret")
+
+            ingestion = Ingestion(
+                username=user.data,
+                password=pwd.data,
+                env=env
+            )
+
+            # ---- Actual ingestion
+            result = ingestion.ingest_batch(message)
+            message["success_count"] = (result or {}).get("success", 0)
+
+            message["is_completed"] = True
+            message["job_status"] = "Completed"
+            string_template_query_utils.run_single_query(
+                "app/templates/ingestion.stg",
+                "insert_job_stage_status",
+                "template_input",
+                message,
+                "insert",
+                True
+            )
+        else:
+            raise Exception(f"message env - {message.get('env')} did not match local env - {env} "
+                            f"or chunk already processed.")
+    except Exception as e:
+        # Full traceback
+        log_exception("Error in process_message()")
+        if isinstance(message, dict) and message.get("env") == env:
+            # Ensure we always store a digestible error message (base64)
+            try:
+                message["error_message"] = base64_utils.base64_encode(f"{e}\n{traceback.format_exc()}")
+                message["job_status"] = "Failed"
+                string_template_query_utils.run_single_query(
+                    "app/templates/ingestion.stg",
+                    "insert_job_stage_status",
+                    "template_input",
+                    message,
+                    "insert",
+                    True
+                )
+            except Exception:
+                # Even if the DB write fails, we still want the traceback in logs
+                log_exception("Failed to write job failure status")
+        # Decide whether to commit on failure (kept as original behavior)
+    finally:
+        # NOTE: Your original code commits regardless of success/failure.
+        # If you want retry semantics, move commit only to the success path.
+        try:
+            consumer.commit()
+        except Exception:
+            log_exception("Commit failed in process_message()")
+
+
+# ---------------------------------------------------------------------
+# HEARTBEAT (kept as-is)
+# ---------------------------------------------------------------------
+def heartbeat(consumer):
+    while not shutdown:
+        consumer._client.poll(timeout_ms=100)
+        time.sleep(1)
+
+
+# ---------------------------------------------------------------------
+# CONSUMER
+# ---------------------------------------------------------------------
+def consume_messages(i, config, secrets, env, string_template_query_utils):
+    consumer_configs = {
+        "bootstrap_servers": config[env]["BOOTSTRAP_SERVER"],
+        "security_protocol": "SSL",
+        "ssl_check_hostname": True,
+        "ssl_cafile": f"{config[env]['KAFKA_CONFIG_PATH']}/Amex_Internal_Root_CA.pem",
+        "ssl_certfile": f"{config[env]['KAFKA_CONFIG_PATH']}/certificate.pem",
+        "ssl_keyfile": f"{config[env]['KAFKA_CONFIG_PATH']}/keystore.pem",
+        "ssl_password": (secrets.get("SSL_PASSWORD").data if secrets.get("SSL_PASSWORD") else None),
+        "auto_offset_reset": "latest",
+        "enable_auto_commit": False,
+        "group_id": f"{config[env]['INGESTION_GROUP_ID']}_{env}",
+        "key_deserializer": (lambda k: k.decode("utf-8") if k else None),
+        "value_deserializer": (lambda v: json.loads(v.decode("utf-8"))),
+    }
+
+    # Log config summary without secrets
+    logger.info(
+        "Initializing Kafka Consumer... servers=%s group_id=%s topic=%s",
+        consumer_configs["bootstrap_servers"],
+        consumer_configs["group_id"],
+        config[env]["INGESTION_TOPIC_NAME"]
+    )
+
+    consumer = KafkaConsumer(config[env]["INGESTION_TOPIC_NAME"], **consumer_configs)
+    logger.info("Kafka Consumer initialized.")
+
+    heartbeat_thread = threading.Thread(target=heartbeat, args=(consumer,), daemon=True)
+    heartbeat_thread.start()
+
+    try:
+        while True:
+            msg_pack = consumer.poll(timeout_ms=1000)
+            if not msg_pack:
+                continue
+
+            for tp, messages in msg_pack.items():
+                for message in messages:
+                    try:
+                        # message.value is dict (per value_deserializer)
+                        logger.info("Consumer %s - Consumed message on %s@%s offset=%s",
+                                    i, tp.topic, tp.partition, message.offset)
+                        fut = executor.submit(
+                            process_message,
+                            consumer, message.value, env, string_template_query_utils, secrets
+                        )
+                        fut.add_done_callback(_log_future_error)
+                    except Exception:
+                        log_exception("Failed to submit task to executor")
+    except KeyboardInterrupt:
+        global shutdown
+        shutdown = True
+        logger.info("Shutting down consumer (KeyboardInterrupt)...")
+    except Exception:
+        log_exception("Fatal error in consume_messages()")
+        raise
+    finally:
+        try:
+            consumer.close()
+            logger.info("Kafka Consumer closed.")
+        finally:
+            executor.shutdown(wait=True)
+            logger.info("Executor shutdown complete.")
