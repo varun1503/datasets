@@ -1,61 +1,7 @@
-import pandas as pd
-import json
-import re
-import numpy as np
+Business Architecture - Creating the MRMG EA Playbook Business Vision and defining business-level architecture.
 
-def add_section_columns(df: pd.DataFrame, column: str = "retrieved_results_output") -> pd.DataFrame:
-    """
-    From a DataFrame with a JSON-like column containing heading/subheading,
-    extract 'Section number' and 'sections' columns.
+2. Technical Architecture - Designing dataflow, API interfaces, and performing buy/build/reuse assessment.
 
-    Args:
-        df: input DataFrame
-        column: column name that holds JSON text or list with 'heading' and 'subheading'
+3. Information Architecture - Covering data platform architecture, data lifecycle, and physical design.
 
-    Returns:
-        DataFrame with new columns: 'Section number', 'sections', 'Section'
-    """
-
-    def extract_section_fields(cell):
-        section_num, heading_name, sub = "", "", ""
-        try:
-            data = cell
-            if isinstance(cell, str):
-                data = json.loads(cell)
-            if isinstance(data, list) and data:
-                item = data[0]
-            else:
-                item = {}
-        except Exception:
-            item = {}
-
-        heading = str(item.get("heading", "")).strip()
-        sub = str(item.get("subheading", "")).strip()
-
-        # normalize subheading
-        if sub.lower() in {"none", "null"}:
-            sub = ""
-
-        # extract number + heading name
-        m = re.match(r'^\s*([0-9]+(?:\.[0-9]+)*)\.?\s*(.*)$', heading)
-        if m:
-            section_num = m.group(1)
-            heading_name = m.group(2).strip()
-        else:
-            heading_name = heading
-
-        # final section name
-        section_name = sub if sub else heading_name
-        return pd.Series({"Section number": section_num, "sections": section_name})
-
-    # apply extraction
-    df[["Section number", "sections"]] = df[column].apply(extract_section_fields)
-
-    # optional combined column
-    df["Section"] = np.where(
-        df["Section number"].ne("") & df["sections"].ne(""),
-        df["Section number"] + "\t" + df["sections"],
-        df["Section number"] + df["sections"]
-    )
-
-    return df
+Operational & Security Architecture - Addressing HA fault tolerance, observability, change management, security design, data protection, and cyber-threat protection.
