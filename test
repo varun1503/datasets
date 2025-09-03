@@ -1,114 +1,64 @@
-from concurrent.futures import ThreadPoolExecutor
-from collections import defaultdict
-from typing import List, Dict, Optional
-from app.utils.elf_logging import logger
-from app.prompt.image_prompt import Prompt
-from app.llm.modelcall import ModelInvoker
-from app.processors.image_helper import normalize_base64_image
-import time
-import json
+import os
+import pandas as pd
+from docx import Document
+from docx.shared import Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-
-class BatchedLLMInvoker:
+def build_template_with_df(
+    df: pd.DataFrame,
+    model: str,
+    impact: str,
+    scope: str = "",
+    save_dir: str = "base"
+) -> str:
     """
-    Invokes an LLM concurrently in batches, with optional throttling:
-    - Sleeps `throttle_sleep` seconds after every `throttle_every` completed calls.
+    Create a Validation Report DOCX directly from a DataFrame.
+    Each row contributes:
+      - Question i: <IMVP Question>
+      - Team response (modelling team + MRMG answers)
     """
-    def __init__(
-        self,
-        max_workers: int = 10,
-        throttle_every: int = 8,
-        throttle_sleep: int = 10
-    ):
-        self.max_workers = max_workers
-        self.throttle_every = throttle_every
-        self.throttle_sleep = throttle_sleep
-        self.invoker = ModelInvoker(
-            model_idx="gpt-4o",
-            instruction_prompt=Prompt().image_insight_prompt()
-        )
+    os.makedirs(save_dir, exist_ok=True)
+    fname = f"{model}_{impact}{('_' + scope) if scope else ''}.docx"
+    out_path = os.path.join(save_dir, fname)
 
-    def _llm_single_call(self, payload: Dict) -> str:
-        try:
-            return self.invoker.model_call(input_text=payload["input_nodes"])
-        except Exception as e:
-            logger.exception(f"LLM call failed for input: {payload.get('input_nodes')}")
-            return "None"
+    doc = Document()
 
-    def invoke_batch(
-        self,
-        payload_list: List[Dict],
-        batch_size: int = 1
-    ) -> List[str]:
-        """
-        Runs payloads in batches with concurrency.
-        After every `throttle_every` completed calls (cumulative), sleeps `throttle_sleep` seconds.
-        """
-        results: List[str] = []
-        total = len(payload_list)
-        if total == 0:
-            logger.info("No payloads to process.")
-            return results
+    # Title
+    p = doc.add_paragraph()
+    run = p.add_run("Validation Report (Auto Generated)")
+    run.font.size = Pt(16)
+    run.bold = True
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    doc.add_paragraph()
 
-        # Precompute total batches (for logs)
-        total_batches = ((total - 1) // batch_size) + 1
+    # Metadata line
+    doc.add_paragraph(f"Model: {model} | Impact: {impact}{(' | Scope: ' + scope) if scope else ''}")
+    doc.add_paragraph()
 
-        for i in range(0, total, batch_size):
-            batch = payload_list[i:i + batch_size]
-            batch_idx = (i // batch_size) + 1
-            logger.info(f"Invoking batch {batch_idx}/{total_batches} (size={len(batch)})")
+    # Loop rows from DataFrame
+    for i, row in df.iterrows():
+        # Question
+        q = doc.add_paragraph()
+        rq = q.add_run(f"Question {i+1}: {row['IMVP Question']}")
+        rq.bold = True
+        rq.font.size = Pt(12)
 
-            # Use a fresh executor per batch to keep resource usage predictable
-            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                futures = [executor.submit(self._llm_single_call, payload) for payload in batch]
-                # Collect results in submission order (deterministic) — change to as_completed if you prefer
-                for future in futures:
-                    results.append(future.result())
+        # Modelling team response
+        if "modelling_team_answer" in row and pd.notna(row["modelling_team_answer"]):
+            tr1 = doc.add_paragraph()
+            rr1 = tr1.add_run(f"Modelling Team Response: {row['modelling_team_answer']}")
+            rr1.italic = True
 
-            # Throttle only if we still have more work to do
-            completed = len(results)
-            # Sleep whenever we've just completed a multiple of throttle_every,
-            # and there are still pending payloads (avoid sleeping at the very end)
-            if (
-                self.throttle_every > 0
-                and completed % self.throttle_every == 0
-                and completed < total
-            ):
-                logger.info(
-                    f"Throttling: {completed} calls completed. "
-                    f"Sleeping for {self.throttle_sleep} seconds..."
-                )
-                time.sleep(self.throttle_sleep)
+        # MRMG team response
+        if "mrmg_answer" in row and pd.notna(row["mrmg_answer"]):
+            tr2 = doc.add_paragraph()
+            rr2 = tr2.add_run(f"MRMG Response: {row['mrmg_answer']}")
+            rr2.italic = True
 
-        logger.info(f"All done. Total calls completed: {len(results)}")
-        return results
+        doc.add_paragraph()  # spacer between questions
 
-
-def enrich_chunks_with_llm(
-    preprocessed_chunks: List[Dict],
-    max_workers: int = 10,
-    throttle_every: int = 8,
-    throttle_sleep: int = 10,
-    batch_size: int = 5
-) -> List[Dict]:
-    """
-    For each chunk, sends its images (base64) to the LLM and replaces `image_context`
-    with the LLM outputs (one output per image, preserving order within the chunk).
-
-    Args:
-        preprocessed_chunks: List of chunk dicts. Each may contain "image_context": List[str(base64)].
-        max_workers: Thread pool size per batch.
-        throttle_every: Sleep after this many completed calls.
-        throttle_sleep: Sleep duration in seconds.
-        batch_size: Number of payloads to submit per batch (each batch uses its own executor).
-    """
-    if not preprocessed_chunks:
-        logger.info("No chunks provided; returning as-is.")
-        return preprocessed_chunks
-
-    llm_batcher = BatchedLLMInvoker(
-        max_workers=max_workers,
-        throttle_every=throttle_every,
+    doc.save(out_path)
+    return out_path        throttle_every=throttle_every,
         throttle_sleep=throttle_sleep
     )
 
