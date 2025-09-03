@@ -1,35 +1,149 @@
-import base64
-import os
+from concurrent.futures import ThreadPoolExecutor
+from collections import defaultdict
+from typing import List, Dict, Optional
+from app.utils.elf_logging import logger
+from app.prompt.image_prompt import Prompt
+from app.llm.modelcall import ModelInvoker
+from app.processors.image_helper import normalize_base64_image
+import time
+import json
 
-# Map MIME -> preferred extension
-MIME_TO_EXT = {
-    "image/png":  "png",
-    "image/jpeg": "jpg",
-    "image/jpg":  "jpg",
-    "image/webp": "webp",
-    "image/gif":  "gif",
-    "image/bmp":  "bmp",
-    "image/tiff": "tiff",
-    "image/x-bmp": "bmp",
-}
 
-# Allow only raster formats that LLMs typically accept
-ALLOWED_MIMES = set(MIME_TO_EXT.keys())
+class BatchedLLMInvoker:
+    """
+    Invokes an LLM concurrently in batches, with optional throttling:
+    - Sleeps `throttle_sleep` seconds after every `throttle_every` completed calls.
+    """
+    def __init__(
+        self,
+        max_workers: int = 10,
+        throttle_every: int = 8,
+        throttle_sleep: int = 10
+    ):
+        self.max_workers = max_workers
+        self.throttle_every = throttle_every
+        self.throttle_sleep = throttle_sleep
+        self.invoker = ModelInvoker(
+            model_idx="gpt-4o",
+            instruction_prompt=Prompt().image_insight_prompt()
+        )
 
-# Optionally block common vector/office types (keep this list!)
-BLOCKED_MIMES = {
-    "image/x-emf", "image/emf",
-    "image/x-wmf", "image/wmf",
-    "image/svg+xml",
-    "image/x-emz", "application/emf",  # compressed EMF variants
-}
+    def _llm_single_call(self, payload: Dict) -> str:
+        try:
+            return self.invoker.model_call(input_text=payload["input_nodes"])
+        except Exception as e:
+            logger.exception(f"LLM call failed for input: {payload.get('input_nodes')}")
+            return "None"
 
-def pick_ext_from_mime(mime: str) -> str | None:
-    mime = (mime or "").lower()
-    if mime in BLOCKED_MIMES:
-        return None
-    return MIME_TO_EXT.get(mime)
+    def invoke_batch(
+        self,
+        payload_list: List[Dict],
+        batch_size: int = 1
+    ) -> List[str]:
+        """
+        Runs payloads in batches with concurrency.
+        After every `throttle_every` completed calls (cumulative), sleeps `throttle_sleep` seconds.
+        """
+        results: List[str] = []
+        total = len(payload_list)
+        if total == 0:
+            logger.info("No payloads to process.")
+            return results
 
-def encode_image_bytes_to_b64(raw: bytes) -> str:
-    # b64 must be ASCII
-    return base64.b64encode(raw).decode("ascii")
+        # Precompute total batches (for logs)
+        total_batches = ((total - 1) // batch_size) + 1
+
+        for i in range(0, total, batch_size):
+            batch = payload_list[i:i + batch_size]
+            batch_idx = (i // batch_size) + 1
+            logger.info(f"Invoking batch {batch_idx}/{total_batches} (size={len(batch)})")
+
+            # Use a fresh executor per batch to keep resource usage predictable
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                futures = [executor.submit(self._llm_single_call, payload) for payload in batch]
+                # Collect results in submission order (deterministic) — change to as_completed if you prefer
+                for future in futures:
+                    results.append(future.result())
+
+            # Throttle only if we still have more work to do
+            completed = len(results)
+            # Sleep whenever we've just completed a multiple of throttle_every,
+            # and there are still pending payloads (avoid sleeping at the very end)
+            if (
+                self.throttle_every > 0
+                and completed % self.throttle_every == 0
+                and completed < total
+            ):
+                logger.info(
+                    f"Throttling: {completed} calls completed. "
+                    f"Sleeping for {self.throttle_sleep} seconds..."
+                )
+                time.sleep(self.throttle_sleep)
+
+        logger.info(f"All done. Total calls completed: {len(results)}")
+        return results
+
+
+def enrich_chunks_with_llm(
+    preprocessed_chunks: List[Dict],
+    max_workers: int = 10,
+    throttle_every: int = 8,
+    throttle_sleep: int = 10,
+    batch_size: int = 5
+) -> List[Dict]:
+    """
+    For each chunk, sends its images (base64) to the LLM and replaces `image_context`
+    with the LLM outputs (one output per image, preserving order within the chunk).
+
+    Args:
+        preprocessed_chunks: List of chunk dicts. Each may contain "image_context": List[str(base64)].
+        max_workers: Thread pool size per batch.
+        throttle_every: Sleep after this many completed calls.
+        throttle_sleep: Sleep duration in seconds.
+        batch_size: Number of payloads to submit per batch (each batch uses its own executor).
+    """
+    if not preprocessed_chunks:
+        logger.info("No chunks provided; returning as-is.")
+        return preprocessed_chunks
+
+    llm_batcher = BatchedLLMInvoker(
+        max_workers=max_workers,
+        throttle_every=throttle_every,
+        throttle_sleep=throttle_sleep
+    )
+
+    payloads: List[Dict] = []
+    chunk_image_map: List[int] = []
+
+    # Prepare payloads for each image
+    for idx, chunk in enumerate(preprocessed_chunks):
+        images = chunk.get("image_context") or []
+        if not isinstance(images, list):
+            logger.warning(f"chunk[{idx}].image_context is not a list; skipping.")
+            continue
+
+        for base64_image in images:
+            # Normalize/clean the base64 if needed
+            clean_b64 = normalize_base64_image(base64_image)
+            payloads.append({
+                "input_nodes": {"base_64_encoded_image": clean_b64}
+            })
+            chunk_image_map.append(idx)
+
+    if not payloads:
+        logger.info("No images found in any chunk; returning chunks unchanged.")
+        return preprocessed_chunks
+
+    # Invoke LLM with throttling
+    results = llm_batcher.invoke_batch(payloads, batch_size=batch_size)
+
+    # Map LLM results back to their chunks
+    chunk_output_map: Dict[int, List[str]] = defaultdict(list)
+    for chunk_idx, output in zip(chunk_image_map, results):
+        chunk_output_map[chunk_idx].append(output)
+
+    # Replace image_context with only LLM outputs
+    for idx, outputs in chunk_output_map.items():
+        preprocessed_chunks[idx]["image_context"] = outputs
+
+    return preprocessed_chunks
