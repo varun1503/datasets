@@ -1,8 +1,4 @@
 import base64
-
-def _strip_data_url(b64: str) -> str:
-    b64 = b64.strip()
-    if b64.startswith("data:"):import base64
 import os
 
 # Map MIME -> preferred extension
@@ -37,66 +33,3 @@ def pick_ext_from_mime(mime: str) -> str | None:
 def encode_image_bytes_to_b64(raw: bytes) -> str:
     # b64 must be ASCII
     return base64.b64encode(raw).decode("ascii")
-        # e.g. data:image/png;base64,XXXX
-        parts = b64.split(",", 1)
-        if len(parts) == 2:
-            return parts[1].strip()
-        return ""  # malformed
-    return b64
-
-def normalize_base64_image(obj) -> str | None:
-    """
-    Accepts str/bytes/tuple/dict and returns a clean base64 string
-    or None if invalid.
-    """
-    # Extract string from common shapes
-    if obj is None:
-        return None
-    if isinstance(obj, (list, tuple)):
-        # e.g. ('image', '<b64>')
-        for x in obj:
-            if isinstance(x, str) and len(x) > 40:
-                obj = x
-                break
-    elif isinstance(obj, dict):
-        for k in ("image_base64", "base64", "b64", "data", "image", "content"):
-            if k in obj and isinstance(obj[k], str):
-                obj = obj[k]
-                break
-
-    if isinstance(obj, bytes):
-        try:
-            obj = obj.decode("utf-8")
-        except Exception:
-            return None
-    if not isinstance(obj, str):
-        return None
-
-    # Remove prefix + whitespace and fix padding
-    b64 = _strip_data_url(obj)
-    b64 = "".join(b64.split())
-    if not b64:
-        return None
-    pad = len(b64) % 4
-    if pad:
-        b64 += "=" * (4 - pad)
-
-    # Validate base64 and basic image signature
-    try:
-        raw = base64.b64decode(b64, validate=True)
-    except Exception:
-        return None
-    if not raw:
-        return None
-
-    # magic checks (allow small GIF/PNG/JPG/WEBP/BMP)
-    is_png  = raw.startswith(b"\x89PNG\r\n\x1a\n")
-    is_jpg  = raw.startswith(b"\xff\xd8\xff")
-    is_gif  = raw.startswith(b"GIF8")
-    is_webp = (raw[:4] == b"RIFF" and raw[8:12] == b"WEBP")
-    is_bmp  = raw.startswith(b"BM")
-    if not (is_png or is_jpg or is_gif or is_webp or is_bmp):
-        if len(raw) < 100:   # extremely small/non-image
-            return None
-
-    return b64
