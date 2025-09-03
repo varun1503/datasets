@@ -2,7 +2,41 @@ import base64
 
 def _strip_data_url(b64: str) -> str:
     b64 = b64.strip()
-    if b64.startswith("data:"):
+    if b64.startswith("data:"):import base64
+import os
+
+# Map MIME -> preferred extension
+MIME_TO_EXT = {
+    "image/png":  "png",
+    "image/jpeg": "jpg",
+    "image/jpg":  "jpg",
+    "image/webp": "webp",
+    "image/gif":  "gif",
+    "image/bmp":  "bmp",
+    "image/tiff": "tiff",
+    "image/x-bmp": "bmp",
+}
+
+# Allow only raster formats that LLMs typically accept
+ALLOWED_MIMES = set(MIME_TO_EXT.keys())
+
+# Optionally block common vector/office types (keep this list!)
+BLOCKED_MIMES = {
+    "image/x-emf", "image/emf",
+    "image/x-wmf", "image/wmf",
+    "image/svg+xml",
+    "image/x-emz", "application/emf",  # compressed EMF variants
+}
+
+def pick_ext_from_mime(mime: str) -> str | None:
+    mime = (mime or "").lower()
+    if mime in BLOCKED_MIMES:
+        return None
+    return MIME_TO_EXT.get(mime)
+
+def encode_image_bytes_to_b64(raw: bytes) -> str:
+    # b64 must be ASCII
+    return base64.b64encode(raw).decode("ascii")
         # e.g. data:image/png;base64,XXXX
         parts = b64.split(",", 1)
         if len(parts) == 2:
