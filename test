@@ -1,573 +1,117 @@
-# filename: docx_pipeline.py
-# pip install lxml python-docx fuzzywuzzy pandas
+import re
+from typing import List, Dict, Optional
+from docx import Document
 
-import os, re, shutil, time, hashlib, posixpath, logging
-from zipfile import ZipFile
-from typing import Tuple, Dict, Any, List
+BRACKET_RX = re.compile(r"<\s*([^>]+?)\s*>")
+RFR_START_RX = re.compile(r"^\s*?RFR\s*\d+?:?", re.IGNORECASE)
+MODEL_RESP_HDR_RX = re.compile(r"^\s*\s*Modeling\s*Team[’']?s?\s*Response\s*\s*:?\s*$", re.IGNORECASE)
+Q_PREFIX_RX = re.compile(r"^\s*Q\d+\s*:", re.IGNORECASE)
 
-import pandas as pd
-from fuzzywuzzy import fuzz
-from lxml import etree
+def clean(s: str) -> str:
+    return re.sub(r"\s+", " ", s or "").strip()
 
+def pick_section_and_question(bracket_bits: List[str]) -> (Optional[str], Optional[str]):
+    """
+    From things inside < ... > in an RFR paragraph, pick:
+      - Section = the part that does NOT look like 'Q...' and is not obviously the long prompt; 
+      - IMVP Question = a part that ends with '?' (preferred) or the non-Q remaining text.
+    """
+    bits = [clean(b) for b in bracket_bits if clean(b)]
+    if not bits:
+        return None, None
 
-# ----------------------------- helpers -----------------------------
+    # Separate likely 'Q*:' prompts from candidates
+    non_q = [b for b in bits if not Q_PREFIX_RX.match(b)]
+    # Prefer explicit question mark for IMVP question
+    question = next((b for b in non_q if b.endswith("?")), None)
 
-def get_text(p, nsmap) -> str:
-    return ''.join(x.text or '' for x in p.xpath('.//w:t', namespaces=nsmap))
+    # If we found a '?' item, section is the other non-Q (if present)
+    if question:
+        section = next((b for b in non_q if b != question), None)
+        return section, question
 
-def clean_paragraph(p, nsmap):
-    """Normalize a copied paragraph: strip attrs, normalize style, add highlight holder."""
-    p.attrib.clear()
-    w = nsmap['w']
+    # Fallbacks: if only one non-Q, treat that as question
+    if len(non_q) == 1:
+        return None, non_q[0]
 
-    # fix paragraph properties
-    x = p.find('w:pPr/w:rPr', nsmap)
-    if x is not None:
-        x.getparent().remove(x)
-    if p.find('w:pPr', nsmap) is None:
-        p.insert(0, etree.fromstring(f'<w:pPr xmlns:w="{w}"><w:pStyle /></w:pPr>'))
-    elif p.find('w:pPr/w:pStyle', nsmap) is None:
-        p.find('w:pPr', nsmap).insert(0, etree.fromstring(f'<w:pStyle xmlns:w="{w}"/>'))
-    p.find('w:pPr/w:pStyle', nsmap).set(f'{{{w}}}val', 'Body')
+    # Otherwise, heuristically pick the shortest as section, longest as question
+    non_q_sorted = sorted(non_q, key=len)
+    section = non_q_sorted[0] if non_q_sorted else None
+    question = non_q_sorted[-1] if non_q_sorted else None
+    return section, question
 
-    # fix runs
-    for r in p.findall('w:r', nsmap):
-        r.attrib.clear()
-        for x in r.findall('w:rPr/*', nsmap):
-            if etree.QName(x).localname in ('rFonts', 'rStyle', 'sz', 'szCs', 'lang'):
-                x.getparent().remove(x)
-        if r.find('w:rPr', nsmap) is None:
-            r.insert(0, etree.fromstring(f'<w:rPr xmlns:w="{w}"><w:highlight /></w:rPr>'))
-        elif r.find('w:rPr/w:highlight', nsmap) is None:
-            r.find('w:rPr', nsmap).insert(0, etree.fromstring(f'<w:highlight xmlns:w="{w}"/>'))
-        r.find('w:rPr/w:highlight', nsmap).set(f'{{{w}}}val', 'cyan')
+def parse_docx_to_rows(path: str) -> List[Dict]:
+    doc = Document(path)
+    paras = [clean(p.text) for p in doc.paragraphs]
 
-def copy_file(source, dest):
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
-    with open(source, 'rb') as fd:
-        data = fd.read()
-    with open(dest, 'wb') as fd:
-        fd.write(data)
+    rows: List[Dict] = []
+    i = 0
+    while i < len(paras):
+        line = paras[i]
 
-def _clean_txt(s: str) -> str:
-    return (s or "").replace("\u00a0", " ").strip().lower()
+        # Detect start of an RFR block
+        if RFR_START_RX.search(line):
+            # Capture bracketed bits on the RFR line to infer Section and IMVP Question
+            bracket_bits = BRACKET_RX.findall(line)
+            section, imvp_q = pick_section_and_question(bracket_bits)
 
+            # Prepare container for followups under this RFR
+            followups: Dict[str, str] = {}
+            f_idx = 1
 
-# ----------------------------- core classes -----------------------------
+            i += 1
+            # Scan ahead inside this RFR until the next RFR or end
+            while i < len(paras):
+                cur = paras[i]
 
-class Document:
-    def __init__(self, filepath) -> None:
-        if not (os.path.exists(filepath) and os.path.isfile(filepath) and os.path.normpath(filepath).endswith('.docx')):
-            raise FileNotFoundError(f"Docx not found or invalid: {filepath}")
-
-        user = os.path.basename(os.path.expanduser('~'))
-        self._uid = hashlib.sha256((filepath + str(time.time()*1e7)).encode()).hexdigest()[:5]
-        self._path = os.path.join(os.getcwd(), f"{user}_{self._uid}")
-        if os.path.exists(self._path):
-            shutil.rmtree(self._path)
-        ZipFile(filepath).extractall(self._path)
-
-        self._doc = etree.parse(os.path.join(self._path, 'word', 'document.xml')).getroot()
-        self._cursor = None
-
-    def __del__(self):
-        # best effort cleanup
-        try:
-            if hasattr(self, "_path") and os.path.exists(self._path):
-                shutil.rmtree(self._path)
-        except Exception:
-            pass
-
-    # fallback: last paragraph in body (create if needed)
-    def _last_body_para(self):
-        body = self._doc.find('.//w:body', self._doc.nsmap)
-        paras = body.findall('./w:p', self._doc.nsmap)
-        if paras:
-            return paras[-1]
-        # create one if document is empty
-        w = self._doc.nsmap['w']
-        p = etree.fromstring(f'<w:p xmlns:w="{w}"><w:pPr><w:pStyle w:val="Body"/></w:pPr></w:p>')
-        body.append(p)
-        return p
-
-
-class ModelDoc(Document):
-    def __init__(self, filepath) -> None:
-        super().__init__(filepath)
-        self._stdoc = etree.parse(os.path.join(self._path, 'word', 'styles.xml')).getroot()
-
-    def get_outline_level(self, elem) -> int:
-        """Derive heading/outline level using paragraph and style info."""
-        def get_from_style(pstyle):
-            olvl = self._stdoc.xpath(f'./w:style[@w:styleId="{pstyle}"]/w:pPr/w:outlineLvl/@w:val', namespaces=self._stdoc.nsmap)
-            if not olvl:
-                basedon = self._stdoc.xpath(f'./w:style[@w:styleId="{pstyle}"]/w:basedOn/@w:val', namespaces=self._stdoc.nsmap)
-                if not basedon:
-                    return -1
-                return get_from_style(basedon[0])
-            return int(olvl[0])
-
-        olvl = elem.xpath('./w:pPr/w:outlineLvl/@w:val', namespaces=self._doc.nsmap)
-        olvl = -1 if len(olvl)==0 else int(olvl[0])
-        if olvl==-1 and elem.find('./w:pPr/w:pStyle', self._doc.nsmap) is not None:
-            pstyle = elem.xpath('./w:pPr/w:pStyle/@w:val', namespaces=self._doc.nsmap)[0]
-            olvl = get_from_style(pstyle)
-            ilvl = elem.xpath('./w:pPr/w:numPr/w:ilvl/@w:val', namespaces=self._doc.nsmap)
-            if olvl!=-1 and ilvl:
-                olvl = int(ilvl[0])
-        return olvl
-
-    def move_cursor(self, to='1') -> str:
-        """Fuzzy match to a section title (ignoring numbers/parentheses); land cursor on that paragraph."""
-        self._cursor, title, last_score = None, '', 0
-        target = re.sub(r'(\d\.?)|(.+)', '', to).lower().strip()
-
-        for p in self._doc.xpath('.//w:body/w:p', namespaces=self._doc.nsmap):
-            text = re.sub(r'(\d\.?)|(.+)', '', get_text(p, self._doc.nsmap)).lower().strip()
-            olvl = self.get_outline_level(p)
-            score = fuzz.ratio(target, text)
-            if score > 80 and score > last_score and olvl not in (-1, 9):
-                last_score = score
-                self._cursor = p
-                title = get_text(p, self._doc.nsmap)
-        return title
-
-    def get_relationships(self, content):
-        reldoc = etree.parse(os.path.join(self._path, 'word', '_rels', 'document.xml.rels')).getroot()
-        idxdoc = etree.parse(os.path.join(self._path, '[Content_Types].xml')).getroot()
-
-        relations = []
-        for v, k, xx in content['rels']:
-            relation = {'id': v, 'key': k, 'elem': xx, 'type': etree.QName(xx).localname}
-            relation['ref'] = etree.fromstring(etree.tostring(reldoc.find(f'./*[@Id="{v}"]')))
-
-            if relation['ref'].get('TargetMode')!='External':
-                target = relation['ref'].get('Target')
-                relation['source'] = os.path.join(self._path, 'word', *target.split('/'))
-                ext = os.path.splitext(target)[1].lower().replace(".","")
-                idxref = idxdoc.find(f'./*[@Extension="{ext}"]')
-                if idxref is not None:
-                    content['index'][ext] = etree.fromstring(etree.tostring(idxref))
-
-            if relation['type']=='chart':
-                name = os.path.basename(relation['ref'].get('Target'))
-                crel = etree.parse(os.path.join(self._path, 'word', 'charts', '_rels', name+'.rels')).getroot()
-                sources = [(x.get('Target'), os.path.join(self._path, 'word', 'charts', *x.get('Target').split('/')))
-                           for x in crel.findall('./') if x.get('TargetMode')!='External']
-                name = f"/word/charts/{name}"
-                cidx = idxdoc.find(f'./*[@PartName="{name}"]')
-                if cidx is not None:
-                    content['index'][name] = etree.fromstring(etree.tostring(cidx))
-                for s, _ in sources:
-                    target = f"/word/{s[3:]}" if s.startswith('..') else f"/word/charts/{os.path.basename(s)}"
-                    if s.endswith('.xml') and target not in content['index']:
-                        x = idxdoc.find(f'./*[@PartName="{target}"]')
-                        if x is not None:
-                            content['index'][target] = etree.fromstring(etree.tostring(x))
-                relation['chart'] = {'name': name, 'rels': crel, 'sources': sources}
-
-            relations.append(relation)
-
-        content['rels'] = relations
-
-    def get_numbering(self, content):
-        numdoc = etree.parse(os.path.join(self._path, 'word', 'numbering.xml')).getroot()
-        numbers = []
-        for v, k, xx in content['nums']:
-            num = {'id': v, 'key': k, 'elem': xx, 'ref': {}}
-            numel = numdoc.find(f'./w:num[@w:numId="{v}"]', numdoc.nsmap)
-            if numel is not None:
-                num['ref']['num'] = etree.fromstring(etree.tostring(numel))
-                anum = num['ref']['num'].xpath('./w:abstractNumId/@w:val', namespaces=numdoc.nsmap)
-                num['ref']['anum'] = etree.fromstring(etree.tostring(numdoc.find(f'./w:abstractNum[@w:abstractNumId="{anum[0]}"]', numdoc.nsmap)))
-                numbers.append(num)
-        content['nums'] = numbers
-
-    def get_styles(self, content):
-        stdoc = etree.parse(os.path.join(self._path, 'word', 'styles.xml')).getroot()
-        w = stdoc.nsmap['w']
-        styles = []
-        for v, k, xx in content['styles']:
-            style = {'id': v, 'key': k, 'elem': xx, 'ref': {}}
-            elem = stdoc.find(f'./w:style[@w:styleId="{v}"]', stdoc.nsmap)
-            if elem is not None:
-                style['ref']['elem'] = etree.fromstring(etree.tostring(elem))
-                basedon = style['ref']['elem'].find('./w:basedOn', stdoc.nsmap)
-                if basedon is not None:
-                    basedon = basedon.get(f'{{{w}}}val')
-                    base = stdoc.find(f'./w:style[@w:styleId="{basedon}"]', stdoc.nsmap)
-                    if base is not None:
-                        style['ref']['basedon'] = etree.fromstring(etree.tostring(base))
-                styles.append(style)
-        content['styles'] = styles
-
-    def copy_content(self, start='') -> Tuple[str, Dict[str, Any]]:
-        section_title = self.move_cursor(start)
-        if self._cursor is None:
-            raise ValueError(f"Source section not found (fuzzy): {start}")
-
-        content = {'data': [], 'styles': [], 'nums': [], 'rels': [], 'index': {}}
-
-        while True:
-            nxt = self._cursor.getnext()
-            if nxt is None:
-                break
-
-            # stop if next is a non-body heading with text (new section)
-            if etree.QName(nxt).localname == 'p':
-                if self.get_outline_level(nxt) not in (-1, 9) and get_text(nxt, self._doc.nsmap).strip() != '':
+                # Stop if we hit another RFR block
+                if RFR_START_RX.search(cur):
                     break
 
-            # clone next node
-            xx = etree.fromstring(etree.tostring(nxt))
+                # If we see the Modeling Team's Response header, collect body lines
+                if MODEL_RESP_HDR_RX.match(cur):
+                    i += 1
+                    body_lines = []
+                    # Collect response text until next header/RFR/blank-only wall between sections
+                    while i < len(paras):
+                        nxt = paras[i]
+                        if MODEL_RESP_HDR_RX.match(nxt) or RFR_START_RX.search(nxt):
+                            # another response header or next RFR begins
+                            break
+                        # Mild stop heuristic: if line looks like a bracketed header-only line
+                        if BRACKET_RX.fullmatch(nxt):
+                            break
+                        body_lines.append(nxt)
+                        i += 1
+                    response_text = clean(" ".join(body_lines))
+                    if response_text:
+                        followups[f"followup q{f_idx}"] = response_text
+                        f_idx += 1
+                    # continue the while without incrementing here (we already moved i)
+                    continue
 
-            # delete unwanted elements
-            exclusions = ['bookmarkStart', 'bookmarkEnd', 'footnoteReference', 'endnoteReference',
-                          'commentRangeStart', 'commentRangeEnd', 'commentReference']
-            for x in xx.xpath(' | '.join(['.//w:'+x for x in exclusions]), namespaces=self._doc.nsmap):
-                x.getparent().remove(x)
+                i += 1  # step forward inside the RFR region
 
-            if etree.QName(xx).localname == 'p':
-                clean_paragraph(xx, self._doc.nsmap)
-            elif etree.QName(xx).localname == 'tbl':
-                for x in xx.xpath('.//w:tblStyle', namespaces=self._doc.nsmap):
-                    k = f'{{{self._doc.nsmap["w"]}}}val'
-                    content['styles'].append((x.get(k), k, x))
+            # Emit one row if we at least got either a question or responses
+            if imvp_q or followups:
+                rows.append({
+                    "IMVP Question": imvp_q or "",
+                    "Section": section or "",
+                    "rfr": followups if followups else {},
+                    "doctype": "rfr",
+                })
+            # note: do not advance i here; we stop when we see next RFR or end
+            continue
 
-            content['rels'] += [(v, k, x) for x in xx.findall('.//*') for k, v in x.attrib.items() if v.startswith('rId')]
-            content['nums'] += [(v, k, x) for x in xx.findall('.//w:numPr/w:numId', self._doc.nsmap) for k, v in x.attrib.items() if k.endswith('val')]
+        i += 1
 
-            content['data'].append(xx)
-            self._cursor = nxt
+    return rows
 
-        self.get_relationships(content)
-        self.get_numbering(content)
-        self.get_styles(content)
-        return section_title, content
-
-
-class ValReport(Document):
-    def __init__(self, filepath, report='main') -> None:
-        super().__init__(filepath)
-        self._type = report
-
-    def move_cursor(self, to='question?'):
-        """Find anchor text; if a following 'Team response' exists, land there.
-        Otherwise, land on the anchor. If not found, fallback to end of doc."""
-        target = _clean_txt(to)
-        self._cursor = None
-        body = self._doc.find('.//w:body', self._doc.nsmap)
-
-        # find anchor
-        anchor = None
-        for p in body.findall('./w:p', self._doc.nsmap):
-            if target and target in _clean_txt(get_text(p, self._doc.nsmap)):
-                anchor = p
-                break
-
-        if anchor is None:
-            self._cursor = self._last_body_para()
-            return
-
-        # look ahead for "Team response"
-        cur = anchor
-        while cur is not None:
-            cur = cur.getnext()
-            if cur is None or etree.QName(cur).localname != 'p':
-                break
-            if 'team response' in _clean_txt(get_text(cur, self._doc.nsmap)):
-                self._cursor = cur
-                return
-
-        # no 'Team response' ahead — use the anchor itself
-        self._cursor = anchor
-
-    def update_index(self, content, index):
-        idxdoc = etree.parse(os.path.join(self._path, '[Content_Types].xml')).getroot()
-        for k, xx in content['index'].items():
-            if etree.QName(xx).localname=='Default':
-                if idxdoc.find(f'./*[@Extension="{k}"]') is None:
-                    idxdoc.insert(0, xx)
-            elif etree.QName(xx).localname=='Override':
-                k2 = os.path.dirname(k)+f'/copy{index}_'+os.path.basename(k)
-                if idxdoc.find(f'./*[@PartName="{k2}"]') is None:
-                    xx.set('PartName', k2)
-                    idxdoc.append(xx)
-        etree.ElementTree(idxdoc).write(os.path.join(self._path, '[Content_Types].xml'), pretty_print=True)
-
-    def put_relationships(self, content, index):
-        reldoc = etree.parse(os.path.join(self._path, 'word', '_rels', 'document.xml.rels')).getroot()
-        for relation in content['rels']:
-            val = relation['id']+'c'+index
-            relation['elem'].set(relation['key'], val)
-            if reldoc.find(f'./*[@Id="{val}"]') is not None:
-                continue
-
-            relation['ref'].set('Id', val)
-            reldoc.append(relation['ref'])
-            if relation['ref'].get('TargetMode')!='External':
-                target = relation['ref'].get('Target')
-                target = posixpath.join(os.path.dirname(target), f'copy{index}_'+os.path.basename(target))
-                relation['ref'].set('Target', target)
-                target_fs = os.path.join(self._path, 'word', *target.split('/'))
-                copy_file(relation['source'], target_fs)
-
-            if relation['type']=='chart':
-                name, crel, sources = relation['chart']['name'], relation['chart']['rels'], relation['chart']['sources']
-                os.makedirs(os.path.join(self._path, 'word', 'charts', '_rels'), exist_ok=True)
-                for rel in crel:
-                    if rel.get('TargetMode')!='External':
-                        target = rel.get('Target')
-                        target = posixpath.join(os.path.dirname(target), f'copy{index}_'+os.path.basename(target))
-                        rel.set('Target', target)
-                for target, source in sources:
-                    target2 = os.path.dirname(target) + f'/copy{index}_' + os.path.basename(target)
-                    target_fs = os.path.join(self._path, 'word', 'charts', *target2.split('/'))
-                    copy_file(source, target_fs)
-                etree.ElementTree(crel).write(os.path.join(self._path, 'word', 'charts', '_rels', f'copy{index}_{os.path.basename(name)}.rels'), pretty_print=True)
-
-        etree.ElementTree(reldoc).write(os.path.join(self._path, 'word', '_rels', 'document.xml.rels'), pretty_print=True)
-
-    def update_numbering(self, content, index):
-        suffix = '999'+index
-        numdoc = etree.parse(os.path.join(self._path, 'word', 'numbering.xml')).getroot()
-        w = numdoc.nsmap['w']
-        num_ids = set(numdoc.xpath('./w:num/@w:numId', namespaces=numdoc.nsmap))
-        anum_ids = set(numdoc.xpath('./w:abstractNum/@w:abstractNumId', namespaces=numdoc.nsmap))
-        curr_num_ids, curr_anum_ids = set(), set()
-
-        for num in content['nums']:
-            nid = num['id']+suffix
-            num['elem'].set(num['key'], nid)
-            if 'num' in num['ref'] and nid not in num_ids and nid not in curr_num_ids:
-                curr_num_ids.add(nid)
-                num['ref']['num'].set(f'{{{w}}}numId', nid)
-                numdoc.append(num['ref']['num'])
-
-                anum = num['ref']['num'].find('./w:abstractNumId', numdoc.nsmap)
-                aid = anum.get(f'{{{w}}}val')+suffix
-                anum.set(f'{{{w}}}val', aid)
-                if aid not in anum_ids and aid not in curr_anum_ids:
-                    curr_anum_ids.add(aid)
-                    num['ref']['anum'].set(f'{{{w}}}abstractNumId', aid)
-                    numdoc.insert(0, num['ref']['anum'])
-
-        etree.ElementTree(numdoc).write(os.path.join(self._path, 'word', 'numbering.xml'), pretty_print=True)
-
-    def update_styles(self, content):
-        stdoc = etree.parse(os.path.join(self._path, 'word', 'styles.xml')).getroot()
-        suffix, w = 'New', stdoc.nsmap['w']
-        for style in content['styles']:
-            style['id'] = style['id'] + suffix
-            style['elem'].set(style['key'], style['id'])
-            if stdoc.find(f'./w:style[@w:styleId="{style["id"]}"]', stdoc.nsmap) is None:
-                style['ref']['elem'].set(f'{{{w}}}styleId', style['id'])
-                if 'basedon' in style['ref']:
-                    basedon = style['ref']['basedon'].get(f'{{{w}}}styleId') + suffix
-                    style['ref']['elem'].find('./w:basedOn', stdoc.nsmap).set(f'{{{w}}}val', basedon)
-                    if stdoc.find(f'./w:style[@w:styleId="{basedon}"]') is None:
-                        style['ref']['basedon'].set(f'{{{w}}}styleId', basedon)
-                        stdoc.insert(stdoc.index(stdoc.find('./w:style', stdoc.nsmap)), style['ref']['basedon'])
-                stdoc.append(style['ref']['elem'])
-        etree.ElementTree(stdoc).write(os.path.join(self._path, 'word', 'styles.xml'), pretty_print=True)
-
-    def paste_content(self, content, after, index):
-        """Paste content after anchor; returns the last inserted node."""
-        self.move_cursor(to=after)
-        if self._cursor is None:
-            self._cursor = self._last_body_para()
-
-        last_inserted = None
-        for c in content['data']:
-            self._cursor.addnext(c)
-            last_inserted = self._cursor.getnext()
-            self._cursor = last_inserted if last_inserted is not None else self._last_body_para()
-
-        self.put_relationships(content, index)
-        self.update_styles(content)
-        self.update_numbering(content, index)
-        self.update_index(content, index)
-        etree.ElementTree(self._doc).write(os.path.join(self._path, 'word', 'document.xml'), pretty_print=True)
-
-        return last_inserted
-
-    def put_text(self, after, text, color):
-        """(Legacy) Insert after located anchor."""
-        self.move_cursor(to=after)
-        if self._cursor is None:
-            self._cursor = self._last_body_para()
-
-        text = re.sub(r'&', 'and', text or '')
-        w = self._doc.nsmap['w']
-        color_xml = f'''<w:rPr><w:highlight w:val="{color}"/></w:rPr>''' if color else ''
-        elem = f'''
-        <w:p xmlns:w="{w}">
-            <w:pPr><w:pStyle w:val="Body"/></w:pPr>
-            <w:r>{color_xml}<w:t>{text}</w:t></w:r>
-        </w:p>
-        '''
-        self._cursor.addnext(etree.fromstring(elem))
-        etree.ElementTree(self._doc).write(os.path.join(self._path, 'word', 'document.xml'), pretty_print=True)
-
-    def put_text_after_node(self, node, text, color):
-        """Insert a new Body paragraph right after a known node (no re-search)."""
-        if node is None:
-            return self.put_text(after="", text=text, color=color)
-
-        text = re.sub(r'&', 'and', text or '')
-        w = self._doc.nsmap['w']
-        color_xml = f'''<w:rPr><w:highlight w:val="{color}"/></w:rPr>''' if color else ''
-        elem = etree.fromstring(f'''
-            <w:p xmlns:w="{w}">
-                <w:pPr><w:pStyle w:val="Body"/></w:pPr>
-                <w:r>{color_xml}<w:t>{text}</w:t></w:r>
-            </w:p>
-        ''')
-        node.addnext(elem)
-        etree.ElementTree(self._doc).write(os.path.join(self._path, 'word', 'document.xml'), pretty_print=True)
-        return elem
-
-    def save(self, filepath='') -> str:
-        filepath = self._path + '.docx' if filepath=='' else filepath
-        if os.path.exists(filepath):
-            os.remove(filepath)
-        shutil.make_archive('report', 'zip', self._path)
-        shutil.move('report.zip', filepath)
-        return filepath
-
-
-# ----------------------------- deep clone for reuse -----------------------------
-
-def _deep_clone_content(content: Dict[str, Any]) -> Dict[str, Any]:
-    """Create a fresh, independent copy of a content bundle returned by ModelDoc.copy_content()."""
-    from lxml import etree as _et
-
-    out = {'data': [], 'styles': [], 'nums': [], 'rels': [], 'index': {}}
-
-    # clone data nodes
-    for node in content.get('data', []):
-        out['data'].append(_et.fromstring(_et.tostring(node)))
-
-    # clone style refs
-    for s in content.get('styles', []):
-        sid, skey, selem = s
-        selem2 = _et.fromstring(_et.tostring(selem))
-        out['styles'].append((sid, skey, selem2))
-
-    # clone numbering refs
-    for n in content.get('nums', []):
-        nid, nkey, nelem = n
-        nelem2 = _et.fromstring(_et.tostring(nelem))
-        out['nums'].append((nid, nkey, nelem2))
-
-    # clone relationships (including ref subelements & chart rels)
-    for r in content.get('rels', []):
-        rid = r['id']; rkey = r['key']
-        relem = _et.fromstring(_et.tostring(r['elem']))
-        rref  = _et.fromstring(_et.tostring(r['ref']))
-        item = {'id': rid, 'key': rkey, 'elem': relem, 'ref': rref, 'type': r['type']}
-        if 'source' in r:
-            item['source'] = r['source']
-        if r.get('type') == 'chart' and 'chart' in r:
-            c = r['chart']
-            crel2 = _et.fromstring(_et.tostring(c['rels']))
-            item['chart'] = {
-                'name': c['name'],
-                'rels': crel2,
-                'sources': list(c['sources']),
-            }
-        out['rels'].append(item)
-
-    # clone index overrides
-    for k, v in content.get('index', {}).items():
-        out['index'][k] = _et.fromstring(_et.tostring(v))
-
-    return out
-
-
-# ----------------------------- runner -----------------------------
-
-def run_pipeline(source_docx: str, template_docx: str, mapping_csv: str, out_name: str = "") -> str:
-    """
-    Run end-to-end:
-      - source_docx: model document to copy content from
-      - template_docx: base validation template
-      - mapping_csv: CSV with columns: sections, text, (optional) Answer
-      - out_name: optional output .docx name
-    """
-    logging.basicConfig(level=logging.INFO)
-    df = pd.read_csv(mapping_csv).fillna('')
-    required = {'sections', 'text'}
-    missing = required - set(df.columns)
-    if missing:
-        raise ValueError(f"Mapping CSV missing columns: {missing}. Need at least: {required}")
-
-    source = ModelDoc(source_docx)
-    dest = ValReport(template_docx)
-
-    mapping = df.to_dict(orient='records')
-
-    # cache parsed sections for reuse
-    section_cache: Dict[str, Tuple[str, Dict[str, Any]]] = {}
-
-    for i, row in enumerate(mapping, start=1):
-        anchor   = row.get('text', '')
-        sections = [s.strip() for s in str(row.get('sections', '')).split(';') if s.strip()]
-        answers  = str(row.get('Answer', '')).strip()
-
-        pasted_once = False
-        for s in reversed(sections):
-            try:
-                if s not in section_cache:
-                    # parse once from source
-                    section_title, content = source.copy_content(start=s)
-                    section_cache[s] = (section_title, content)
-                else:
-                    section_title, content = section_cache[s]
-
-                # IMPORTANT: deep clone before each paste so we can reuse same section many times
-                content_copy = _deep_clone_content(content)
-
-                # Paste and capture the last inserted node
-                last_node = dest.paste_content(content_copy, anchor, str(i))
-
-                # Add these lines AFTER the pasted content:
-                # 1) Model Document Section: <title> (magenta)
-                dest.put_text_after_node(last_node, f'Model Document Section: {section_title}', 'magenta')
-
-                # 2) MRMG Assessment (yellow) if provided
-                if answers:
-                    dest.put_text_after_node(last_node, answers, 'yellow')
-
-                pasted_once = True
-                break  # success for this row
-            except Exception as e:
-                # Put the error AFTER the anchor if possible
-                try:
-                    dest.put_text(anchor, f'ERROR copying "{s}": {e}', 'red')
-                except Exception:
-                    logging.exception("Failed to insert error text.")
-
-        if not pasted_once and answers:
-            # no content pasted, but still place MRMG so the row is not empty
-            dest.put_text(anchor, answers, 'yellow')
-
-    out_file = out_name or (os.path.splitext(os.path.basename(source_docx))[0] + " - Validation Report (Auto).docx")
-    final_path = dest.save(out_file)
-    logging.info(f"✅ Report generated: {final_path}")
-    return final_path
-
-
-# ----------------------------- example -----------------------------
 if __name__ == "__main__":
-    # Example usage (edit paths for your environment):
-    SOURCE = "MyModel.docx"                 # path to your model document (.docx)
-    TEMPLATE = "base/Business_C.docx"       # path to your base template (.docx)
-    MAPPING = "mapping/Business_C.csv"      # CSV with columns: sections, text, (optional) Answer
-
-    # Expected CSV columns:
-    # - sections : "7. Testing the Model (Outcome Analysis); 7.5 Other Analysis"
-    # - text     : anchor to paste under (e.g., "Question 1")
-    # - Answer   : (optional) MRMG assessment text
-
-    run_pipeline(SOURCE, TEMPLATE, MAPPING)
+    # Example usage
+    input_docx = "your_file.docx"  # <-- put your path here
+    rows = parse_docx_to_rows(input_docx)
+    # Print as JSON-lines (one row per line)
+    import json
+    for r in rows:
+        print(json.dumps(r, ensure_ascii=False))
