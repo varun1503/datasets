@@ -158,30 +158,4 @@ if __name__ == "__main__":
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
-    print(f"Wrote {len(rows)} row(s) to {OUT_PATH}")                "Section": section or "",
-                "rfr": { (q_key or "Q?"): " ".join(responses).strip() },
-                "doctype": "rfr",
-            })
-            continue
-
-        i += 1
-
-    return rows
-
-def parse_docx_to_rfr_rows(path: str) -> List[Dict]:
-    """Public API: give a .docx path, get the parsed rows."""
-    lines = read_docx_lines(path)
-    return parse_lines_after_request_items(lines)
-
-# --------- SIMPLE RUN (no argparse) ---------
-if __name__ == "__main__":
-    DOCX_PATH = "YOUR_FILE.docx"   # <-- put your file path here
-    OUT_PATH = "rfr_rows.jsonl"
-
-    rows = parse_docx_to_rfr_rows(DOCX_PATH)
-    # save JSONL
-    with open(OUT_PATH, "w", encoding="utf-8") as f:
-        for r in rows:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
-
     print(f"Wrote {len(rows)} row(s) to {OUT_PATH}")
