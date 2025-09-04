@@ -1,70 +1,137 @@
-import re, json, unicodedata
+import re
+import json
+import unicodedata
+from typing import List, Dict, Tuple
 from docx import Document
 
+# ---------- helpers ----------
 def norm(s: str) -> str:
+    """Unicode-normalize, replace NBSP, collapse spaces, strip."""
     if not s:
         return ""
-    s = unicodedata.normalize("NFKC", s)
-    s = s.replace("\u00A0", " ")
+    s = unicodedata.normalize("NFKC", s).replace("\u00A0", " ")
     return re.sub(r"\s+", " ", s).strip()
 
-RFR_RX = re.compile(r"RFR\d+", re.IGNORECASE)
-RESP_HDR_RX = re.compile(r"^?Modeling Team[’']?s Response?:?$", re.IGNORECASE)
-BRACKETS_RX = re.compile(r"<\s*([^>]+?)\s*>")
-
-def extract_section_and_question(line: str):
-    bits = [norm(b) for b in BRACKETS_RX.findall(line)]
-    section, question = "", ""
-    for b in bits:
-        if b.endswith("?"):
-            question = b
-        else:
-            section = b
-    return section, question
-
-def parse_rfr(path: str):
+def read_docx_lines(path: str) -> List[str]:
+    """Read paragraphs + table cells in document order, normalized and non-empty."""
     doc = Document(path)
-    lines = [norm(p.text) for p in doc.paragraphs if norm(p.text)]
+    lines: List[str] = []
+    for p in doc.paragraphs:
+        t = norm(p.text)
+        if t:
+            lines.append(t)
+    for tbl in doc.tables:
+        for row in tbl.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    t = norm(p.text)
+                    if t:
+                        lines.append(t)
+    return lines
 
-    rows = []
+# ---------- patterns (robust) ----------
+REQ_ITEMS_RX   = re.compile(r"^\s*Request\s+Items\s*$", re.IGNORECASE)
+RFR_RX         = re.compile(r"\s*RFR\s*\d+\s*", re.IGNORECASE)             # [RFR1], [RFR 2]
+BRACKETS_RX    = re.compile(r"<\s*([^>]+?)\s*>")                               # < ... >
+Q_KEY_RX       = re.compile(r"^\s*Q\d+\s*:\s*", re.IGNORECASE)                 # Q1:, Q2:
+RESP_HDR_RX    = re.compile(r"^\s*?\s*Model(?:l)?ing\s*Team[’']?s?\s*Response\s*?\s*:?\s*$",
+                            re.IGNORECASE)
+
+def extract_meta_from_rfr_header(line: str) -> Tuple[str, str, str]:
+    """
+    From an RFR header line containing multiple <...> segments like:
+      <Q1: ...> | < Data Validation > | < ... ? >
+    return (q_key, section, imvp_question)
+    """
+    q_key = ""
+    section = ""
+    imvp = ""
+    parts = [norm(x) for x in BRACKETS_RX.findall(line)]
+
+    # Heuristic: one <Q# ...>, one non-question (Section), one that ends with '?' (IMVP)
+    for part in parts:
+        if Q_KEY_RX.match(part):
+            q_key = part
+        elif part.endswith("?"):
+            imvp = part
+        else:
+            if not section:
+                section = part
+
+    # Fallback: if multiple non-Q parts, pick the shortest as section
+    if not section:
+        non_q = [p for p in parts if not p.endswith("?") and not Q_KEY_RX.match(p)]
+        if non_q:
+            section = sorted(non_q, key=len)[0]
+
+    return q_key, section, imvp
+
+def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
+    """Core parser operating on normalized lines. Starts only after 'Request Items'."""
+    # Move to after "Request Items"
+    start = 0
+    for i, t in enumerate(lines):
+        if REQ_ITEMS_RX.search(t):
+            start = i + 1
+            break
+    L = lines[start:]
+
+    rows: List[Dict] = []
     i = 0
-    while i < len(lines):
-        line = lines[i]
+    while i < len(L):
+        line = L[i]
 
         if RFR_RX.search(line):
-            section, question = extract_section_and_question(line)
-            followups, fidx = {}, 1
-            i += 1
+            # Parse metadata from RFR header line
+            q_key, section, imvp_q = extract_meta_from_rfr_header(line)
 
-            while i < len(lines):
-                cur = lines[i]
-                if RFR_RX.search(cur):  # next RFR
-                    break
-                if RESP_HDR_RX.match(cur):
+            # Collect responses under Modeling Team's Response
+            responses: List[str] = []
+            i += 1
+            while i < len(L) and not RFR_RX.search(L[i]):
+                cur = L[i]
+                if RESP_HDR_RX.search(cur):
                     i += 1
-                    resp_lines = []
-                    while i < len(lines):
-                        nxt = lines[i]
-                        if RESP_HDR_RX.match(nxt) or RFR_RX.search(nxt):
-                            break
-                        resp_lines.append(nxt)
+                    block: List[str] = []
+                    while i < len(L) and not RESP_HDR_RX.search(L[i]) and not RFR_RX.search(L[i]):
+                        block.append(L[i])
                         i += 1
-                    if resp_lines:
-                        followups[f"followup q{fidx}"] = norm(" ".join(resp_lines))
-                        fidx += 1
+                    resp = norm(" ".join(block))
+                    # Unwrap if the whole response is a single <> block
+                    m = BRACKETS_RX.fullmatch(resp)
+                    if m:
+                        resp = norm(m.group(1))
+                    if resp:
+                        responses.append(resp)
                     continue
                 i += 1
 
             rows.append({
-                "IMVP Question": question,
-                "Section": section,
-                "rfr": followups,
-                "doctype": "rfr"
+                "IMVP Question": imvp_q or "",
+                "Section": section or "",
+                "rfr": { (q_key or "Q?"): " ".join(responses).strip() },
+                "doctype": "rfr",
             })
             continue
+
         i += 1
+
     return rows
 
+def parse_docx_to_rfr_rows(path: str) -> List[Dict]:
+    """Public API: give a .docx path, get the parsed rows."""
+    lines = read_docx_lines(path)
+    return parse_lines_after_request_items(lines)
+
+# --------- SIMPLE RUN (no argparse) ---------
 if __name__ == "__main__":
-    data = parse_rfr("your_file.docx")  # replace with your uploaded file path
-    print(json.dumps(data, indent=2, ensure_ascii=False))
+    DOCX_PATH = "YOUR_FILE.docx"   # <-- put your file path here
+    OUT_PATH = "rfr_rows.jsonl"
+
+    rows = parse_docx_to_rfr_rows(DOCX_PATH)
+    # save JSONL
+    with open(OUT_PATH, "w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+    print(f"Wrote {len(rows)} row(s) to {OUT_PATH}")
