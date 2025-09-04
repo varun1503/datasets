@@ -1,60 +1,36 @@
-import pandas as pd
-import json, ast, re
-import numpy as np
+import json
+import ast
+import re
 
-def add_section_from_retrieved(
-    df: pd.DataFrame,
-    column: str = "retrieved_results",
-    out_num: str = "Section number",
-    out_name: str = "sections",
-    make_combined: bool = True,   # also create "Section" with "<num>\t<name>"
-) -> pd.DataFrame:
+def safe_json_loads(cell):
     """
-    From df[column] (JSON/list with dicts), take ONLY the first item and extract:
-      - out_num: numeric prefix from heading (e.g., '7', '7.5', '1.2.3')
-      - out_name: subheading if present else heading text (number stripped)
+    Safely parse a string that might look like a Python dict/list
+    or a broken JSON with single quotes.
     """
-
-    def parse_first_item(cell):
-        # convert string -> py object if needed
-        data = cell
-        if isinstance(cell, str):
-            try:
-                data = json.loads(cell)
-            except Exception:
-                try:
-                    data = ast.literal_eval(cell)
-                except Exception:
-                    data = []
-        # take first dict
-        item = data[0] if isinstance(data, list) and data else (data if isinstance(data, dict) else {})
-        heading = str(item.get("heading", "") or "").strip()
-        sub = str(item.get("subheading", "") or "").strip()
-        if sub.lower() in {"none", "null"}:
-            sub = ""
-
-        # split heading into number + name
-        # matches: "7 Title", "7.5 Title", "1.2.3. Title"
-        m = re.match(r'^\s*([0-9]+(?:\.[0-9]+)*)\.?\s*(.*)$', heading)
-        if m:
-            num = m.group(1)
-            heading_name = m.group(2).strip()
-        else:
-            num = ""
-            heading_name = heading
-
-        # choose section name
-        name = sub if sub else heading_name
-        return pd.Series({out_num: num, out_name: name})
-
-    out = df.copy()
-    out[[out_num, out_name]] = out[column].apply(parse_first_item)
-
-    if make_combined:
-        out["Section"] = np.where(
-            (out[out_num].astype(str).str.strip() != "") & (out[out_name].astype(str).str.strip() != ""),
-            out[out_num].astype(str) + "\t" + out[out_name].astype(str),
-            out[out_num].astype(str) + out[out_name].astype(str)
-        )
-
-    return out
+    if isinstance(cell, (dict, list)):
+        return cell  # already parsed
+    
+    if not isinstance(cell, str):
+        return None
+    
+    # Try direct JSON load
+    try:
+        return json.loads(cell)
+    except json.JSONDecodeError:
+        pass
+    
+    # Try literal_eval (Python dict-like strings)
+    try:
+        return ast.literal_eval(cell)
+    except Exception:
+        pass
+    
+    # Fix common issues: replace single quotes with double quotes
+    fixed = re.sub(r"'", '"', cell)
+    fixed = fixed.replace("\\u", "\\\\u")  # escape unicode
+    
+    try:
+        return json.loads(fixed)
+    except Exception as e:
+        print("Failed parsing:", e)
+        return None
