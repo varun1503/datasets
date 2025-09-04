@@ -1,95 +1,134 @@
-import os
 import pandas as pd
-from typing import Optional
-from docx import Document
-from docx.shared import Pt
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+import numpy as np
+import json
+import ast
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
-def _bold_run(p, text, size=11):
-    r = p.add_run(text)
-    r.bold = True
-    r.font.size = Pt(size)
-    return r
+_SECTION_RE = re.compile(
+    r"""^\s*
+        (?P<num>\d+(?:\.\d+)*)
+        (?:\s*[\.\)\-:–—]\s*|\s+)?
+        (?P<title>.*?)
+        \s*$""",
+    re.VERBOSE
+)
 
-def build_simple_template(
-    df: pd.DataFrame,
-    model: str,
-    impact: str,
-    scope: str = "",
-    save_dir: str = "base",
-    *,
-    question_col: str = "IMVP Question",
-    sections_col: str = "sections",
-    mrmg_col: str = "mrmg_answer",
-    heading_col: Optional[str] = None,   # set to your heading column if you have one
-    blank_lines_under_mtr: int = 2       # how much empty space under "Modelling Team Response"
-) -> str:
+_CAPTION_PREFIXES = tuple(s.lower() for s in ["figure", "fig.", "table", "tab.", "image", "img.", "appendix"])
+
+def _to_list_of_dicts(cell: Any) -> List[Dict[str, Any]]:
+    """Normalize the cell to a list of dicts with possible 'heading'/'subheading' keys."""
+    if cell is None or (isinstance(cell, float) and np.isnan(cell)):
+        return []
+
+    # Already a list/dict?
+    if isinstance(cell, list):
+        # Enforce only dicts
+        return [x for x in cell if isinstance(x, dict)]
+    if isinstance(cell, dict):
+        return [cell]
+
+    # String -> try json, then literal_eval
+    if isinstance(cell, str):
+        s = cell.strip()
+        if not s:
+            return []
+        # Try JSON
+        try:
+            parsed = json.loads(s)
+            if isinstance(parsed, dict):
+                return [parsed]
+            if isinstance(parsed, list):
+                return [x for x in parsed if isinstance(x, dict)]
+        except Exception:
+            pass
+        # Try Python literal (handles single quotes, etc.)
+        try:
+            parsed = ast.literal_eval(s)
+            if isinstance(parsed, dict):
+                return [parsed]
+            if isinstance(parsed, list):
+                return [x for x in parsed if isinstance(x, dict)]
+        except Exception:
+            return []
+
+    # Fallback
+    return []
+
+def _pick_best_item(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Builds a DOCX with, per row:
-      Question i: <df[question_col]>
-      Section: <df[sections_col]>
-      MRMG Assessment: <df[mrmg_col]>
-      (optional) Heading: <df[heading_col]>
-      Modelling Team Response
-      <blank space>
-
-    Nothing else is added (no tables, no extra content).
+    Choose the first dict that has a non-empty 'heading' or 'subheading'.
+    If none, return {}.
     """
-    # basic checks
-    for col in [question_col, sections_col, mrmg_col]:
-        if col not in df.columns:
-            raise KeyError(f"Missing required column in df: '{col}'")
+    for it in items:
+        h = str(it.get("heading", "") or "").strip()
+        sh = str(it.get("subheading", "") or "").strip()
+        if h or sh:
+            return it
+    return items[0] if items else {}
 
-    os.makedirs(save_dir, exist_ok=True)
-    out_path = os.path.join(save_dir, f"{model}_{impact}{('_' + scope) if scope else ''}.docx")
+def _normalize_none_like(x: Optional[str]) -> str:
+    if x is None:
+        return ""
+    s = str(x).strip()
+    return "" if s.lower() in {"none", "null", "nan"} else s
 
-    doc = Document()
+def _extract_num_and_title_from_heading(heading: str) -> Tuple[str, str]:
+    """
+    Extract section number and title from a heading like:
+    '1.2.3 Title', '2) Title', '3 - Title', '4: Title', or just 'Executive Summary'.
+    Avoids treating caption-like prefixes as section numbers (e.g., 'Figure 10.3').
+    """
+    h = heading.strip()
 
-    # Title
-    p = doc.add_paragraph()
-    r = p.add_run("Validation Report (Template)")
-    r.bold = True
-    r.font.size = Pt(16)
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    doc.add_paragraph()
+    # If it starts with a caption prefix, do NOT parse a numeric section from it
+    if h.lower().startswith(_CAPTION_PREFIXES):
+        return "", h
 
-    # Meta
-    doc.add_paragraph(f"Model: {model} | Impact: {impact}{(' | Scope: ' + scope) if scope else ''}")
-    doc.add_paragraph()
+    m = _SECTION_RE.match(h)
+    if m:
+        num = (m.group("num") or "").strip()
+        title = (m.group("title") or "").strip()
+        # If regex consumed the whole string but title ended up empty, keep heading as title
+        if not title:
+            title = h
+        return num, title
+    return "", h
 
-    # Rows
-    for i, row in df.iterrows():
-        # Question
-        pq = doc.add_paragraph()
-        _bold_run(pq, f"Question {i+1}: ", size=12)
-        pq.add_run(str(row[question_col]).strip())
+def add_section_columns(df: pd.DataFrame, column: str = "retrieved_results") -> pd.DataFrame:
+    """
+    Robustly extract:
+      - 'Section number' (e.g., '1.2.3')
+      - 'sections'       (final section name: subheading if present, else heading title)
+      - 'Section'        (combined: 'num\\tname' if both exist)
+    """
 
-        # Section
-        ps = doc.add_paragraph()
-        _bold_run(ps, "Section: ")
-        ps.add_run(str(row[sections_col]).strip())
+    def extract_section_fields(cell: Any) -> pd.Series:
+        items = _to_list_of_dicts(cell)
+        item = _pick_best_item(items)
 
-        # MRMG Assessment
-        pm = doc.add_paragraph()
-        _bold_run(pm, "MRMG Assessment: ")
-        pm.add_run(str(row[mrmg_col]).strip())
+        heading_raw = _normalize_none_like(item.get("heading", ""))
+        sub_raw     = _normalize_none_like(item.get("subheading", ""))
 
-        # Optional Heading
-        if heading_col and heading_col in df.columns:
-            ph = doc.add_paragraph()
-            _bold_run(ph, "Heading: ")
-            ph.add_run(str(row.get(heading_col, "")).strip())
+        # Parse number + heading title from heading_raw
+        sec_num, heading_title = _extract_num_and_title_from_heading(heading_raw)
 
-        # Modelling Team Response (blank)
-        pmt = doc.add_paragraph()
-        _bold_run(pmt, "Modelling Team Response", size=11)
+        # Final section display name prefers subheading if present
+        section_name = sub_raw if sub_raw else heading_title
 
-        # blank lines as space for modeller to fill later
-        for _ in range(max(0, blank_lines_under_mtr)):
-            doc.add_paragraph()
+        return pd.Series({
+            "Section number": sec_num,
+            "sections": section_name
+        })
 
-        # spacer between questions
-        doc.add_paragraph()
+    # Compute columns
+    out = df.copy()
+    out[["Section number", "sections"]] = out[column].apply(extract_section_fields)
 
-    doc.save(out_path)
-    return out_path
+    out["Section"] = np.where(
+        (out["Section number"].astype(str).str.strip() != "") & (out["sections"].astype(str).str.strip() != ""),
+        out["Section number"].astype(str) + "\t" + out["sections"].astype(str),
+        out["Section number"].astype(str) + out["sections"].astype(str)
+    )
+
+    return out
