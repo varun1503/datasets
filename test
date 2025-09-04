@@ -1,36 +1,142 @@
-import json
-import ast
-import re
+import json, ast, re
+import numpy as np
+import pandas as pd
 
-def safe_json_loads(cell):
+# ---------- robust parsing ----------
+
+def _escape_bad_unicode(s: str) -> str:
+    # Turn stray \uXXXX into \\uXXXX so loaders don't treat them as escapes
+    return re.sub(r'\\u(?![0-9a-fA-F]{4})', r'\\\\u', s)
+
+def safe_parse_maybe_list_or_dict(cell):
     """
-    Safely parse a string that might look like a Python dict/list
-    or a broken JSON with single quotes.
+    Returns a Python list/dict from a cell that might be:
+      - already a list/dict
+      - valid JSON
+      - Python-literal string (single quotes, etc.)
+      - broken JSON with stray unicode/backslashes
+    Returns None if it can't be parsed.
     """
-    if isinstance(cell, (dict, list)):
-        return cell  # already parsed
-    
-    if not isinstance(cell, str):
+    if isinstance(cell, (list, dict)):
+        return cell
+    if not isinstance(cell, str) or not cell.strip():
         return None
-    
-    # Try direct JSON load
+
+    s = cell.strip()
+
+    # 1) Try JSON directly
     try:
-        return json.loads(cell)
-    except json.JSONDecodeError:
-        pass
-    
-    # Try literal_eval (Python dict-like strings)
-    try:
-        return ast.literal_eval(cell)
+        return json.loads(s)
     except Exception:
         pass
-    
-    # Fix common issues: replace single quotes with double quotes
-    fixed = re.sub(r"'", '"', cell)
-    fixed = fixed.replace("\\u", "\\\\u")  # escape unicode
-    
+
+    # 2) Escape bad \u and try JSON again
     try:
+        return json.loads(_escape_bad_unicode(s))
+    except Exception:
+        pass
+
+    # 3) Try Python literal (handles single quotes / mixed quotes safely)
+    try:
+        return ast.literal_eval(s)
+    except Exception:
+        pass
+
+    # 4) Last-ditch: convert obvious single-quoted dict/list to double-quoted JSON-ish
+    #    Do NOT touch inside already-double-quoted segments.
+    try:
+        # crude but effective: replace only outer quotes of keys
+        fixed = _escape_bad_unicode(s)
+        fixed = fixed.replace('None', 'null').replace('True', 'true').replace('False', 'false')
+        # common quick repair when the entire thing is single-quoted JSON-ish
+        if fixed.startswith("'") or fixed.startswith("[{\'") or "':" in fixed:
+            fixed = fixed.replace("'", '"')
         return json.loads(fixed)
-    except Exception as e:
-        print("Failed parsing:", e)
+    except Exception:
         return None
+
+# ---------- text utilities ----------
+
+_NUM_NAME_RE = re.compile(r'^\s*([0-9]+(?:\.[0-9]+)*)\s*[\).\:\-]?\s*(.*)$')
+
+def split_num_and_name(text: str):
+    """
+    From '7.5 Other Analysis' -> ('7.5', 'Other Analysis')
+    From '7 Testing the Model' -> ('7', 'Testing the Model')
+    From 'Executive Summary'   -> ('',  'Executive Summary')
+    """
+    t = (text or "").strip()
+    if not t:
+        return "", ""
+    m = _NUM_NAME_RE.match(t)
+    if not m:
+        return "", t
+    return (m.group(1) or "").strip(), (m.group(2) or "").strip()
+
+def pick_first_item(cell):
+    """
+    Returns the first dict-like item from the parsed payload.
+    Handles dict (use as-is) or list (take index 0).
+    """
+    data = safe_parse_maybe_list_or_dict(cell)
+    if isinstance(data, list) and data:
+        item = data[0]
+    elif isinstance(data, dict):
+        item = data
+    else:
+        item = {}
+    # If 'table' is itself a stringified list/dict, silently parse it too (optional)
+    if isinstance(item, dict) and isinstance(item.get("table"), str):
+        maybe = safe_parse_maybe_list_or_dict(item["table"])
+        if maybe is not None:
+            item["table"] = maybe
+    return item
+
+# ---------- main function ----------
+
+def add_section_from_retrieved(
+    df: pd.DataFrame,
+    column: str = "retrieved_results",
+    out_num_col: str = "Section number",
+    out_name_col: str = "sections",
+    combined_col: str = "Section",
+    make_combined: bool = True,
+) -> pd.DataFrame:
+    """
+    Extracts first item's heading/subheading from `column` and writes:
+      - Section number  (prefers subheading's number else heading's number)
+      - sections        (prefers subheading's text   else heading's text)
+      - Section         (combined pretty column)
+    """
+    def parse_row(cell):
+        item = pick_first_item(cell)
+        heading = str(item.get("heading", "") or "").strip()
+        sub     = str(item.get("subheading", "") or "").strip()
+
+        # treat common "none"/"null" spellings as empty
+        if sub.lower() in {"none", "null", "na", "n/a"}:
+            sub = ""
+
+        h_num, h_name = split_num_and_name(heading)
+        s_num, s_name = split_num_and_name(sub) if sub else ("", "")
+
+        # prefer subheading if present
+        num  = s_num  or h_num
+        name = s_name or h_name
+
+        return pd.Series([num, name], index=[out_num_col, out_name_col])
+
+    out = df.copy()
+    parsed = out[column].apply(parse_row)
+    out[out_num_col]  = parsed[out_num_col]
+    out[out_name_col] = parsed[out_name_col]
+
+    if make_combined:
+        left  = out[out_num_col].astype(str).str.strip()
+        right = out[out_name_col].astype(str).str.strip()
+        out[combined_col] = np.where(
+            (left != "") & (right != ""),
+            left + "\t" + right,   # tab between number and name
+            left + right           # whichever exists
+        )
+    return out
