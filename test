@@ -1,117 +1,70 @@
-import re
-from typing import List, Dict, Optional
+import re, json, unicodedata
 from docx import Document
 
-BRACKET_RX = re.compile(r"<\s*([^>]+?)\s*>")
-RFR_START_RX = re.compile(r"^\s*?RFR\s*\d+?:?", re.IGNORECASE)
-MODEL_RESP_HDR_RX = re.compile(r"^\s*\s*Modeling\s*Team[’']?s?\s*Response\s*\s*:?\s*$", re.IGNORECASE)
-Q_PREFIX_RX = re.compile(r"^\s*Q\d+\s*:", re.IGNORECASE)
+def norm(s: str) -> str:
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFKC", s)
+    s = s.replace("\u00A0", " ")
+    return re.sub(r"\s+", " ", s).strip()
 
-def clean(s: str) -> str:
-    return re.sub(r"\s+", " ", s or "").strip()
+RFR_RX = re.compile(r"RFR\d+", re.IGNORECASE)
+RESP_HDR_RX = re.compile(r"^?Modeling Team[’']?s Response?:?$", re.IGNORECASE)
+BRACKETS_RX = re.compile(r"<\s*([^>]+?)\s*>")
 
-def pick_section_and_question(bracket_bits: List[str]) -> (Optional[str], Optional[str]):
-    """
-    From things inside < ... > in an RFR paragraph, pick:
-      - Section = the part that does NOT look like 'Q...' and is not obviously the long prompt; 
-      - IMVP Question = a part that ends with '?' (preferred) or the non-Q remaining text.
-    """
-    bits = [clean(b) for b in bracket_bits if clean(b)]
-    if not bits:
-        return None, None
-
-    # Separate likely 'Q*:' prompts from candidates
-    non_q = [b for b in bits if not Q_PREFIX_RX.match(b)]
-    # Prefer explicit question mark for IMVP question
-    question = next((b for b in non_q if b.endswith("?")), None)
-
-    # If we found a '?' item, section is the other non-Q (if present)
-    if question:
-        section = next((b for b in non_q if b != question), None)
-        return section, question
-
-    # Fallbacks: if only one non-Q, treat that as question
-    if len(non_q) == 1:
-        return None, non_q[0]
-
-    # Otherwise, heuristically pick the shortest as section, longest as question
-    non_q_sorted = sorted(non_q, key=len)
-    section = non_q_sorted[0] if non_q_sorted else None
-    question = non_q_sorted[-1] if non_q_sorted else None
+def extract_section_and_question(line: str):
+    bits = [norm(b) for b in BRACKETS_RX.findall(line)]
+    section, question = "", ""
+    for b in bits:
+        if b.endswith("?"):
+            question = b
+        else:
+            section = b
     return section, question
 
-def parse_docx_to_rows(path: str) -> List[Dict]:
+def parse_rfr(path: str):
     doc = Document(path)
-    paras = [clean(p.text) for p in doc.paragraphs]
+    lines = [norm(p.text) for p in doc.paragraphs if norm(p.text)]
 
-    rows: List[Dict] = []
+    rows = []
     i = 0
-    while i < len(paras):
-        line = paras[i]
+    while i < len(lines):
+        line = lines[i]
 
-        # Detect start of an RFR block
-        if RFR_START_RX.search(line):
-            # Capture bracketed bits on the RFR line to infer Section and IMVP Question
-            bracket_bits = BRACKET_RX.findall(line)
-            section, imvp_q = pick_section_and_question(bracket_bits)
-
-            # Prepare container for followups under this RFR
-            followups: Dict[str, str] = {}
-            f_idx = 1
-
+        if RFR_RX.search(line):
+            section, question = extract_section_and_question(line)
+            followups, fidx = {}, 1
             i += 1
-            # Scan ahead inside this RFR until the next RFR or end
-            while i < len(paras):
-                cur = paras[i]
 
-                # Stop if we hit another RFR block
-                if RFR_START_RX.search(cur):
+            while i < len(lines):
+                cur = lines[i]
+                if RFR_RX.search(cur):  # next RFR
                     break
-
-                # If we see the Modeling Team's Response header, collect body lines
-                if MODEL_RESP_HDR_RX.match(cur):
+                if RESP_HDR_RX.match(cur):
                     i += 1
-                    body_lines = []
-                    # Collect response text until next header/RFR/blank-only wall between sections
-                    while i < len(paras):
-                        nxt = paras[i]
-                        if MODEL_RESP_HDR_RX.match(nxt) or RFR_START_RX.search(nxt):
-                            # another response header or next RFR begins
+                    resp_lines = []
+                    while i < len(lines):
+                        nxt = lines[i]
+                        if RESP_HDR_RX.match(nxt) or RFR_RX.search(nxt):
                             break
-                        # Mild stop heuristic: if line looks like a bracketed header-only line
-                        if BRACKET_RX.fullmatch(nxt):
-                            break
-                        body_lines.append(nxt)
+                        resp_lines.append(nxt)
                         i += 1
-                    response_text = clean(" ".join(body_lines))
-                    if response_text:
-                        followups[f"followup q{f_idx}"] = response_text
-                        f_idx += 1
-                    # continue the while without incrementing here (we already moved i)
+                    if resp_lines:
+                        followups[f"followup q{fidx}"] = norm(" ".join(resp_lines))
+                        fidx += 1
                     continue
+                i += 1
 
-                i += 1  # step forward inside the RFR region
-
-            # Emit one row if we at least got either a question or responses
-            if imvp_q or followups:
-                rows.append({
-                    "IMVP Question": imvp_q or "",
-                    "Section": section or "",
-                    "rfr": followups if followups else {},
-                    "doctype": "rfr",
-                })
-            # note: do not advance i here; we stop when we see next RFR or end
+            rows.append({
+                "IMVP Question": question,
+                "Section": section,
+                "rfr": followups,
+                "doctype": "rfr"
+            })
             continue
-
         i += 1
-
     return rows
 
 if __name__ == "__main__":
-    # Example usage
-    input_docx = "your_file.docx"  # <-- put your path here
-    rows = parse_docx_to_rows(input_docx)
-    # Print as JSON-lines (one row per line)
-    import json
-    for r in rows:
-        print(json.dumps(r, ensure_ascii=False))
+    data = parse_rfr("your_file.docx")  # replace with your uploaded file path
+    print(json.dumps(data, indent=2, ensure_ascii=False))
