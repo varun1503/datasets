@@ -7,14 +7,12 @@ from collections import OrderedDict
 
 # ---------- helpers ----------
 def norm(s: str) -> str:
-    """Unicode-normalize, replace NBSP, collapse spaces, strip."""
     if not s:
         return ""
     s = unicodedata.normalize("NFKC", s).replace("\u00A0", " ")
     return re.sub(r"\s+", " ", s).strip()
 
 def read_docx_lines(path: str) -> List[str]:
-    """Read paragraphs + table cells in document order, normalized and non-empty."""
     doc = Document(path)
     lines: List[str] = []
     for p in doc.paragraphs:
@@ -30,45 +28,42 @@ def read_docx_lines(path: str) -> List[str]:
                         lines.append(t)
     return lines
 
-# ---------- patterns (robust) ----------
-REQ_ITEMS_RX   = re.compile(r"^\s*Request\s+Items\s*$", re.IGNORECASE)
-RFR_RX         = re.compile(r"\s*RFR\s*\d+\s*", re.IGNORECASE)  # matches 'RFR 2', '[RFR2]' if the line includes it
-BRACKETS_RX    = re.compile(r"<\s*([^>]+?)\s*>")                # < ... >
-Q_KEY_RX       = re.compile(r"^\s*Q\d+\s*:\s*", re.IGNORECASE)  # Q1:, Q2:
-RESP_HDR_RX    = re.compile(r"Modeling Team’s Response", re.IGNORECASE)
+# ---------- patterns ----------
+REQ_ITEMS_RX = re.compile(r"^\s*Request\s+Items\s*$", re.IGNORECASE)
+RFR_RX       = re.compile(r"\s*RFR\s*\d+\s*", re.IGNORECASE)        # tolerant
+BRACKETS_RX  = re.compile(r"<\s*([^>]+?)\s*>")
+Q_KEY_RX     = re.compile(r"^\s*Q\d+\s*:\s*", re.IGNORECASE)
+RESP_HDR_RX  = re.compile(r"Modeling Team[’']?s Response", re.IGNORECASE)
 
 def extract_meta_from_rfr_header(line: str) -> Tuple[str, str, str]:
-    """
-    From an RFR header line containing multiple <...> segments like:
-      <Q1: ...> | < Data Validation > | < ... ? >
-    return (q_key, section, imvp_question)
-    """
     q_key = ""
     section = ""
     imvp = ""
     parts = [norm(x) for x in BRACKETS_RX.findall(line)]
-
-    # Heuristic: one <Q# ...>, one non-question (Section), one that ends with '?' (IMVP)
+    # Q may also end with '?', so detect by prefix not by '?'
     for part in parts:
         if Q_KEY_RX.match(part):
             q_key = part
-        elif part.endswith("?"):
-            imvp = part
-        else:
-            if not section:
-                section = part
-
-    # Fallback: if multiple non-Q parts, pick the shortest as section
+            break
+    # last '?' (excluding q_key) is IMVP
+    q_candidates = [p for p in parts if p.endswith("?") and p != q_key]
+    if q_candidates:
+        imvp = q_candidates[-1]
+    # first non-q, non-question is Section
+    for part in parts:
+        if part == q_key: 
+            continue
+        if not part.endswith("?"):
+            section = part
+            break
     if not section:
-        non_q = [p for p in parts if not p.endswith("?") and not Q_KEY_RX.match(p)]
+        non_q = [p for p in parts if p != q_key and not p.endswith("?")]
         if non_q:
             section = sorted(non_q, key=len)[0]
-
     return q_key, section, imvp
 
 def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
-    """Core parser operating on normalized lines. Starts only after 'Request Items'."""
-    # Move to after "Request Items"
+    # start after "Request Items" if present
     start = 0
     for i, t in enumerate(lines):
         if REQ_ITEMS_RX.search(t):
@@ -80,12 +75,8 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
     i = 0
     while i < len(L):
         line = L[i]
-
         if RFR_RX.search(line):
-            # Parse metadata from RFR header line
             q_key, section, imvp_q = extract_meta_from_rfr_header(line)
-
-            # Collect responses under Modeling Team's Response
             responses: List[str] = []
             i += 1
             while i < len(L) and not RFR_RX.search(L[i]):
@@ -97,8 +88,7 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
                         block.append(L[i])
                         i += 1
                     resp = norm(" ".join(block))
-                    # Unwrap if the whole response is a single <> block
-                    m = BRACKETS_RX.fullmatch(resp)
+                    m = BRACKETS_RX.fullmatch(resp)  # unwrap <...> if whole block
                     if m:
                         resp = norm(m.group(1))
                     if resp:
@@ -106,34 +96,59 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
                     continue
                 i += 1
 
-            rows.append({
-                "IMVP Question": imvp_q or "",
-                "Section": section or "",
-                "rfr": { (q_key or "Q?"): " ".join(responses).strip() },
-                "doctype": "rfr",
-            })
+            # 🔒 Guard: only emit if we have IMVP or any response
+            if (imvp_q and imvp_q.strip()) or responses:
+                rows.append({
+                    "IMVP Question": imvp_q or "",
+                    "Section": section or "",
+                    "rfr": { (q_key or "Q?"): " ".join(responses).strip() },
+                    "doctype": "rfr",
+                })
             continue
-
         i += 1
-
     return rows
 
 def parse_docx_to_rfr_rows(path: str) -> List[Dict]:
-    """Public API: give a .docx path, get the parsed rows."""
-    lines = read_docx_lines(path)
-    return parse_lines_after_request_items(lines)
+    return parse_lines_after_request_items(read_docx_lines(path))
 
-# ---------- NEW: merge rows by identical IMVP Question ----------
+# ----- MERGERS -----
+
+def collapse_empty_imvp_into_previous(rows: List[Dict]) -> List[Dict]:
+    """
+    If a row has empty IMVP but has rfr content, merge that rfr into the
+    most recent prior row with the SAME Section and a non-empty IMVP.
+    Drop the empty-IMVP row afterward.
+    """
+    out: List[Dict] = []
+    last_with_imvp_by_section: dict = {}
+    for r in rows:
+        imvp = (r.get("IMVP Question") or "").strip()
+        section = (r.get("Section") or "").strip()
+        if imvp:
+            out.append(r)
+            last_with_imvp_by_section[section] = len(out) - 1
+        else:
+            # empty IMVP; try to merge
+            idx = last_with_imvp_by_section.get(section)
+            if idx is not None and r.get("rfr"):
+                out[idx]["rfr"].update(r["rfr"])
+            else:
+                # optional: keep as-is if no target found; or skip entirely
+                # Here we skip to avoid stray rows
+                pass
+    return out
+
 def merge_rows_by_imvp(rows: List[Dict]) -> List[Dict]:
     """
-    Merge rows that share the same 'IMVP Question' (after trimming).
-    - Combines their 'rfr' dicts into one.
-    - Keeps the first non-empty Section encountered.
-    - doctype remains 'rfr'.
+    Merge rows with identical non-empty IMVP Question:
+     - Combine rfr entries
+     - Keep first non-empty Section
     """
     merged: "OrderedDict[str, Dict]" = OrderedDict()
     for r in rows:
         imvp = (r.get("IMVP Question") or "").strip()
+        if not imvp:
+            continue
         if imvp not in merged:
             merged[imvp] = {
                 "IMVP Question": imvp,
@@ -142,26 +157,24 @@ def merge_rows_by_imvp(rows: List[Dict]) -> List[Dict]:
                 "doctype": "rfr",
             }
         else:
-            # merge rfr keys
-            for k, v in (r.get("rfr") or {}).items():
-                # if same key appears again, last one wins (change if you prefer list-append)
-                merged[imvp]["rfr"][k] = v
-            # keep first non-empty Section, otherwise update if existing is empty
+            merged[imvp]["rfr"].update(r.get("rfr") or {})
             if not merged[imvp]["Section"] and (r.get("Section") or ""):
                 merged[imvp]["Section"] = r["Section"]
     return list(merged.values())
 
-# --------- SIMPLE RUN (no argparse) ---------
+# --------- SIMPLE RUN ---------
 if __name__ == "__main__":
-    DOCX_PATH = "Final RFR .docx"   # <-- put your file path here
-    OUT_PATH = "rfr_rows.jsonl"
+    DOCX_PATH = "Final RFR .docx"   # <-- your file
+    OUT_PATH  = "rfr_rows.jsonl"
 
     rows = parse_docx_to_rfr_rows(DOCX_PATH)
-    rows = merge_rows_by_imvp(rows)   # <-- merge step
+    # 1) fold empty-IMVP rows into previous same-section item
+    rows = collapse_empty_imvp_into_previous(rows)
+    # 2) merge duplicates by identical IMVP
+    rows = merge_rows_by_imvp(rows)
 
-    # save JSONL
     with open(OUT_PATH, "w", encoding="utf-8") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
-    print(f"Wrote {len(rows)} merged row(s) to {OUT_PATH}")
+    print(f"Wrote {len(rows)} row(s) to {OUT_PATH}")
