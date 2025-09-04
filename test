@@ -6,20 +6,22 @@ from docx import Document
 
 # ---------- helpers ----------
 def norm(s: str) -> str:
-    """Unicode-normalize, replace NBSP, collapse spaces, strip."""
     if not s:
         return ""
-    s = unicodedata.normalize("NFKC", s).replace("\u00A0", " ")
+    s = unicodedata.normalize("NFKC", s)
+    s = s.replace("\u00A0", " ")
+    s = s.replace("’", "'").replace("“", '"').replace("”", '"')
     return re.sub(r"\s+", " ", s).strip()
 
 def read_docx_lines(path: str) -> List[str]:
-    """Read paragraphs + table cells in document order, normalized and non-empty."""
     doc = Document(path)
     lines: List[str] = []
+    # paragraphs
     for p in doc.paragraphs:
         t = norm(p.text)
         if t:
             lines.append(t)
+    # table cells too (some docs hide content in tables)
     for tbl in doc.tables:
         for row in tbl.rows:
             for cell in row.cells:
@@ -30,45 +32,70 @@ def read_docx_lines(path: str) -> List[str]:
     return lines
 
 # ---------- patterns (robust) ----------
-REQ_ITEMS_RX   = re.compile(r"^\s*Request\s+Items\s*$", re.IGNORECASE)
-RFR_RX         = re.compile(r"\s*RFR\s*\d+\s*", re.IGNORECASE)             # [RFR1], [RFR 2]
-BRACKETS_RX    = re.compile(r"<\s*([^>]+?)\s*>")                               # < ... >
-Q_KEY_RX       = re.compile(r"^\s*Q\d+\s*:\s*", re.IGNORECASE)                 # Q1:, Q2:
-RESP_HDR_RX    = re.compile(r"^\s*?\s*Model(?:l)?ing\s*Team[’']?s?\s*Response\s*?\s*:?\s*$",
-                            re.IGNORECASE)
+# We'll parse entire doc; "Request Items" gate is optional. If present, we start after it.
+REQ_ITEMS_RX = re.compile(r"^\s*Request\s+Items\s*$", re.IGNORECASE)
+
+# Accepts: [RFR2], [RFR 2]:, RFR2:, RFR 2, [ RFR 12 ]
+RFR_RX = re.compile(r"?\s*RFR\s*\d+\s*?\s*:?", re.IGNORECASE)
+
+# < ... >
+BRACKETS_RX = re.compile(r"<\s*([^>]+?)\s*>")
+
+# Q-key like Q1:, Q2:  (even if ends with '?', we still treat it as Q key)
+Q_KEY_RX = re.compile(r"^\s*Q\d+\s*:\s*", re.IGNORECASE)
+
+# Many variants of "Modeling Team's Response"
+RESP_HDR_RX = re.compile(
+    r"^\s*?\s*Model(?:e)?l?ing\s*Team'?s?\s*Response\s*?\s*:?\s*$",
+    re.IGNORECASE
+)
 
 def extract_meta_from_rfr_header(line: str) -> Tuple[str, str, str]:
     """
     From an RFR header line containing multiple <...> segments like:
-      <Q1: ...> | < Data Validation > | < ... ? >
+      <Q1: ...?> | < Data Validation > | < ... ? >
     return (q_key, section, imvp_question)
-    """
-    q_key = ""
-    section = ""
-    imvp = ""
-    parts = [norm(x) for x in BRACKETS_RX.findall(line)]
 
-    # Heuristic: one <Q# ...>, one non-question (Section), one that ends with '?' (IMVP)
+    Rules:
+      - q_key = the segment that MATCHES Q_KEY_RX (even if it ends with '?')
+      - imvp_question = the LAST segment that ends with '?' and is NOT q_key
+      - section = the FIRST segment that is NOT q_key and does NOT end with '?'
+        (fallback: pick the shortest non-q segment if needed)
+    """
+    parts = [norm(x) for x in BRACKETS_RX.findall(line)]
+    q_key = ""
+    imvp = ""
+    section = ""
+
+    # identify q_key
     for part in parts:
         if Q_KEY_RX.match(part):
             q_key = part
-        elif part.endswith("?"):
-            imvp = part
-        else:
-            if not section:
-                section = part
+            break
 
-    # Fallback: if multiple non-Q parts, pick the shortest as section
+    # choose IMVP as the last '?' segment that is NOT q_key
+    q_candidates = [p for p in parts if p.endswith("?") and p != q_key]
+    if q_candidates:
+        imvp = q_candidates[-1]
+
+    # choose section as first non-q, non-question segment
+    for part in parts:
+        if part == q_key:
+            continue
+        if not part.endswith("?"):
+            section = part
+            break
+
+    # fallback: if no clear section found, pick the shortest non-q segment
     if not section:
-        non_q = [p for p in parts if not p.endswith("?") and not Q_KEY_RX.match(p)]
+        non_q = [p for p in parts if p != q_key and not p.endswith("?")]
         if non_q:
             section = sorted(non_q, key=len)[0]
 
-    return q_key, section, imvp
+    return q_key, section or "", imvp or ""
 
-def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
-    """Core parser operating on normalized lines. Starts only after 'Request Items'."""
-    # Move to after "Request Items"
+def parse_lines(lines: List[str]) -> List[Dict]:
+    # Start after "Request Items" if present, else from top
     start = 0
     for i, t in enumerate(lines):
         if REQ_ITEMS_RX.search(t):
@@ -82,7 +109,6 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
         line = L[i]
 
         if RFR_RX.search(line):
-            # Parse metadata from RFR header line
             q_key, section, imvp_q = extract_meta_from_rfr_header(line)
 
             # Collect responses under Modeling Team's Response
@@ -97,7 +123,7 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
                         block.append(L[i])
                         i += 1
                     resp = norm(" ".join(block))
-                    # Unwrap if the whole response is a single <> block
+                    # If response is a single <...>, unwrap it
                     m = BRACKETS_RX.fullmatch(resp)
                     if m:
                         resp = norm(m.group(1))
@@ -107,8 +133,32 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
                 i += 1
 
             rows.append({
-                "IMVP Question": imvp_q or "",
-                "Section": section or "",
+                "IMVP Question": imvp_q,
+                "Section": section,
+                "rfr": { (q_key or "Q?"): " ".join(responses).strip() },
+                "doctype": "rfr",
+            })
+            continue
+
+        i += 1
+
+    return rows
+
+def parse_docx_to_rfr_rows(path: str) -> List[Dict]:
+    return parse_lines(read_docx_lines(path))
+
+# --------- SIMPLE RUN (no argparse) ---------
+if __name__ == "__main__":
+    DOCX_PATH = "YOUR_FILE.docx"   # <-- put your file path here
+    OUT_PATH = "rfr_rows.jsonl"
+
+    rows = parse_docx_to_rfr_rows(DOCX_PATH)
+
+    with open(OUT_PATH, "w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+    print(f"Wrote {len(rows)} row(s) to {OUT_PATH}")                "Section": section or "",
                 "rfr": { (q_key or "Q?"): " ".join(responses).strip() },
                 "doctype": "rfr",
             })
