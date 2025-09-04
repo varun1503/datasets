@@ -1,114 +1,63 @@
 import pandas as pd
+import json, ast, re
 import numpy as np
-import json
-import ast
-import re
-from typing import Any, Dict, List, Optional, Tuple
 
-_SECTION_RE = re.compile(
-    r"""^\s*
-        (?P<num>\d+(?:\.\d+)*)
-        (?:\s*[\.\)\-:–—]\s*|\s+)?
-        (?P<title>.*?)
-        \s*$""",
-    re.VERBOSE
-)
-
-_CAPTION_PREFIXES = tuple(s.lower() for s in ["figure", "fig.", "table", "tab.", "image", "img.", "appendix"])
-
-def _to_list_of_dicts(cell: Any) -> List[Dict[str, Any]]:
-    """Normalize the cell to a list of dicts with possible 'heading'/'subheading' keys."""
-    if cell is None or (isinstance(cell, float) and np.isnan(cell)):
-        return []
-
-    # Already a list/dict?
-    if isinstance(cell, list):
-        # Enforce only dicts
-        return [x for x in cell if isinstance(x, dict)]
-    if isinstance(cell, dict):
-        return [cell]
-
-    # String -> try json, then literal_eval
-    if isinstance(cell, str):
-        s = cell.strip()
-        if not s:
-            return []
-        # Try JSON
-        try:
-            parsed = json.loads(s)
-            if isinstance(parsed, dict):
-                return [parsed]
-            if isinstance(parsed, list):
-                return [x for x in parsed if isinstance(x, dict)]
-        except Exception:
-            pass
-        # Try Python literal (handles single quotes, etc.)
-        try:
-            parsed = ast.literal_eval(s)
-            if isinstance(parsed, dict):
-                return [parsed]
-            if isinstance(parsed, list):
-                return [x for x in parsed if isinstance(x, dict)]
-        except Exception:
-            return []
-
-    # Fallback
-    return []
-
-def _pick_best_item(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+def add_section_from_retrieved(
+    df: pd.DataFrame,
+    column: str = "retrieved_results",
+    out_num: str = "Section number",
+    out_name: str = "sections",
+    make_combined: bool = True,   # also create "Section" with "<num>\t<name>"
+) -> pd.DataFrame:
     """
-    Choose the first dict that has a non-empty 'heading' or 'subheading'.
-    If none, return {}.
-    """
-    for it in items:
-        h = str(it.get("heading", "") or "").strip()
-        sh = str(it.get("subheading", "") or "").strip()
-        if h or sh:
-            return it
-    return items[0] if items else {}
-
-def _normalize_none_like(x: Optional[str]) -> str:
-    if x is None:
-        return ""
-    s = str(x).strip()
-    return "" if s.lower() in {"none", "null", "nan"} else s
-
-def _extract_num_and_title_from_heading(heading: str) -> Tuple[str, str]:
-    """
-    Extract section number and title from a heading like:
-    '1.2.3 Title', '2) Title', '3 - Title', '4: Title', or just 'Executive Summary'.
-    Avoids treating caption-like prefixes as section numbers (e.g., 'Figure 10.3').
-    """
-    h = heading.strip()
-
-    # If it starts with a caption prefix, do NOT parse a numeric section from it
-    if h.lower().startswith(_CAPTION_PREFIXES):
-        return "", h
-
-    m = _SECTION_RE.match(h)
-    if m:
-        num = (m.group("num") or "").strip()
-        title = (m.group("title") or "").strip()
-        # If regex consumed the whole string but title ended up empty, keep heading as title
-        if not title:
-            title = h
-        return num, title
-    return "", h
-
-def add_section_columns(df: pd.DataFrame, column: str = "retrieved_results") -> pd.DataFrame:
-    """
-    Robustly extract:
-      - 'Section number' (e.g., '1.2.3')
-      - 'sections'       (final section name: subheading if present, else heading title)
-      - 'Section'        (combined: 'num\\tname' if both exist)
+    From df[column] (JSON/list with dicts), take ONLY the first item and extract:
+      - out_num: numeric prefix from heading (e.g., '7', '7.5', '1.2.3')
+      - out_name: subheading if present else heading text (number stripped)
     """
 
-    def extract_section_fields(cell: Any) -> pd.Series:
-        items = _to_list_of_dicts(cell)
-        item = _pick_best_item(items)
+    def parse_first_item(cell):
+        # convert string -> py object if needed
+        data = cell
+        if isinstance(cell, str):
+            try:
+                data = json.loads(cell)
+            except Exception:
+                try:
+                    data = ast.literal_eval(cell)
+                except Exception:
+                    data = []
+        # take first dict
+        item = data[0] if isinstance(data, list) and data else (data if isinstance(data, dict) else {})
+        heading = str(item.get("heading", "") or "").strip()
+        sub = str(item.get("subheading", "") or "").strip()
+        if sub.lower() in {"none", "null"}:
+            sub = ""
 
-        heading_raw = _normalize_none_like(item.get("heading", ""))
-        sub_raw     = _normalize_none_like(item.get("subheading", ""))
+        # split heading into number + name
+        # matches: "7 Title", "7.5 Title", "1.2.3. Title"
+        m = re.match(r'^\s*([0-9]+(?:\.[0-9]+)*)\.?\s*(.*)$', heading)
+        if m:
+            num = m.group(1)
+            heading_name = m.group(2).strip()
+        else:
+            num = ""
+            heading_name = heading
+
+        # choose section name
+        name = sub if sub else heading_name
+        return pd.Series({out_num: num, out_name: name})
+
+    out = df.copy()
+    out[[out_num, out_name]] = out[column].apply(parse_first_item)
+
+    if make_combined:
+        out["Section"] = np.where(
+            (out[out_num].astype(str).str.strip() != "") & (out[out_name].astype(str).str.strip() != ""),
+            out[out_num].astype(str) + "\t" + out[out_name].astype(str),
+            out[out_num].astype(str) + out[out_name].astype(str)
+        )
+
+    return out        sub_raw     = _normalize_none_like(item.get("subheading", ""))
 
         # Parse number + heading title from heading_raw
         sec_num, heading_title = _extract_num_and_title_from_heading(heading_raw)
