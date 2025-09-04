@@ -57,27 +57,4 @@ def add_section_from_retrieved(
             out[out_num].astype(str) + out[out_name].astype(str)
         )
 
-    return out        sub_raw     = _normalize_none_like(item.get("subheading", ""))
-
-        # Parse number + heading title from heading_raw
-        sec_num, heading_title = _extract_num_and_title_from_heading(heading_raw)
-
-        # Final section display name prefers subheading if present
-        section_name = sub_raw if sub_raw else heading_title
-
-        return pd.Series({
-            "Section number": sec_num,
-            "sections": section_name
-        })
-
-    # Compute columns
-    out = df.copy()
-    out[["Section number", "sections"]] = out[column].apply(extract_section_fields)
-
-    out["Section"] = np.where(
-        (out["Section number"].astype(str).str.strip() != "") & (out["sections"].astype(str).str.strip() != ""),
-        out["Section number"].astype(str) + "\t" + out["sections"].astype(str),
-        out["Section number"].astype(str) + out["sections"].astype(str)
-    )
-
     return out
