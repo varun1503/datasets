@@ -1,1 +1,24 @@
-Q_KEY_RQ_KEY_RX = re.compile(r"<Q\d+\s*:\s*", re.IGNORECASE)X = re.compile(r"(?:^|\]:\s*|:\s*)<Q\d+\s*:\s*", re.IGNORECASE)
+# 1) Detect the Q marker (works for :<Q3: and [RFR1]: <Q3:, with or without '>')
+Q_KEY_RX = re.compile(
+    r"(?:^|:\s*|\s*:\s*)<\s*Q(\d+)\s*:\s*>?",
+    re.IGNORECASE
+)
+
+# 2) Extract the question text after the marker, up to next marker or line end
+Q_TEXT_RX = re.compile(
+    r"(?:^|:\s*|\s*:\s*)<\s*Q\d+\s*:\s*>?\s*(.*?)(?=\s*(?:\w.*?\s*:|<\s*[QA]\d*\s*:|$))",
+    re.IGNORECASE
+)
+
+samples = [
+    ":<Q3: What is your name",               # no '?'
+    "[RFR1]: <Q3: Tell me your ID>",         # has '>'
+    "noise :<Q12: Pick one A/B",             # no '?'
+    "[X]: <Q7:>",                            # empty text
+    "Start <Q2: Choose number> [RFR]: <A2:"  # stops before next marker
+]
+
+for s in samples:
+    m1 = Q_KEY_RX.search(s)
+    m2 = Q_TEXT_RX.search(s)
+    print(s, "-> Q#", (m1.group(1) if m1 else None), "| text:", (m2.group(1).strip() if m2 else None))
