@@ -1,39 +1,4 @@
-from typing import List
-from docx import Document
-from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
-from docx.table import _Cell, Table
-from docx.text.paragraph import Paragraph
+import re
 
-def norm(s: str) -> str:
-    import re, unicodedata
-    if not s:
-        return ""
-    s = unicodedata.normalize("NFKC", s).replace("\u00A0", " ")
-    return re.sub(r"\s+", " ", s).strip()
-
-def read_docx_lines(path: str) -> List[str]:
-    doc = Document(path)
-    lines: List[str] = []
-
-    # Walk through document body in order
-    for child in doc.element.body.iterchildren():
-        if child.tag == qn("w:p"):  # Paragraph
-            p = Paragraph(child, doc)
-            t = norm(p.text)
-            if t:
-                lines.append(t)
-
-        elif child.tag == qn("w:tbl"):  # Table
-            tbl = Table(child, doc)
-            for row in tbl.rows:
-                row_text = []
-                for cell in row.cells:
-                    for p in cell.paragraphs:
-                        t = norm(p.text)
-                        if t:
-                            row_text.append(t)
-                if row_text:
-                    lines.append(" | ".join(row_text))  # Optional: format table row nicely
-
-    return lines
+def clean_greater_than(lines):
+    return [re.sub(r'>.*$', '', s).strip() for s in lines]
