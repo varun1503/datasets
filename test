@@ -1,80 +1,47 @@
 import re
-from typing import List, Optional
+from typing import List, Dict
+from collections import OrderedDict
 
-def group_blocks_from_list(
-    lines: List[str],
-    start_rx: re.Pattern,
-    stop_rx: Optional[re.Pattern] = None,
-    stop_substrings: Optional[List[str]] = None,
-    joiner: str = " ",
-    include_stop_line: bool = True,
-) -> List[str]:
+def split_rfr_blocks(lines: List[str]) -> List[Dict[str, List[str]]]:
     """
-    Group consecutive lines from a list into blocks.
-    - Block starts when a line matches start_rx.
-    - Block ends when a line matches stop_rx, or contains any substring in stop_substrings,
-      or when another start line appears.
+    Splits a list of lines into RFR blocks with two sections:
+      - 'ref': from the RFR line until just before "Modeling Team Response"
+      - 'model_response': from "Modeling Team Response" until the next RFR
+    Returns a list of dicts, one per RFR.
     """
-    stop_substrings = stop_substrings or []
-    out, buf = [], []
-    capturing = False
 
-    def flush():
-        nonlocal buf
-        if buf:
-            out.append(joiner.join(s.strip() for s in buf if s.strip()))
-            buf = []
+    RFR_RX = re.compile(r"\s*RFR\s*\d+\s*", re.IGNORECASE)
+    MODEL_RX = re.compile(r"\bModel(?:l?ing)?\s+Team(?:’s|'s)?\s+Response\b|\bModel\s+team\s+ready\b", re.IGNORECASE)
 
-    for line in lines:
-        s = (line or "").strip()
+    out = []
+    current = None
+    section = None  # can be 'ref' or 'model_response'
 
-        if start_rx.search(s):  # new block starts
-            flush()
-            capturing = True
-            buf.append(s)
+    for raw in lines:
+        line = (raw or "").strip()
+        if not line:
             continue
 
-        if not capturing:
+        # If new RFR starts, push old block and reset
+        if RFR_RX.search(line):
+            if current:
+                out.append(current)
+            current = {"rfr": line, "ref": [], "model_response": []}
+            section = "ref"
             continue
 
-        buf.append(s)
+        # If modeling team response marker, switch section
+        if MODEL_RX.search(line):
+            section = "model_response"
+            current["model_response"].append(line)  # include the marker itself
+            continue
 
-        stop_hit = False
-        if stop_rx and stop_rx.search(s):
-            stop_hit = True
-        elif any(sub in s for sub in stop_substrings):
-            stop_hit = True
+        # Add line to the active section
+        if current and section:
+            current[section].append(line)
 
-        if stop_hit:
-            if not include_stop_line:
-                buf.pop()
-            flush()
-            capturing = False
+    # Flush last block
+    if current:
+        out.append(current)
 
-    flush()
     return out
-
-
-# ---------- Example patterns for your RFR use-case ----------
-
-RFR_START_RX = re.compile(r"^\s*?RFR\s*\d+?:?\s*<Q\d+:", re.IGNORECASE)
-STOP_SUBS = ["evaluation dataset>"]
-
-# Example usage with your list of lines
-lines = [
-    "[RFR1]: <Q3: Some question text",
-    "First paragraph of answer.",
-    "Second paragraph of answer.",
-    "Ends with evaluation dataset>",
-    "[RFR2]: <Q4: Another question",
-    "One line answer.",
-    "evaluation dataset>",
-]
-
-blocks = group_blocks_from_list(lines, start_rx=RFR_START_RX, stop_substrings=STOP_SUBS)
-
-print(blocks)
-# [
-#   "[RFR1]: <Q3: Some question text First paragraph of answer. Second paragraph of answer. Ends with evaluation dataset>",
-#   "[RFR2]: <Q4: Another question One line answer. evaluation dataset>"
-# ]
