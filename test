@@ -1,110 +1,39 @@
-import re
-from typing import List, Optional
+from typing import List
+from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.table import _Cell, Table
+from docx.text.paragraph import Paragraph
 
-def group_blocks_from_list(
-    lines: List[str],
-    start_rx: re.Pattern,
-    stop_rx: Optional[re.Pattern] = None,
-    stop_substrings: Optional[List[str]] = None,
-    joiner: str = " ",
-    include_stop_line: bool = True,
-) -> List[Tuple[int, int, str]]:
-    """
-    Group consecutive lines from a list into blocks.
-    Returns a list of tuples (start_idx, end_idx, grouped_text).
-    """
-    stop_substrings = stop_substrings or []
-    grouped_blocks = []
-    buf = []
-    capturing = False
-    start_idx = 0
+def norm(s: str) -> str:
+    import re, unicodedata
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFKC", s).replace("\u00A0", " ")
+    return re.sub(r"\s+", " ", s).strip()
 
-    def flush(end_idx):
-        nonlocal buf
-        if buf:
-            grouped_text = joiner.join(s.strip() for s in buf if s.strip())
-            grouped_blocks.append((start_idx, end_idx, grouped_text))
-            buf = []
+def read_docx_lines(path: str) -> List[str]:
+    doc = Document(path)
+    lines: List[str] = []
 
-    for i, line in enumerate(lines):
-        s = (line or "").strip()
-        if start_rx.search(s):
-            if capturing:
-                flush(i - 1)
-            capturing = True
-            start_idx = i
-            buf = [s]
-            continue
+    # Walk through document body in order
+    for child in doc.element.body.iterchildren():
+        if child.tag == qn("w:p"):  # Paragraph
+            p = Paragraph(child, doc)
+            t = norm(p.text)
+            if t:
+                lines.append(t)
 
-        if not capturing:
-            continue
+        elif child.tag == qn("w:tbl"):  # Table
+            tbl = Table(child, doc)
+            for row in tbl.rows:
+                row_text = []
+                for cell in row.cells:
+                    for p in cell.paragraphs:
+                        t = norm(p.text)
+                        if t:
+                            row_text.append(t)
+                if row_text:
+                    lines.append(" | ".join(row_text))  # Optional: format table row nicely
 
-        buf.append(s)
-
-        stop_hit = False
-        if stop_rx and stop_rx.search(s):
-            stop_hit = True
-        elif any(sub in s for sub in stop_substrings):
-            stop_hit = True
-
-        if stop_hit:
-            if not include_stop_line:
-                buf.pop()
-                flush(i - 1)
-            else:
-                flush(i)
-            capturing = False
-
-    if capturing:
-        flush(len(lines) - 1)
-
-    return grouped_blocks
-
-
-def replace_blocks_in_lines(lines: List[str], grouped_blocks: List[Tuple[int, int, str]]) -> List[str]:
-    """
-    Replace original RFR block lines with their grouped version, preserving sequence.
-    """
-    replaced = []
-    i = 0
-    block_map = {start: (end, text) for start, end, text in grouped_blocks}
-
-    while i < len(lines):
-        if i in block_map:
-            end_idx, text = block_map[i]
-            replaced.append(text)
-            i = end_idx + 1
-        else:
-            replaced.append(lines[i])
-            i += 1
-    return replaced
-
-
-# ---------- Example usage ----------
-
-RFR_RX = re.compile(r"\s*RFR\s*\d+\s*", re.IGNORECASE)
-STOP_SUBS = ["[Modeling Team’s Response]", "[", "Modeling Team’s Response"]
-
-# Example input lines
-lines = [
-    "Intro section",
-    "RFR 1 This is the start",
-    "More explanation line 1",
-    "More explanation line 2",
-    "[Modeling Team’s Response]",
-    "Another general paragraph",
-    "RFR 2 Some other RFR",
-    "Continues here",
-    "[",
-    "Yet another normal line"
-]
-
-# Step 1: Group the RFR blocks
-grouped = group_blocks_from_list(lines, start_rx=RFR_RX, stop_substrings=STOP_SUBS)
-
-# Step 2: Replace blocks back in original order
-final_lines = replace_blocks_in_lines(lines, grouped)
-
-# Output
-for l in final_lines:
-    print(l)
+    return lines
