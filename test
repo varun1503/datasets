@@ -1,69 +1,50 @@
 import re
 from typing import List
 
-RFR_RX  = re.compile(r"\bRFR\s*\d+\b", re.IGNORECASE)
-# Handles: "Modeling/Modelling Team’s/Team's Response" and "Model team ready"
-MODEL_RX = re.compile(
-    r"\bModel(?:l?ing)?\s+Team(?:’s|'s)?\s+Response\b|\bModel\s+team\s+ready\b",
-    re.IGNORECASE,
-)
+# Define patterns
+RFR_RX = re.compile(r"RFR\s*(\d+):", re.IGNORECASE)
+MODEL_RX = re.compile(r"Model(?:l?ing)?\s+Team(?:’s|'s)?\s+Response:", re.IGNORECASE)
 
-def format_rfr_blocks_as_strings(lines: List[str]) -> List[str]:
+def extract_rfr_model_blocks(lines: List[str]) -> List[str]:
     """
-    Returns: List[str], where each item is a block:
-        RFR N:
-        ref:
-        ...
-        modelling team response:
-        ...
+    Parses a list of lines, extracts RFR + Modeling Team Response pairs,
+    and replaces them with single-line formatted strings in the same list position.
+    All other lines remain untouched.
     """
-    out: List[str] = []
-    rfr_key = None
-    section = None  # 'ref' or 'model'
-    ref_buf: List[str] = []
-    model_buf: List[str] = []
+    output = []
+    i = 0
+    n = len(lines)
 
-    def flush_block():
-        nonlocal ref_buf, model_buf, rfr_key
-        if rfr_key is None:
-            return
-        parts = [f"{rfr_key}:"]
-        if ref_buf:
-            parts.append("ref:")
-            parts.extend(ref_buf)
-        if model_buf:
-            parts.append("modelling team response:")
-            parts.extend(model_buf)
-        out.append("\n".join(parts))
-        ref_buf.clear()
-        model_buf.clear()
+    while i < n:
+        line = lines[i].strip()
 
-    for raw in lines:
-        line = (raw or "").strip()
-        if not line:
-            continue
+        # Check for start of an RFR block
+        rfr_match = RFR_RX.search(line)
+        if rfr_match:
+            rfr_number = rfr_match.group(1)
+            rfr_key = f"RFR {rfr_number}:"
+            ref_lines = [line]
+            model_lines = []
+            i += 1
 
-        # New RFR starts → flush previous, begin a new block
-        if RFR_RX.search(line):
-            flush_block()
-            rfr_key = line.strip()
-            section = "ref"  # start collecting ref until we hit MODEL_RX
-            continue
+            # Collect until we hit Modeling Team Response
+            while i < n and not MODEL_RX.search(lines[i]):
+                ref_lines.append(lines[i].strip())
+                i += 1
 
-        # Inside an RFR: switch to model section on modeling marker
-        if rfr_key is not None and MODEL_RX.search(line):
-            section = "model"
-            # include the marker line as part of the model section
-            model_buf.append(line)
-            continue
+            # If MODEL_RX is found, collect model response too
+            if i < n and MODEL_RX.search(lines[i]):
+                model_lines.append(lines[i].strip())
+                i += 1
+                while i < n and not RFR_RX.search(lines[i]):
+                    model_lines.append(lines[i].strip())
+                    i += 1
 
-        # Append to current section
-        if rfr_key is not None:
-            if section == "model":
-                model_buf.append(line)
-            else:  # default to ref until marker appears
-                ref_buf.append(line)
+            # Build flat output string
+            combined = f"{rfr_key} ref: {' '.join(ref_lines)} modelling team response: {' '.join(model_lines)}"
+            output.append(combined)
+        else:
+            output.append(lines[i])
+            i += 1
 
-    # Flush the final block
-    flush_block()
-    return out
+    return output
