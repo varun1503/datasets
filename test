@@ -1,47 +1,69 @@
 import re
-from typing import List, Dict
-from collections import OrderedDict
+from typing import List
 
-def split_rfr_blocks(lines: List[str]) -> List[Dict[str, List[str]]]:
+RFR_RX  = re.compile(r"\bRFR\s*\d+\b", re.IGNORECASE)
+# Handles: "Modeling/Modelling Team’s/Team's Response" and "Model team ready"
+MODEL_RX = re.compile(
+    r"\bModel(?:l?ing)?\s+Team(?:’s|'s)?\s+Response\b|\bModel\s+team\s+ready\b",
+    re.IGNORECASE,
+)
+
+def format_rfr_blocks_as_strings(lines: List[str]) -> List[str]:
     """
-    Splits a list of lines into RFR blocks with two sections:
-      - 'ref': from the RFR line until just before "Modeling Team Response"
-      - 'model_response': from "Modeling Team Response" until the next RFR
-    Returns a list of dicts, one per RFR.
+    Returns: List[str], where each item is a block:
+        RFR N:
+        ref:
+        ...
+        modelling team response:
+        ...
     """
+    out: List[str] = []
+    rfr_key = None
+    section = None  # 'ref' or 'model'
+    ref_buf: List[str] = []
+    model_buf: List[str] = []
 
-    RFR_RX = re.compile(r"\s*RFR\s*\d+\s*", re.IGNORECASE)
-    MODEL_RX = re.compile(r"\bModel(?:l?ing)?\s+Team(?:’s|'s)?\s+Response\b|\bModel\s+team\s+ready\b", re.IGNORECASE)
-
-    out = []
-    current = None
-    section = None  # can be 'ref' or 'model_response'
+    def flush_block():
+        nonlocal ref_buf, model_buf, rfr_key
+        if rfr_key is None:
+            return
+        parts = [f"{rfr_key}:"]
+        if ref_buf:
+            parts.append("ref:")
+            parts.extend(ref_buf)
+        if model_buf:
+            parts.append("modelling team response:")
+            parts.extend(model_buf)
+        out.append("\n".join(parts))
+        ref_buf.clear()
+        model_buf.clear()
 
     for raw in lines:
         line = (raw or "").strip()
         if not line:
             continue
 
-        # If new RFR starts, push old block and reset
+        # New RFR starts → flush previous, begin a new block
         if RFR_RX.search(line):
-            if current:
-                out.append(current)
-            current = {"rfr": line, "ref": [], "model_response": []}
-            section = "ref"
+            flush_block()
+            rfr_key = line.strip()
+            section = "ref"  # start collecting ref until we hit MODEL_RX
             continue
 
-        # If modeling team response marker, switch section
-        if MODEL_RX.search(line):
-            section = "model_response"
-            current["model_response"].append(line)  # include the marker itself
+        # Inside an RFR: switch to model section on modeling marker
+        if rfr_key is not None and MODEL_RX.search(line):
+            section = "model"
+            # include the marker line as part of the model section
+            model_buf.append(line)
             continue
 
-        # Add line to the active section
-        if current and section:
-            current[section].append(line)
+        # Append to current section
+        if rfr_key is not None:
+            if section == "model":
+                model_buf.append(line)
+            else:  # default to ref until marker appears
+                ref_buf.append(line)
 
-    # Flush last block
-    if current:
-        out.append(current)
-
+    # Flush the final block
+    flush_block()
     return out
