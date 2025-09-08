@@ -1,4 +1,13 @@
-import re
+Subject: Request to Work from Home on Specific Dates
 
-def clean_greater_than(lines):
-    return [re.sub(r'>.*$', '', s).strip() for s in lines]
+Dear [Manager's Name],
+
+As discussed, I would like to request to work from home over the next two weeks due to some personal reasons where I need family support. I will be working from home on the following dates:
+
+September 15, 17, 22, and 24
+
+Please let me know if this works, or if any adjustments are needed.
+
+Thank you for your understanding and support.
+
+Best regards, Varun
