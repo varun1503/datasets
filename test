@@ -1,90 +1,15 @@
-import pandas as pd
-from typing import Dict, Any, List
-from app.utils.elf_logging import logger
+Description
 
-def _str_or_none(v) -> str:
-    if v is None:
-        return "None"
-    if isinstance(v, str):
-        s = v.strip()
-        return s if s else "None"
-    return str(v) if v != "" else "None"
+Develop a parsing and indexing pipeline that processes RFR and Finding documents. The pipeline should include enhanced methods for document parsing, metadata extraction, and indexing services. These services must be fully integrated to support ingestion into DataStax, ensuring scalability, accuracy, and consistency across all document types.
 
-class FindingChunking:
-    def __init__(self, message: Dict[str, Any], producer_utils):
-        self.message = message or {}
-        self.producer_utils = producer_utils
+Acceptance Criteria
 
-    def publish_message(self, input_data: pd.DataFrame) -> int:
-        if input_data is None or len(input_data) == 0:
-            logger.warning("publish_message_finding: input_data is empty.")
-            return 0
+The system can successfully parse RFR and Finding documents.
 
-        # ensure NaNs are strings
-        input_data = input_data.fillna("None")
+Extracted data (including content and metadata) is validated for accuracy and completeness.
 
-        stage_id = _str_or_none(self.message.get("stage_id"))
-        first_row = input_data.iloc[0]
-        file_name = _str_or_none(first_row.get("file_name"))
-        docx_type = "xlsx"
+Indexed data is stored in DataStax with proper schema alignment.
 
-        logger.info(f"Processed {file_name}: {len(input_data)} rows to chunk.")
+End-to-end integration from document ingestion to DataStax indexing works without errors.
 
-        batch: List[Dict[str, Any]] = []
-        total_rows = len(input_data)
-
-        for i, (_, row) in enumerate(input_data.iterrows(), start=1):
-            finding_text = row.get("Finding Details", "None")
-            imvp_question = row.get("IMVP question", "None")
-            risk_pillar = row.get("Risk Pillar", "None")
-            finding_impact = row.get("Finding Impact Category", "None")
-            finding_status = row.get("Finding status", "None")
-
-            # normalize to strings
-            finding_text = _str_or_none(finding_text)
-            imvp_question = _str_or_none(imvp_question)
-            risk_pillar = _str_or_none(risk_pillar)
-            finding_impact = _str_or_none(finding_impact)
-            finding_status = _str_or_none(finding_status)
-
-            end_index = len(finding_text) if finding_text != "None" else 0
-            self.message["chunking_type"] = "finding_chunking"
-
-            data = {
-                "type": docx_type,
-                "chunked_content": finding_text,
-                "filename": file_name,
-                "imvp_question": imvp_question,
-                "risk_pillar": risk_pillar,
-                "finding_status": finding_status,
-                "finding_impact": finding_impact,
-                "doc_id": stage_id,
-                "stage_id": stage_id,
-                "source": file_name,
-                "start_index": 0,
-                "end_index": end_index,
-                "chunking_method": self.message.get("chunking_type", "None"),
-                "doc_format": "xlsx",
-                "input_type": "finding_document",
-            }
-            batch.append(data)
-
-            is_last = (i == total_rows)
-            # publish every 5 or on the last chunk
-            if (i % 5 == 0) or is_last:
-                msg = dict(self.message)  # avoid mutating original between publishes
-                msg["chunk_no"] = i
-                msg["input_data"] = batch
-                msg["total_chunks"] = total_rows
-                msg["chunking_type"] = "finding_chunking"
-
-                if self.producer_utils:
-                    try:
-                        self.producer_utils.publish_message(msg)
-                        logger.info(f"Published batch ending at row {i} (size={len(batch)}).")
-                    except Exception as e:
-                        logger.exception(f"Failed to publish batch ending at row {i}: {e}")
-                batch = []
-
-        # <-- IMPORTANT: return after the loop, not inside it
-        return total_rows
+Logs and error handling are implemented for traceability and deh"ning.
