@@ -1,15 +1,74 @@
-Description
+Here’s a crisp one-pager you can use for today’s sprint review meeting:
 
-Develop a parsing and indexing pipeline that processes RFR and Finding documents. The pipeline should include enhanced methods for document parsing, metadata extraction, and indexing services. These services must be fully integrated to support ingestion into DataStax, ensuring scalability, accuracy, and consistency across all document types.
 
-Acceptance Criteria
+---
 
-The system can successfully parse RFR and Finding documents.
+Sprint Review – One Pager
 
-Extracted data (including content and metadata) is validated for accuracy and completeness.
+✅ Completed Tasks
 
-Indexed data is stored in DataStax with proper schema alignment.
+1. RFR Document Parsing (DOCX → JSON → DataStax)
 
-End-to-end integration from document ingestion to DataStax indexing works without errors.
+Extracted RFR content from .docx files using Python python-docx.
 
-Logs and error handling are implemented for traceability and deh"ning.
+Normalized and formatted content into structured JSON.
+
+Successfully ingested JSON into DataStax.
+
+
+
+2. Findings Document Extraction (Excel → CSV → DataStax)
+
+Processed Excel sheets containing findings.
+
+Converted into clean CSV format.
+
+Ingested processed data into DataStax.
+
+
+
+
+🔗 Integration with Ingestion Services
+
+Integrated both pipelines (RFR & Findings) into the existing Kafka-based ingestion services:
+
+Chunking Service – Extraction & preprocessing of content into chunks.
+
+Embedding Service – Embedded all textual content using embedding models.
+
+Ingestion Service – Persisted processed and embedded data into DataStax.
+
+
+
+🚀 Deployment & Testing
+
+End-to-end integration tested successfully.
+
+Deployed the complete pipeline (RFR + Findings + Ingestion Services) into E1 Production environment.
+
+Verified data flow across Kafka → Chunking → Embedding → Ingestion → DataStax.
+
+
+
+---
+
+👉 This captures all four deliverables:
+
+1. RFR parsing,
+
+
+2. Findings extraction,
+
+
+3. Service integration,
+
+
+4. Testing & deployment.
+
+
+
+
+---
+
+Do you want me to make this into a slide format (with bullets & icons) for the sprint review deck, or keep it as a text-only one-pager?
+
