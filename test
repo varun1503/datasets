@@ -1,74 +1,104 @@
-Here’s a crisp one-pager you can use for today’s sprint review meeting:
+import pandas as pd
+import json, ast, re
+import numpy as np
 
+# ---------- parsing helpers ----------
+def safe_json_loads(cell):
+    """
+    Safely parse a string that might look like a Python dict/list
+    or a broken JSON with single quotes.
+    """
+    if isinstance(cell, (dict, list)):
+        return cell  # already parsed
+    
+    if not isinstance(cell, str):
+        return None
+    
+    # Try direct JSON load
+    try:
+        return json.loads(cell)
+    except json.JSONDecodeError:
+        pass
+    
+    # Try literal_eval (Python dict-like strings)
+    try:
+        return ast.literal_eval(cell)
+    except Exception:
+        pass
+    
+    # Fix common issues: replace single quotes with double quotes, escape \u
+    fixed = re.sub(r"'", '"', cell)
+    fixed = fixed.replace("\\u", "\\\\u")  # escape unicode
+    
+    try:
+        return json.loads(fixed)
+    except Exception:
+        return None
 
----
+# Strip common numbering patterns at the start:
+#   "1 ", "1.2 ", "1.2.3 ", "1) ", "(1) ", "1- ", "1 - ", "1. Title", "3: Title"
+_NUM_PREFIX_RX = re.compile(
+    r"""^\s*               # leading spaces
+        (?:?\d+(?:\.\d+)*?   # 1 or 1.2 or (1.2.3)
+        [\s\.\:\-]*      # optional separators like '.', ')', ':', '-', spaces
+        )                  # end group
+        """,
+    re.VERBOSE,
+)
 
-Sprint Review – One Pager
+def remove_leading_number(s: str) -> str:
+    if not isinstance(s, str):
+        return ""
+    return _NUM_PREFIX_RX.sub("", s).strip()
 
-✅ Completed Tasks
+# ---------- main ----------
+def add_section_from_retrieved(
+    df: pd.DataFrame,
+    column: str = "retrieved_results",
+    out_num: str = "Section number",
+    out_name: str = "sections",
+    make_combined: bool = True,   # also create "Section" WITHOUT number
+) -> pd.DataFrame:
+    """
+    From df[column] (JSON/list with dicts), take ONLY the first item and extract:
+      - out_num: numeric prefix from heading (e.g., '7', '7.5', '1.2.3')
+      - out_name: subheading if present else heading text, with leading numbers removed
+      - Section (optional): same as out_name (no number)
+    """
 
-1. RFR Document Parsing (DOCX → JSON → DataStax)
+    def parse_first_item(cell):
+        data = cell
+        if isinstance(cell, str):
+            data = safe_json_loads(cell)
 
-Extracted RFR content from .docx files using Python python-docx.
+        # take first dict if list; else dict; else empty
+        item = data[0] if isinstance(data, list) and data else (data if isinstance(data, dict) else {})
+        heading = str(item.get("heading", "") or "").strip()
+        sub = str(item.get("subheading", "") or "").strip()
+        if sub.lower() in {"none", "null"}:
+            sub = ""
 
-Normalized and formatted content into structured JSON.
+        # Extract number from heading (kept in out_num)
+        m = re.match(r'^\s*([0-9]+(?:\.[0-9]+)*)\.?\s*(.*)$', heading)
+        if m:
+            num = m.group(1)
+            heading_name = m.group(2).strip()
+        else:
+            num = ""
+            heading_name = heading
 
-Successfully ingested JSON into DataStax.
+        # Choose the display name (no numbers)
+        # Priority: subheading (cleaned) else heading name (cleaned)
+        name_raw = sub if sub else heading_name
+        name = remove_leading_number(name_raw)
 
+        return pd.Series({out_num: num, out_name: name})
 
+    out = df.copy()
+    out[[out_num, out_name]] = out[column].apply(parse_first_item)
 
-2. Findings Document Extraction (Excel → CSV → DataStax)
+    if make_combined:
+        # "Section" is a clean, human-readable label WITHOUT the number
+        out["Section"] = out[out_name].astype(str)
 
-Processed Excel sheets containing findings.
-
-Converted into clean CSV format.
-
-Ingested processed data into DataStax.
-
-
-
-
-🔗 Integration with Ingestion Services
-
-Integrated both pipelines (RFR & Findings) into the existing Kafka-based ingestion services:
-
-Chunking Service – Extraction & preprocessing of content into chunks.
-
-Embedding Service – Embedded all textual content using embedding models.
-
-Ingestion Service – Persisted processed and embedded data into DataStax.
-
-
-
-🚀 Deployment & Testing
-
-End-to-end integration tested successfully.
-
-Deployed the complete pipeline (RFR + Findings + Ingestion Services) into E1 Production environment.
-
-Verified data flow across Kafka → Chunking → Embedding → Ingestion → DataStax.
-
-
-
----
-
-👉 This captures all four deliverables:
-
-1. RFR parsing,
-
-
-2. Findings extraction,
-
-
-3. Service integration,
-
-
-4. Testing & deployment.
-
-
-
-
----
-
-Do you want me to make this into a slide format (with bullets & icons) for the sprint review deck, or keep it as a text-only one-pager?
-
+    return out
