@@ -1,104 +1,188 @@
-import pandas as pd
-import json, ast, re
-import numpy as np
+import os
+import json
+import ast
+from typing import Optional, Any, Iterable
 
-# ---------- parsing helpers ----------
-def safe_json_loads(cell):
-    """
-    Safely parse a string that might look like a Python dict/list
-    or a broken JSON with single quotes.
-    """
-    if isinstance(cell, (dict, list)):
-        return cell  # already parsed
-    
+import pandas as pd
+from docx import Document
+from docx.shared import Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+
+# ---------- helpers ----------
+def _bold_run(p, text, size=11):
+    r = p.add_run(text)
+    r.bold = True
+    r.font.size = Pt(size)
+    return r
+
+def _normal_run(p, text, size=11):
+    r = p.add_run(text)
+    r.font.size = Pt(size)
+    return r
+
+def safe_json_loads(cell: Any):
+    """Pass-through for dict/list; try json/literal for strings."""
+    if isinstance(cell, (dict, list)) or cell is None:
+        return cell
     if not isinstance(cell, str):
-        return None
-    
-    # Try direct JSON load
+        return cell
     try:
         return json.loads(cell)
-    except json.JSONDecodeError:
+    except Exception:
         pass
-    
-    # Try literal_eval (Python dict-like strings)
     try:
         return ast.literal_eval(cell)
     except Exception:
-        pass
-    
-    # Fix common issues: replace single quotes with double quotes, escape \u
-    fixed = re.sub(r"'", '"', cell)
-    fixed = fixed.replace("\\u", "\\\\u")  # escape unicode
-    
-    try:
-        return json.loads(fixed)
-    except Exception:
-        return None
+        return cell
 
-# Strip common numbering patterns at the start:
-#   "1 ", "1.2 ", "1.2.3 ", "1) ", "(1) ", "1- ", "1 - ", "1. Title", "3: Title"
-_NUM_PREFIX_RX = re.compile(
-    r"""^\s*               # leading spaces
-        (?:?\d+(?:\.\d+)*?   # 1 or 1.2 or (1.2.3)
-        [\s\.\:\-]*      # optional separators like '.', ')', ':', '-', spaces
-        )                  # end group
-        """,
-    re.VERBOSE,
-)
+def _add_heading(doc: Document, text: str, size=12):
+    p = doc.add_paragraph()
+    _bold_run(p, text, size=size)
 
-def remove_leading_number(s: str) -> str:
-    if not isinstance(s, str):
-        return ""
-    return _NUM_PREFIX_RX.sub("", s).strip()
+def _add_rfr_block(doc: Document, rfr_obj: Any):
+    """
+    Render an RFR section from a dict like {"Q1": "answer ...", "Q2": "..."}.
+    Also tolerates JSON-ish strings by parsing first.
+    """
+    rfr_obj = safe_json_loads(rfr_obj)
+    if not rfr_obj:
+        _normal_run(doc.add_paragraph(), "(No RFR provided)")
+        return
+
+    if isinstance(rfr_obj, dict):
+        for k, v in rfr_obj.items():
+            # Question key (bold)
+            p_q = doc.add_paragraph()
+            _bold_run(p_q, f"{str(k).strip()}: ", size=11)
+
+            # Response/value
+            p_a = doc.add_paragraph()
+            _bold_run(p_a, "Response: ", size=11)
+            _normal_run(p_a, str(v).strip())
+    else:
+        # Fallback dump
+        _normal_run(doc.add_paragraph(), str(rfr_obj).strip())
+
+def _as_finding_lines(x: Any):
+    """
+    Normalize findings to list[str]. Accepts list/ dict / string / JSON-ish.
+    """
+    x = safe_json_loads(x)
+    if x is None:
+        return []
+    if isinstance(x, list):
+        return [str(it).strip() for it in x if str(it).strip()]
+    if isinstance(x, dict):
+        return [f"{k}: {v}" for k, v in x.items() if str(v).strip()]
+    if isinstance(x, str):
+        s = x.strip()
+        return [s] if s else []
+    return [str(x).strip()]
+
 
 # ---------- main ----------
-def add_section_from_retrieved(
+def build_simple_template(
     df: pd.DataFrame,
-    column: str = "retrieved_results",
-    out_num: str = "Section number",
-    out_name: str = "sections",
-    make_combined: bool = True,   # also create "Section" WITHOUT number
-) -> pd.DataFrame:
+    model: str,
+    impact: str,
+    scope: str = "",
+    save_dir: str = "base",
+    *,
+    question_col: str = "text",
+    sections_col: str = "sections",
+    mrmg_col: Optional[str] = "mrmg_answer",
+    heading_col: Optional[str] = None,   # if you have one
+    rfr_col: str = "rfr",                # your dict column (already set)
+    finding_col: Optional[str] = "finding",
+    blank_lines_under_mtr: int = 2
+) -> str:
     """
-    From df[column] (JSON/list with dicts), take ONLY the first item and extract:
-      - out_num: numeric prefix from heading (e.g., '7', '7.5', '1.2.3')
-      - out_name: subheading if present else heading text, with leading numbers removed
-      - Section (optional): same as out_name (no number)
+    Creates a minimal validation template per row:
+      - Question i: <text>
+      - Section: <sections>
+      - (optional) Heading: <heading>
+      - MRMG Assessment: <mrmg_answer> (if present)
+      - RFR: (renders dict {"Q1": "...", ...})
+      - Findings: (bulleted list if present)
+      - Modelling Team Response: (space left for writing)
+
+    Returns path to the saved .docx
     """
+    # sanity
+    for col in [question_col, sections_col]:
+        if col not in df.columns:
+            raise KeyError(f"Missing required column: {col}")
 
-    def parse_first_item(cell):
-        data = cell
-        if isinstance(cell, str):
-            data = safe_json_loads(cell)
+    os.makedirs(save_dir, exist_ok=True)
+    out_path = os.path.join(save_dir, f"{model}_{impact}{('_' + scope) if scope else ''}.docx")
 
-        # take first dict if list; else dict; else empty
-        item = data[0] if isinstance(data, list) and data else (data if isinstance(data, dict) else {})
-        heading = str(item.get("heading", "") or "").strip()
-        sub = str(item.get("subheading", "") or "").strip()
-        if sub.lower() in {"none", "null"}:
-            sub = ""
+    doc = Document()
 
-        # Extract number from heading (kept in out_num)
-        m = re.match(r'^\s*([0-9]+(?:\.[0-9]+)*)\.?\s*(.*)$', heading)
-        if m:
-            num = m.group(1)
-            heading_name = m.group(2).strip()
-        else:
-            num = ""
-            heading_name = heading
+    # Title
+    t = doc.add_paragraph()
+    r = t.add_run("Validation Report (Template)")
+    r.bold = True
+    r.font.size = Pt(16)
+    t.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    doc.add_paragraph()
 
-        # Choose the display name (no numbers)
-        # Priority: subheading (cleaned) else heading name (cleaned)
-        name_raw = sub if sub else heading_name
-        name = remove_leading_number(name_raw)
+    # Meta
+    doc.add_paragraph(f"Model: {model} | Impact: {impact}{(' | Scope: ' + scope) if scope else ''}")
+    doc.add_paragraph()
 
-        return pd.Series({out_num: num, out_name: name})
+    # Rows
+    for i, row in df.iterrows():
+        # Question
+        pq = doc.add_paragraph()
+        _bold_run(pq, f"Question {i+1}: ", size=12)
+        _normal_run(pq, str(row[question_col]).strip())
 
-    out = df.copy()
-    out[[out_num, out_name]] = out[column].apply(parse_first_item)
+        # Section
+        ps = doc.add_paragraph()
+        _bold_run(ps, "Section: ")
+        _normal_run(ps, str(row[sections_col]).strip())
 
-    if make_combined:
-        # "Section" is a clean, human-readable label WITHOUT the number
-        out["Section"] = out[out_name].astype(str)
+        # Optional Heading
+        if heading_col and heading_col in df.columns:
+            ph = doc.add_paragraph()
+            _bold_run(ph, "Heading: ")
+            _normal_run(ph, str(row.get(heading_col, "")).strip())
 
-    return out
+        # MRMG Assessment (if present)
+        if mrmg_col and mrmg_col in df.columns:
+            pm = doc.add_paragraph()
+            _bold_run(pm, "MRMG Assessment: ")
+            _normal_run(pm, str(row.get(mrmg_col, "")).strip())
+
+        # RFR
+        if rfr_col in df.columns:
+            _add_heading(doc, "RFR", size=12)
+            _add_rfr_block(doc, row.get(rfr_col))
+
+        # Findings
+        if finding_col and finding_col in df.columns:
+            _add_heading(doc, "Findings", size=12)
+            lines = _as_finding_lines(row.get(finding_col))
+            if lines:
+                for line in lines:
+                    p = doc.add_paragraph(style=None)
+                    try:
+                        p.style = doc.styles['List Bullet']  # bullet style if available
+                    except Exception:
+                        pass
+                    _normal_run(p, line)
+            else:
+                _normal_run(doc.add_paragraph(), "(No findings provided)")
+
+        # Modelling Team Response (space)
+        pmt = doc.add_paragraph()
+        _bold_run(pmt, "Modelling Team Response", size=11)
+        for _ in range(max(0, blank_lines_under_mtr)):
+            doc.add_paragraph()
+
+        # spacer
+        doc.add_paragraph()
+
+    doc.save(out_path)
+    return out_path
