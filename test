@@ -1,16 +1,23 @@
-Here’s a concise version in two clear paragraphs — one for Description and one for Acceptance Criteria:
+import re
 
+# regex: matches things like "1", "1.2", "(1.2.3)", "3)", "4-", "5:" at start
+_SECTION_NUM_RX = re.compile(
+    r"""^\s*                 # leading spaces
+        (?:?\d+(?:\.\d+)*?   # 1 or 1.2 or (1.2.3)
+        [\.\:\-]*         # optional separator: ., ), :, -
+        )\s*                # trailing spaces
+    """, re.VERBOSE,
+)
 
----
-
-Description
-The task is to design and implement a function that automates the generation of a structured Validation Report for MRMG. The report should consolidate content from multiple sources, including modeling team responses, MRMG assessments, RFR questions, and RFR findings. Each element must be mapped to its corresponding IMBP/IMVP question to ensure full traceability. The function should not only extract and structure the information but also rephrase sentences for clarity, readability, and consistency, producing both machine-readable and human-readable outputs.
-
-Acceptance Criteria
-The solution will be considered complete when the function is able to ingest modeling responses, MRMG assessments, and RFR findings, and generate a Validation Report that includes all required sections in a structured format. Each section must be correctly annotated and linked to IMBP/IMVP questions, with metadata preserved for traceability. The final report must eliminate redundancies, improve clarity through sentence rephrasing, and be available in both JSON and text/Word/PDF format, ready for MRMG validation workflows.
-
-
----
-
-Do you want me to also write this in a more formal “agile user story” style (with As a…, I want…, So that…) for sprint documentation?
-
+def strip_section_number(title: str) -> str:
+    """
+    Remove leading numbering from a section title.
+    Examples:
+        '1 Executive Summary' -> 'Executive Summary'
+        '2.1.3 Data Validation' -> 'Data Validation'
+        '(3) Scope' -> 'Scope'
+        '4- Assumptions' -> 'Assumptions'
+    """
+    if not isinstance(title, str):
+        return ""
+    return _SECTION_NUM_RX.sub("", title).strip()
