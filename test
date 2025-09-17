@@ -1,80 +1,43 @@
-Perfect 👍 Let’s add a validation function inside your RFRExtraction class.
-This will check if each parsed row has a proper IMVP Question (ending with ?) and a non-empty Modeling Team’s Response.
-If anything is missing → raise a clear error "Document is not formatted correctly".
+def validate_rows_strict(self, rows: List[Dict]) -> List[Dict]:
+    """
+    Strict rules:
+      - IMVP Question must exist and end with '?'
+      - rfr map must have exactly one key and that key must equal the IMVP Question
+      - response must be non-empty
+    If a row uses 'Q3' (or 'Q?') as the rfr key because the question is missing,
+    raise an error.
+    """
+    for idx, r in enumerate(rows, start=1):
+        imvp = (r.get("IMVP Question") or "").strip()
+        rfr  = r.get("rfr") or {}
+        if not imvp or not imvp.endswith("?"):
+            # explicitly fail when the document has no question
+            # even if we detected Q3
+            qkeys = list(rfr.keys())
+            raise ValueError(
+                f"Document is not formatted correctly: row {idx} missing IMVP question "
+                f"(found rfr keys={qkeys}). Header must include a <...?> block."
+            )
 
+        # must have exactly one rfr key, and it must equal the question text
+        if not isinstance(rfr, dict) or len(rfr) != 1:
+            raise ValueError(
+                f"Document is not formatted correctly: row {idx} has invalid rfr map: {rfr}"
+            )
+        (k, v) = next(iter(rfr.items()))
+        if k.strip() in {"Q?", "Q3", "Q1", "Q2", "Q4", "Q5"} and k.strip() != imvp:
+            raise ValueError(
+                f"Document is not formatted correctly: row {idx} uses Q-ID '{k}' "
+                f"instead of the IMVP question.\n  IMVP: {imvp}\n  rfr key: {k}"
+            )
+        if k.strip() != imvp:
+            raise ValueError(
+                f"Document is not formatted correctly: row {idx} rfr key must equal the IMVP question.\n"
+                f"  IMVP: {imvp}\n  rfr key: {k}"
+            )
+        if not (v or "").strip():
+            raise ValueError(
+                f"Document is not formatted correctly: row {idx} has empty Modeling Team response for '{imvp}'"
+            )
 
----
-
-🔧 Updated Class Snippet (with validation)
-
-class RFRExtraction:
-    def __init__(self, file_path):
-        self.file_path = file_path
-        self.REQ_ITEMS_RX = re.compile(r"^\s*Request\s+Items\s*$", re.IGNORECASE)
-        self.RFR_RX = re.compile(r"\s*RFR\s*\d+\s*", re.IGNORECASE)  # tolerant
-        self.BRACKETS_RX = re.compile(r"<\s*([^>]+?)\s*>")
-        self.Q_KEY_RX = re.compile(r"^\s*Q\d+\s*:\s*", re.IGNORECASE)
-        self.RESP_HDR_RX = re.compile(r"Modeling Team[’']?s Response", re.IGNORECASE)
-        self.STOP_SUBS = ["[Modeling Team’s Response]", "[", "Modeling Team’s Response"]
-
-    # ... keep all your existing methods ...
-
-    def validate_rows(self, rows: List[Dict]) -> List[Dict]:
-        """
-        Ensure each row has:
-          - IMVP Question (non-empty, ends with '?')
-          - at least one Modeling Team Response (non-empty)
-        Raise ValueError if invalid.
-        """
-        for idx, r in enumerate(rows):
-            imvp = (r.get("IMVP Question") or "").strip()
-            rfr_map = r.get("rfr") or {}
-
-            # must have a valid question
-            if not imvp or not imvp.endswith("?"):
-                raise ValueError(f"Document is not formatted correctly: "
-                                 f"row {idx+1} missing/invalid IMVP Question -> {r}")
-
-            # must have at least one non-empty response
-            responses = [resp for resp in rfr_map.values() if resp.strip()]
-            if not responses:
-                raise ValueError(f"Document is not formatted correctly: "
-                                 f"row {idx+1} has no Modeling Team Response for question '{imvp}'")
-
-        return rows
-
-    def start_preprocess(self) -> pd.DataFrame:
-        document_file_path = self.s3_object_read(self.file_path)
-        rows = self.parse_docx_to_rfr_rows(document_file_path)
-        rows = self.collapse_empty_imvp_into_previous(rows)
-        rows = self.merge_rows_by_imvp(rows)
-
-        # 🔒 Validate before converting
-        rows = self.validate_rows(rows)
-
-        df = self.convert_csv(rows, document_file_path)
-        return df
-
-
----
-
-✅ What Happens Now
-
-1. During start_preprocess(), after parsing and merging,
-→ validate_rows() is called.
-
-
-2. If every row has a proper IMVP Question and Response, the DataFrame is returned.
-
-
-3. If not → you’ll get a ValueError like:
-
-ValueError: Document is not formatted correctly: row 3 missing/invalid IMVP Question -> {...}
-
-
-
-
----
-
-Do you also want me to enforce that the rfr key inside each row matches exactly the IMVP Question text, instead of the Q3 key? That way, you’ll always have { "question text": "response text" }.
-
+    return rows
