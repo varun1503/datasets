@@ -1,23 +1,80 @@
-import re
+Perfect 👍 Let’s add a validation function inside your RFRExtraction class.
+This will check if each parsed row has a proper IMVP Question (ending with ?) and a non-empty Modeling Team’s Response.
+If anything is missing → raise a clear error "Document is not formatted correctly".
 
-# regex: matches things like "1", "1.2", "(1.2.3)", "3)", "4-", "5:" at start
-_SECTION_NUM_RX = re.compile(
-    r"""^\s*                 # leading spaces
-        (?:?\d+(?:\.\d+)*?   # 1 or 1.2 or (1.2.3)
-        [\.\:\-]*         # optional separator: ., ), :, -
-        )\s*                # trailing spaces
-    """, re.VERBOSE,
-)
 
-def strip_section_number(title: str) -> str:
-    """
-    Remove leading numbering from a section title.
-    Examples:
-        '1 Executive Summary' -> 'Executive Summary'
-        '2.1.3 Data Validation' -> 'Data Validation'
-        '(3) Scope' -> 'Scope'
-        '4- Assumptions' -> 'Assumptions'
-    """
-    if not isinstance(title, str):
-        return ""
-    return _SECTION_NUM_RX.sub("", title).strip()
+---
+
+🔧 Updated Class Snippet (with validation)
+
+class RFRExtraction:
+    def __init__(self, file_path):
+        self.file_path = file_path
+        self.REQ_ITEMS_RX = re.compile(r"^\s*Request\s+Items\s*$", re.IGNORECASE)
+        self.RFR_RX = re.compile(r"\s*RFR\s*\d+\s*", re.IGNORECASE)  # tolerant
+        self.BRACKETS_RX = re.compile(r"<\s*([^>]+?)\s*>")
+        self.Q_KEY_RX = re.compile(r"^\s*Q\d+\s*:\s*", re.IGNORECASE)
+        self.RESP_HDR_RX = re.compile(r"Modeling Team[’']?s Response", re.IGNORECASE)
+        self.STOP_SUBS = ["[Modeling Team’s Response]", "[", "Modeling Team’s Response"]
+
+    # ... keep all your existing methods ...
+
+    def validate_rows(self, rows: List[Dict]) -> List[Dict]:
+        """
+        Ensure each row has:
+          - IMVP Question (non-empty, ends with '?')
+          - at least one Modeling Team Response (non-empty)
+        Raise ValueError if invalid.
+        """
+        for idx, r in enumerate(rows):
+            imvp = (r.get("IMVP Question") or "").strip()
+            rfr_map = r.get("rfr") or {}
+
+            # must have a valid question
+            if not imvp or not imvp.endswith("?"):
+                raise ValueError(f"Document is not formatted correctly: "
+                                 f"row {idx+1} missing/invalid IMVP Question -> {r}")
+
+            # must have at least one non-empty response
+            responses = [resp for resp in rfr_map.values() if resp.strip()]
+            if not responses:
+                raise ValueError(f"Document is not formatted correctly: "
+                                 f"row {idx+1} has no Modeling Team Response for question '{imvp}'")
+
+        return rows
+
+    def start_preprocess(self) -> pd.DataFrame:
+        document_file_path = self.s3_object_read(self.file_path)
+        rows = self.parse_docx_to_rfr_rows(document_file_path)
+        rows = self.collapse_empty_imvp_into_previous(rows)
+        rows = self.merge_rows_by_imvp(rows)
+
+        # 🔒 Validate before converting
+        rows = self.validate_rows(rows)
+
+        df = self.convert_csv(rows, document_file_path)
+        return df
+
+
+---
+
+✅ What Happens Now
+
+1. During start_preprocess(), after parsing and merging,
+→ validate_rows() is called.
+
+
+2. If every row has a proper IMVP Question and Response, the DataFrame is returned.
+
+
+3. If not → you’ll get a ValueError like:
+
+ValueError: Document is not formatted correctly: row 3 missing/invalid IMVP Question -> {...}
+
+
+
+
+---
+
+Do you also want me to enforce that the rfr key inside each row matches exactly the IMVP Question text, instead of the Q3 key? That way, you’ll always have { "question text": "response text" }.
+
