@@ -1,43 +1,37 @@
-def validate_rows_strict(self, rows: List[Dict]) -> List[Dict]:
-    """
-    Strict rules:
-      - IMVP Question must exist and end with '?'
-      - rfr map must have exactly one key and that key must equal the IMVP Question
-      - response must be non-empty
-    If a row uses 'Q3' (or 'Q?') as the rfr key because the question is missing,
-    raise an error.
-    """
-    for idx, r in enumerate(rows, start=1):
-        imvp = (r.get("IMVP Question") or "").strip()
-        rfr  = r.get("rfr") or {}
-        if not imvp or not imvp.endswith("?"):
-            # explicitly fail when the document has no question
-            # even if we detected Q3
-            qkeys = list(rfr.keys())
-            raise ValueError(
-                f"Document is not formatted correctly: row {idx} missing IMVP question "
-                f"(found rfr keys={qkeys}). Header must include a <...?> block."
-            )
+import io, csv
+import pandas as pd
+from pandas.errors import ParserError
 
-        # must have exactly one rfr key, and it must equal the question text
-        if not isinstance(rfr, dict) or len(rfr) != 1:
-            raise ValueError(
-                f"Document is not formatted correctly: row {idx} has invalid rfr map: {rfr}"
-            )
-        (k, v) = next(iter(rfr.items()))
-        if k.strip() in {"Q?", "Q3", "Q1", "Q2", "Q4", "Q5"} and k.strip() != imvp:
-            raise ValueError(
-                f"Document is not formatted correctly: row {idx} uses Q-ID '{k}' "
-                f"instead of the IMVP question.\n  IMVP: {imvp}\n  rfr key: {k}"
-            )
-        if k.strip() != imvp:
-            raise ValueError(
-                f"Document is not formatted correctly: row {idx} rfr key must equal the IMVP question.\n"
-                f"  IMVP: {imvp}\n  rfr key: {k}"
-            )
-        if not (v or "").strip():
-            raise ValueError(
-                f"Document is not formatted correctly: row {idx} has empty Modeling Team response for '{imvp}'"
-            )
+def __read_docx_tab(tab, **kwargs):
+    vf = io.StringIO()
+    writer = csv.writer(vf, quoting=csv.QUOTE_ALL, lineterminator="\n")
+    for row in tab.rows:
+        writer.writerow([
+            cell.text.replace("\r", " ").replace("\n", " ").replace("\xa0", " ").strip()
+            for cell in row.cells
+        ])
+    vf.seek(0)
 
-    return rows
+    try:
+        df = pd.read_csv(vf, header=None, engine="c", keep_default_na=False, dtype=str, **kwargs)
+    except ParserError as e:
+        if getattr(self, "debug", False):
+            print(
+                f"""Processing table with first 3 rows:
+                \n {[cell.text for cell in tab.rows[0].cells]}
+                \n {[cell.text for cell in tab.rows[1].cells]}
+                \n {[cell.text for cell in tab.rows[2].cells]}"""
+            )
+            print(f"Table has {len(tab.rows)} rows")
+            print(e)
+        # fallback to python engine with tolerant parsing
+        vf.seek(0)
+        df = pd.read_csv(
+            vf, header=None, engine="python",
+            keep_default_na=False, dtype=str,
+            on_bad_lines="skip", **kwargs
+        )
+
+    if len(df.columns) == 1:
+        return df
+    return df
