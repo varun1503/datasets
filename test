@@ -1,37 +1,153 @@
-import io, csv
-import pandas as pd
-from pandas.errors import ParserError
+# extract_table_details.py
+import os
+from typing import List, Dict, Optional, Tuple
 
-def __read_docx_tab(tab, **kwargs):
-    vf = io.StringIO()
-    writer = csv.writer(vf, quoting=csv.QUOTE_ALL, lineterminator="\n")
-    for row in tab.rows:
-        writer.writerow([
-            cell.text.replace("\r", " ").replace("\n", " ").replace("\xa0", " ").strip()
-            for cell in row.cells
-        ])
-    vf.seek(0)
+try:
+    import pandas as pd
+except Exception:
+    pd = None  # DataFrame return is optional
 
-    try:
-        df = pd.read_csv(vf, header=None, engine="c", keep_default_na=False, dtype=str, **kwargs)
-    except ParserError as e:
-        if getattr(self, "debug", False):
-            print(
-                f"""Processing table with first 3 rows:
-                \n {[cell.text for cell in tab.rows[0].cells]}
-                \n {[cell.text for cell in tab.rows[1].cells]}
-                \n {[cell.text for cell in tab.rows[2].cells]}"""
-            )
-            print(f"Table has {len(tab.rows)} rows")
-            print(e)
-        # fallback to python engine with tolerant parsing
-        vf.seek(0)
-        df = pd.read_csv(
-            vf, header=None, engine="python",
-            keep_default_na=False, dtype=str,
-            on_bad_lines="skip", **kwargs
-        )
+from docx import Document
 
-    if len(df.columns) == 1:
-        return df
-    return df
+# ---------------------------
+# Hard-coded choices (edit these to your static template)
+# ---------------------------
+HARD_TABLE_INDEX: Optional[int] = 0   # e.g., first table
+HARD_HEADER_MUST_CONTAIN: Optional[List[str]] = None
+# Example: ["Question", "Section"]  # uncomment & set if you prefer header match
+
+# Rename source headers -> target headers
+HARD_COLUMN_MAP: Dict[str, str] = {
+    # "Question": "IMVP Question",
+    # "Section": "Area",
+    # "Owner": "Owner",
+    # "Priority": "Priority",
+}
+
+# Final output column order (AFTER rename)
+HARD_KEEP_COLUMNS_ORDER: Optional[List[str]] = [
+    # "IMVP Question", "Area", "Owner", "Priority"
+]
+
+# ---------------------------
+# Helpers
+# ---------------------------
+def _norm(s: str) -> str:
+    return " ".join((s or "").replace("\u00A0", " ").split())
+
+def _read_table_as_rows(tbl) -> List[List[str]]:
+    rows = []
+    for r in tbl.rows:
+        row = []
+        for c in r.cells:
+            text = "\n".join(_norm(p.text) for p in c.paragraphs if _norm(p.text))
+            row.append(text)
+        rows.append(row)
+    return rows
+
+def _find_table(doc: Document,
+                prefer_index: Optional[int] = 0,
+                header_must_contain: Optional[List[str]] = None):
+    """
+    Pick a table either by header match or by index.
+    """
+    if header_must_contain:
+        want = [h.strip().lower() for h in header_must_contain]
+        for t in doc.tables:
+            rows = _read_table_as_rows(t)
+            if not rows:
+                continue
+            hdr = [h.strip().lower() for h in rows[0]]
+            # loose match: wanted tokens must appear in the first row (order-agnostic)
+            if all(any(w in cell for cell in hdr) or any(w == cell for cell in hdr) for w in want):
+                return t
+        raise ValueError("No table found whose header row contains: " + ", ".join(header_must_contain))
+    # by index
+    if prefer_index is None:
+        prefer_index = 0
+    if prefer_index < 0 or prefer_index >= len(doc.tables):
+        raise IndexError(f"Table index {prefer_index} out of range (found {len(doc.tables)} tables).")
+    return doc.tables[prefer_index]
+
+def _table_to_records(tbl,
+                      column_map: Optional[Dict[str, str]] = None,
+                      keep_columns_order: Optional[List[str]] = None) -> List[Dict[str, str]]:
+    """
+    Convert a Word table to list of dicts using first row as header.
+    """
+    rows = _read_table_as_rows(tbl)
+    if not rows or len(rows) < 2:
+        return []
+
+    header = [h.strip() for h in rows[0]]
+    data_rows = rows[1:]
+
+    recs: List[Dict[str, str]] = []
+    for r in data_rows:
+        if len(r) < len(header):
+            r = r + [""] * (len(header) - len(r))
+        elif len(r) > len(header):
+            r = r[:len(header)]
+        rec = {header[i]: r[i] for i in range(len(header))}
+        recs.append(rec)
+
+    # rename
+    if column_map:
+        recs = [{(column_map.get(k, k)): v for k, v in rec.items()} for rec in recs]
+
+    # select + order
+    if keep_columns_order:
+        recs = [{k: rec.get(k, "") for k in keep_columns_order} for rec in recs]
+
+    return recs
+
+# ---------------------------
+# Public API
+# ---------------------------
+def extract_table_details(
+    input_docx: str,
+    table_index: Optional[int] = HARD_TABLE_INDEX,
+    header_must_contain: Optional[List[str]] = HARD_HEADER_MUST_CONTAIN,
+    column_map: Optional[Dict[str, str]] = HARD_COLUMN_MAP,
+    keep_columns_order: Optional[List[str]] = HARD_KEEP_COLUMNS_ORDER,
+    return_dataframe: bool = False,
+) -> Tuple[List[Dict[str, str]], Optional["pd.DataFrame"]]:
+    """
+    Extract details from a specific table in a .docx using your hard-coded template choices.
+
+    Returns:
+        (records, df) where:
+          - records: list[dict] of rows (after rename/reorder)
+          - df: pandas DataFrame (or None if pandas not installed or return_dataframe=False)
+    """
+    if not os.path.exists(input_docx):
+        raise FileNotFoundError(input_docx)
+
+    doc = Document(input_docx)
+    tbl = _find_table(doc, prefer_index=table_index, header_must_contain=header_must_contain)
+    records = _table_to_records(tbl, column_map=column_map, keep_columns_order=keep_columns_order)
+
+    df = None
+    if return_dataframe:
+        if pd is None:
+            raise ImportError("pandas is not installed; set return_dataframe=False or install pandas.")
+        df = pd.DataFrame(records)
+
+    return records, df
+
+# ---------------------------
+# Example usage
+# ---------------------------
+if __name__ == "__main__":
+    INPUT = "input_with_table.docx"  # change to your path
+    # Option A: use your hard-coded choices as-is
+    recs, df = extract_table_details(INPUT, return_dataframe=True)
+
+    print(f"Extracted {len(recs)} rows")
+    if recs[:1]:
+        print("First row:", recs[0])
+
+    # Optionally save to CSV if pandas is available
+    if df is not None:
+        df.to_csv("extracted_table.csv", index=False)
+        print("Saved: extracted_table.csv")
