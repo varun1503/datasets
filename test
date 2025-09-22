@@ -1,153 +1,301 @@
-# extract_table_details.py
 import os
-from typing import List, Dict, Optional, Tuple
-
-try:
-    import pandas as pd
-except Exception:
-    pd = None  # DataFrame return is optional
-
+import json
+import ast
+from typing import Optional, Any, Iterable, Dict, List, Sequence
+import pandas as pd
 from docx import Document
+from docx.shared import Pt, Inches
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 
-# ---------------------------
-# Hard-coded choices (edit these to your static template)
-# ---------------------------
-HARD_TABLE_INDEX: Optional[int] = 0   # e.g., first table
-HARD_HEADER_MUST_CONTAIN: Optional[List[str]] = None
-# Example: ["Question", "Section"]  # uncomment & set if you prefer header match
+# ---------- styling config for permanent tables ----------
+HEADER_BG_HEX    = "D9E1F2"   # header fill
+BORDER_COLOR_HEX = "C5D9F1"   # borders
+BORDER_SZ        = 6          # ~0.5pt
 
-# Rename source headers -> target headers
-HARD_COLUMN_MAP: Dict[str, str] = {
-    # "Question": "IMVP Question",
-    # "Section": "Area",
-    # "Owner": "Owner",
-    # "Priority": "Priority",
+PERMANENT_TABLES = {
+    "Overview": {
+        "columns":   ["Item", "Description", "Owner", "Status"],
+        "widths_in": [1.2,    3.5,           1.3,     1.0],
+        "rows": 3,
+        "align": ["LEFT","LEFT","LEFT","CENTER"]
+    },
+    "Scope": {
+        "columns":   ["In Scope", "Out of Scope", "Assumptions", "Dependencies"],
+        "widths_in": [2.2,       2.2,           1.8,           1.8],
+        "rows": 3
+    },
+    "Timeline": {
+        "columns":   ["Milestone", "Start Date", "End Date", "Owner", "Notes"],
+        "widths_in": [2.2,        1.2,          1.2,        1.2,    2.0],
+        "rows": 4,
+        "align": ["LEFT","CENTER","CENTER","LEFT","LEFT"]
+    },
+    "Results": {
+        "columns":   ["Metric", "Baseline", "Target", "Actual", "Status"],
+        "widths_in": [2.2,     1.2,       1.2,     1.2,     1.5],
+        "rows": 4,
+        "align": ["LEFT","CENTER","CENTER","CENTER","CENTER"]
+    },
 }
 
-# Final output column order (AFTER rename)
-HARD_KEEP_COLUMNS_ORDER: Optional[List[str]] = [
-    # "IMVP Question", "Area", "Owner", "Priority"
-]
+# ---------- helpers (your originals kept) ----------
+def _bold_run(p, text, size=11):
+    r = p.add_run(text)
+    r.bold = True
+    r.font.size = Pt(size)
+    return r
 
-# ---------------------------
-# Helpers
-# ---------------------------
-def _norm(s: str) -> str:
-    return " ".join((s or "").replace("\u00A0", " ").split())
+def _normal_run(p, text, size=11):
+    r = p.add_run(text)
+    r.font.size = Pt(size)
+    return r
 
-def _read_table_as_rows(tbl) -> List[List[str]]:
-    rows = []
-    for r in tbl.rows:
-        row = []
-        for c in r.cells:
-            text = "\n".join(_norm(p.text) for p in c.paragraphs if _norm(p.text))
-            row.append(text)
-        rows.append(row)
-    return rows
+def safe_json_loads(cell: Any):
+    """Pass-through for dict/list; try json/literal for strings."""
+    if isinstance(cell, (dict, list)) or cell is None:
+        return cell
+    if not isinstance(cell, str):
+        return cell
+    try:
+        return json.loads(cell)
+    except Exception:
+        pass
+    try:
+        return ast.literal_eval(cell)
+    except Exception:
+        return cell
 
-def _find_table(doc: Document,
-                prefer_index: Optional[int] = 0,
-                header_must_contain: Optional[List[str]] = None):
-    """
-    Pick a table either by header match or by index.
-    """
-    if header_must_contain:
-        want = [h.strip().lower() for h in header_must_contain]
-        for t in doc.tables:
-            rows = _read_table_as_rows(t)
-            if not rows:
-                continue
-            hdr = [h.strip().lower() for h in rows[0]]
-            # loose match: wanted tokens must appear in the first row (order-agnostic)
-            if all(any(w in cell for cell in hdr) or any(w == cell for cell in hdr) for w in want):
-                return t
-        raise ValueError("No table found whose header row contains: " + ", ".join(header_must_contain))
-    # by index
-    if prefer_index is None:
-        prefer_index = 0
-    if prefer_index < 0 or prefer_index >= len(doc.tables):
-        raise IndexError(f"Table index {prefer_index} out of range (found {len(doc.tables)} tables).")
-    return doc.tables[prefer_index]
+def _add_heading(doc: Document, text: str, size=12):
+    p = doc.add_paragraph()
+    _bold_run(p, text, size=size)
 
-def _table_to_records(tbl,
-                      column_map: Optional[Dict[str, str]] = None,
-                      keep_columns_order: Optional[List[str]] = None) -> List[Dict[str, str]]:
+# ---------- NEW: table helpers for permanent sections ----------
+def _twips(inches: float) -> int:
+    return int(inches * 1440)
+
+def _set_tbl_borders(tbl, color_hex=BORDER_COLOR_HEX, sz=BORDER_SZ):
+    tbl_pr = tbl._tbl.tblPr
+    tbl_borders = tbl_pr.tblBorders
+    if tbl_borders is None:
+        tbl_borders = OxmlElement('w:tblBorders')
+        tbl_pr.append(tbl_borders)
+
+    def _border(tag: str):
+        el = tbl_borders.find(qn(f'w:{tag}'))
+        if el is None:
+            el = OxmlElement(f'w:{tag}')
+            tbl_borders.append(el)
+        el.set(qn('w:val'), 'single')
+        el.set(qn('w:sz'), str(sz))
+        el.set(qn('w:color'), color_hex)
+        el.set(qn('w:space'), '0')
+
+    for side in ('top','left','bottom','right','insideH','insideV'):
+        _border(side)
+
+def _set_cell_shading(cell, fill_hex: str):
+    tc_pr = cell._tc.get_or_add_tcPr()
+    shd = tc_pr.find(qn('w:shd'))
+    if shd is None:
+        shd = OxmlElement('w:shd')
+        tc_pr.append(shd)
+    shd.set(qn('w:fill'), fill_hex)
+    shd.set(qn('w:val'), 'clear')
+    shd.set(qn('w:color'), 'auto')
+
+def _set_col_widths(tbl, widths_in: List[float]):
+    if not widths_in:
+        return
+    for j, w in enumerate(widths_in):
+        for row in tbl.rows:
+            cell = row.cells[j]
+            tc_pr = cell._tc.get_or_add_tcPr()
+            tc_w = tc_pr.find(qn('w:tcW'))
+            if tc_w is None:
+                tc_w = OxmlElement('w:tcW')
+                tc_pr.append(tc_w)
+            tc_w.set(qn('w:w'), str(_twips(w)))
+            tc_w.set(qn('w:type'), 'dxa')
+
+def _align_map(val: str):
+    v = (val or "").upper()
+    return {
+        "LEFT": WD_ALIGN_PARAGRAPH.LEFT,
+        "CENTER": WD_ALIGN_PARAGRAPH.CENTER,
+        "RIGHT": WD_ALIGN_PARAGRAPH.RIGHT
+    }.get(v, WD_ALIGN_PARAGRAPH.LEFT)
+
+def _create_permanent_empty_table(doc: Document, title: str, cfg: Dict):
+    # section label
+    p = doc.add_paragraph()
+    _bold_run(p, title, size=12)
+
+    cols = cfg["columns"]
+    rows = cfg.get("rows", 3)
+    widths = cfg.get("widths_in")
+    align = cfg.get("align")
+
+    # table with 1 header row + empty rows
+    tbl = doc.add_table(rows=1 + rows, cols=len(cols))
+    _set_tbl_borders(tbl)
+    _set_col_widths(tbl, widths)
+
+    # header row
+    hdr = tbl.rows[0]
+    for i, col in enumerate(cols):
+        para = hdr.cells[i].paragraphs[0]
+        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        _bold_run(para, str(col))
+        _set_cell_shading(hdr.cells[i], HEADER_BG_HEX)
+
+    # body rows (empty cells, alignment per column if provided)
+    for r in range(1, 1 + rows):
+        for c in range(len(cols)):
+            para = tbl.rows[r].cells[c].paragraphs[0]
+            para.alignment = _align_map(align[c]) if align and c < len(align) else WD_ALIGN_PARAGRAPH.LEFT
+
+    # spacer
+    doc.add_paragraph()
+
+# ---------- your RFR/Findings helpers ----------
+def _add_rfr_block(doc: Document, rfr_obj: Any):
     """
-    Convert a Word table to list of dicts using first row as header.
+    Render an RFR section from a dict like {"Q1": "answer ...", "Q2": "..."}.
+    Also tolerates JSON-ish strings by parsing first.
     """
-    rows = _read_table_as_rows(tbl)
-    if not rows or len(rows) < 2:
+    rfr_obj = safe_json_loads(rfr_obj)
+    if not rfr_obj:
+        _normal_run(doc.add_paragraph(), "(No RFR provided)")
+        return
+
+    if isinstance(rfr_obj, dict):
+        for k, v in rfr_obj.items():
+            # Question key (bold)
+            p_q = doc.add_paragraph()
+            _bold_run(p_q, f"{str(k).strip()}: ", size=11)
+
+            # Response/value
+            p_a = doc.add_paragraph()
+            _bold_run(p_a, "Response: ", size=11)
+            _normal_run(p_a, str(v).strip())
+    else:
+        # Fallback dump
+        _normal_run(doc.add_paragraph(), str(rfr_obj).strip())
+
+def _as_finding_lines(x: Any):
+    """
+    Normalize findings to list[str]. Accepts list/ dict / string / JSON-ish.
+    """
+    x = safe_json_loads(x)
+    if x is None:
         return []
+    if isinstance(x, list):
+        return [str(it).strip() for it in x if str(it).strip()]
+    if isinstance(x, dict):
+        return [f"{k}: {v}" for k, v in x.items() if str(v).strip()]
+    if isinstance(x, str):
+        s = x.strip()
+        return [s] if s else []
+    return [str(x).strip()]
 
-    header = [h.strip() for h in rows[0]]
-    data_rows = rows[1:]
+# ---------- main ----------
+def build_simple_template(
+    df: pd.DataFrame,
+    model: str,
+    impact: str,
+    scope: str = "",
+    save_dir: str = "base",
+    *,
+    question_col: str = "text",
+    sections_col: str = "sections",
+    mrmg_col: Optional[str] = "mrmg_answer",
+    heading_col: Optional[str] = None,  # if you have one
+    rfr_col: str = "RFR",               # your dict column (already set)
+    finding_col: Optional[str] = "Findings",
+    blank_lines_under_mtr: int = 2,
+    include_permanent_tables: bool = True  # <--- NEW flag
+) -> str:
+    # sanity
+    for col in [question_col, sections_col]:
+        if col not in df.columns:
+            raise KeyError(f"Missing required column: {col}")
 
-    recs: List[Dict[str, str]] = []
-    for r in data_rows:
-        if len(r) < len(header):
-            r = r + [""] * (len(header) - len(r))
-        elif len(r) > len(header):
-            r = r[:len(header)]
-        rec = {header[i]: r[i] for i in range(len(header))}
-        recs.append(rec)
+    os.makedirs(save_dir, exist_ok=True)
+    out_path = os.path.join(save_dir, f"{model}_{impact}{('_' + scope) if scope else ''}.docx")
 
-    # rename
-    if column_map:
-        recs = [{(column_map.get(k, k)): v for k, v in rec.items()} for rec in recs]
+    doc = Document()
 
-    # select + order
-    if keep_columns_order:
-        recs = [{k: rec.get(k, "") for k in keep_columns_order} for rec in recs]
+    # Title
+    t = doc.add_paragraph()
+    r = t.add_run("Validation Report (Template)")
+    r.bold = True
+    r.font.size = Pt(16)
+    t.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    doc.add_paragraph()
 
-    return recs
+    # Meta
+    doc.add_paragraph(f"Model: {model} | Impact: {impact}{(' | Scope: ' + scope) if scope else ''}")
+    doc.add_paragraph()
 
-# ---------------------------
-# Public API
-# ---------------------------
-def extract_table_details(
-    input_docx: str,
-    table_index: Optional[int] = HARD_TABLE_INDEX,
-    header_must_contain: Optional[List[str]] = HARD_HEADER_MUST_CONTAIN,
-    column_map: Optional[Dict[str, str]] = HARD_COLUMN_MAP,
-    keep_columns_order: Optional[List[str]] = HARD_KEEP_COLUMNS_ORDER,
-    return_dataframe: bool = False,
-) -> Tuple[List[Dict[str, str]], Optional["pd.DataFrame"]]:
-    """
-    Extract details from a specific table in a .docx using your hard-coded template choices.
+    # --- NEW: permanent, empty, styled tables at the very top ---
+    if include_permanent_tables:
+        for section_name, cfg in PERMANENT_TABLES.items():
+            _create_permanent_empty_table(doc, section_name, cfg)
 
-    Returns:
-        (records, df) where:
-          - records: list[dict] of rows (after rename/reorder)
-          - df: pandas DataFrame (or None if pandas not installed or return_dataframe=False)
-    """
-    if not os.path.exists(input_docx):
-        raise FileNotFoundError(input_docx)
+    # --- Your existing df-driven sections below ---
+    for i, row in df.iterrows():
+        # Question
+        pq = doc.add_paragraph()
+        _bold_run(pq, f"Question {i+1}: ", size=12)
+        _normal_run(pq, str(row[question_col]).strip())
 
-    doc = Document(input_docx)
-    tbl = _find_table(doc, prefer_index=table_index, header_must_contain=header_must_contain)
-    records = _table_to_records(tbl, column_map=column_map, keep_columns_order=keep_columns_order)
+        # Section
+        ps = doc.add_paragraph()
+        _bold_run(ps, "Section: ")
+        _normal_run(ps, str(row[sections_col]).strip())
 
-    df = None
-    if return_dataframe:
-        if pd is None:
-            raise ImportError("pandas is not installed; set return_dataframe=False or install pandas.")
-        df = pd.DataFrame(records)
+        # Optional Heading
+        if heading_col and heading_col in df.columns:
+            ph = doc.add_paragraph()
+            _bold_run(ph, "Heading: ")
+            _normal_run(ph, str(row.get(heading_col, "")).strip())
 
-    return records, df
+        # MRMG Assessment (if present)
+        if mrmg_col and mrmg_col in df.columns:
+            pm = doc.add_paragraph()
+            _bold_run(pm, "MRMG Assessment: ")
+            _normal_run(pm, str(row.get(mrmg_col, "")).strip())
 
-# ---------------------------
-# Example usage
-# ---------------------------
-if __name__ == "__main__":
-    INPUT = "input_with_table.docx"  # change to your path
-    # Option A: use your hard-coded choices as-is
-    recs, df = extract_table_details(INPUT, return_dataframe=True)
+        # RFR
+        if rfr_col in df.columns:
+            _add_heading(doc, "RFR", size=12)
+            _add_rfr_block(doc, row.get(rfr_col))
 
-    print(f"Extracted {len(recs)} rows")
-    if recs[:1]:
-        print("First row:", recs[0])
+        # Findings
+        if finding_col and finding_col in df.columns:
+            _add_heading(doc, "Findings", size=12)
+            lines = _as_finding_lines(row.get(finding_col))
+            if lines:
+                for line in lines:
+                    p = doc.add_paragraph(style=None)
+                    try:
+                        p.style = doc.styles['List Bullet']  # bullet style if available
+                    except Exception:
+                        pass
+                    _normal_run(p, line)
+            else:
+                _normal_run(doc.add_paragraph(), "(No findings provided)")
 
-    # Optionally save to CSV if pandas is available
-    if df is not None:
-        df.to_csv("extracted_table.csv", index=False)
-        print("Saved: extracted_table.csv")
+        # Modelling Team Response (space)
+        pmt = doc.add_paragraph()
+        _bold_run(pmt, "Modelling Team Response", size=11)
+        for _ in range(max(0, blank_lines_under_mtr)):
+            doc.add_paragraph()
+
+        # spacer
+        doc.add_paragraph()
+
+    doc.save(out_path)
+    return out_path
