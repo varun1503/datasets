@@ -1,3 +1,84 @@
+import os
+import json
+import ast
+from typing import Optional, Any
+import pandas as pd
+from docx import Document
+from docx.shared import Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+# ---------- helpers ----------
+def _bold_run(p, text, size=11):
+    r = p.add_run(text)
+    r.bold = True
+    r.font.size = Pt(size)
+    return r
+
+def _normal_run(p, text, size=11):
+    r = p.add_run(text)
+    r.font.size = Pt(size)
+    return r
+
+def safe_json_loads(cell: Any):
+    """Pass-through for dict/list; try json/literal for strings."""
+    if isinstance(cell, (dict, list)) or cell is None:
+        return cell
+    if not isinstance(cell, str):
+        return cell
+    try:
+        return json.loads(cell)
+    except Exception:
+        pass
+    try:
+        return ast.literal_eval(cell)
+    except Exception:
+        return cell
+
+def _add_heading(doc: Document, text: str, size=12):
+    p = doc.add_paragraph()
+    _bold_run(p, text, size=size)
+
+def _add_rfr_block(doc: Document, rfr_obj: Any):
+    """
+    Render an RFR section from a dict like {"Q1": "answer ...", "Q2": "..."}.
+    Also tolerates JSON-ish strings by parsing first.
+    """
+    rfr_obj = safe_json_loads(rfr_obj)
+    if not rfr_obj:
+        _normal_run(doc.add_paragraph(), "(No RFR provided)")
+        return
+
+    if isinstance(rfr_obj, dict):
+        for k, v in rfr_obj.items():
+            # Question key (bold)
+            p_q = doc.add_paragraph()
+            _bold_run(p_q, f"{str(k).strip()}: ", size=11)
+
+            # Response/value
+            p_a = doc.add_paragraph()
+            _bold_run(p_a, "Response: ", size=11)
+            _normal_run(p_a, str(v).strip())
+    else:
+        # Fallback dump
+        _normal_run(doc.add_paragraph(), str(rfr_obj).strip())
+
+def _as_finding_lines(x: Any):
+    """
+    Normalize findings to list[str]. Accepts list/ dict / string / JSON-ish.
+    """
+    x = safe_json_loads(x)
+    if x is None:
+        return []
+    if isinstance(x, list):
+        return [str(it).strip() for it in x if str(it).strip()]
+    if isinstance(x, dict):
+        return [f"{k}: {v}" for k, v in x.items() if str(v).strip()]
+    if isinstance(x, str):
+        s = x.strip()
+        return [s] if s else []
+    return [str(x).strip()]
+
+# ---------- main ----------
 def build_simple_template(
     df: pd.DataFrame,
     model: str,
@@ -12,8 +93,8 @@ def build_simple_template(
     rfr_col: str = "RFR",                # your dict column (already set)
     finding_col: Optional[str] = "Findings",
     blank_lines_under_mtr: int = 2,
-    prepend_docx_path: Optional[str] = None,  # <<< NEW: docx to put at the top
-    insert_page_break_after_prepend: bool = True
+    prepend_docx_path: Optional[str] = None,   # <<< CHANGE: path to docx to put on top
+    page_break_after_prepend: bool = True      # <<< CHANGE: separate with page break
 ) -> str:
     # sanity
     for col in [question_col, sections_col]:
@@ -23,11 +104,11 @@ def build_simple_template(
     os.makedirs(save_dir, exist_ok=True)
     out_path = os.path.join(save_dir, f"{model}_{impact}{('_' + scope) if scope else ''}.docx")
 
-    # If a top section docx is provided, start from it; otherwise start fresh
+    # <<< CHANGE: start from the prepend doc if provided, else blank
     doc = Document(prepend_docx_path) if prepend_docx_path else Document()
 
-    # Optional page break after the prepended content
-    if prepend_docx_path and insert_page_break_after_prepend:
+    # <<< CHANGE: optional page break to keep sections separate
+    if prepend_docx_path and page_break_after_prepend:
         doc.add_page_break()
 
     # Title
