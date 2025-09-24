@@ -1,5 +1,99 @@
-# Find or create <w:tblBorders>
-    tbl_borders = tbl_pr.find(qn('w:tblBorders'))
-    if tbl_borders is None:
-        tbl_borders = OxmlElement('w:tblBorders')
-        tbl_pr.append(tbl_borders)
+def build_simple_template(
+    df: pd.DataFrame,
+    model: str,
+    impact: str,
+    scope: str = "",
+    save_dir: str = "base",
+    *,
+    question_col: str = "text",
+    sections_col: str = "sections",
+    mrmg_col: Optional[str] = "mrmg_answer",
+    heading_col: Optional[str] = None,   # if you have one
+    rfr_col: str = "RFR",                # your dict column (already set)
+    finding_col: Optional[str] = "Findings",
+    blank_lines_under_mtr: int = 2,
+    prepend_docx_path: Optional[str] = None,  # <<< NEW: docx to put at the top
+    insert_page_break_after_prepend: bool = True
+) -> str:
+    # sanity
+    for col in [question_col, sections_col]:
+        if col not in df.columns:
+            raise KeyError(f"Missing required column: {col}")
+
+    os.makedirs(save_dir, exist_ok=True)
+    out_path = os.path.join(save_dir, f"{model}_{impact}{('_' + scope) if scope else ''}.docx")
+
+    # If a top section docx is provided, start from it; otherwise start fresh
+    doc = Document(prepend_docx_path) if prepend_docx_path else Document()
+
+    # Optional page break after the prepended content
+    if prepend_docx_path and insert_page_break_after_prepend:
+        doc.add_page_break()
+
+    # Title
+    t = doc.add_paragraph()
+    r = t.add_run("Validation Report (Template)")
+    r.bold = True
+    r.font.size = Pt(16)
+    t.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    doc.add_paragraph()
+
+    # Meta
+    doc.add_paragraph(f"Model: {model} | Impact: {impact}{(' | Scope: ' + scope) if scope else ''}")
+    doc.add_paragraph()
+
+    # Rows
+    for i, row in df.iterrows():
+        # Question
+        pq = doc.add_paragraph()
+        _bold_run(pq, f"Question {i+1}: ", size=12)
+        _normal_run(pq, str(row[question_col]).strip())
+
+        # Section
+        ps = doc.add_paragraph()
+        _bold_run(ps, "Section: ")
+        _normal_run(ps, str(row[sections_col]).strip())
+
+        # Optional Heading
+        if heading_col and heading_col in df.columns:
+            ph = doc.add_paragraph()
+            _bold_run(ph, "Heading: ")
+            _normal_run(ph, str(row.get(heading_col, "")).strip())
+
+        # MRMG Assessment (if present)
+        if mrmg_col and mrmg_col in df.columns:
+            pm = doc.add_paragraph()
+            _bold_run(pm, "MRMG Assessment: ")
+            _normal_run(pm, str(row.get(mrmg_col, "")).strip())
+
+        # RFR
+        if rfr_col in df.columns:
+            _add_heading(doc, "RFR", size=12)
+            _add_rfr_block(doc, row.get(rfr_col))
+
+        # Findings
+        if finding_col and finding_col in df.columns:
+            _add_heading(doc, "Findings", size=12)
+            lines = _as_finding_lines(row.get(finding_col))
+            if lines:
+                for line in lines:
+                    p = doc.add_paragraph(style=None)
+                    try:
+                        p.style = doc.styles['List Bullet']  # bullet style if available
+                    except Exception:
+                        pass
+                    _normal_run(p, line)
+            else:
+                _normal_run(doc.add_paragraph(), "(No findings provided)")
+
+        # Modelling Team Response (space)
+        pmt = doc.add_paragraph()
+        _bold_run(pmt, "Modelling Team Response", size=11)
+        for _ in range(max(0, blank_lines_under_mtr)):
+            doc.add_paragraph()
+
+        # spacer
+        doc.add_paragraph()
+
+    doc.save(out_path)
+    return out_path
