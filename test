@@ -67,7 +67,66 @@ def _center_table(table):
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
 
 
-# ======================= Cover page =======================
+# ======================= Insert heading at TOP of prepend =======================
+
+def _move_last_block_to_top(doc: Document):
+    """Move the last-added block (paragraph or table) to document index 0."""
+    body = doc._body._element   # <w:body>
+    el = body[-1]                # last block we just added
+    body.remove(el)
+    body.insert(0, el)
+
+def insert_model_heading_at_top(
+    doc: Document,
+    *,
+    title_text: str = "Model Validation Report",
+    model_id: str = "",
+    model_version: str = "",
+    model_name: str = "",
+    report_date: str = "",
+    add_chips: bool = True
+):
+    """
+    Inserts a centered title and (optionally) a 1x4 chip table at the VERY TOP
+    of the existing prepend DOCX (above any first table/paragraph already there).
+    """
+    # 1) Title
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run(title_text)
+    r.bold = True
+    r.font.size = Pt(20)
+    _move_last_block_to_top(doc)
+
+    # 2) Optional chips as 1x4 table
+    if add_chips:
+        t = doc.add_table(rows=1, cols=4)
+        _center_table(t)
+        _force_table_borders(t)
+        labels = [
+            f"Model ID: {model_id}",
+            f"Model Version: {model_version}",
+            f"Model Name: {model_name}",
+            f"Date of Report Generation: {report_date}",
+        ]
+        for cell, txt in zip(t.rows[0].cells, labels):
+            _set_cell_bg(cell, "D9D9D9")
+            _set_cell_padding(cell, top=80, bottom=80, left=200, right=200)
+            cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+            para = cell.paragraphs[0]
+            para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = para.add_run(txt)
+            run.bold = True
+            run.font.size = Pt(11)
+        _move_last_block_to_top(doc)
+
+    # 3) Spacer under the chips/title
+    sp = doc.add_paragraph()
+    sp.add_run("")
+    _move_last_block_to_top(doc)
+
+
+# ======================= Cover page (optional alternative) =======================
 
 def _add_cover_chip(doc: Document, label: str, value: str):
     """Adds an 'oblong' chip (single-cell table) centered on the page."""
@@ -177,7 +236,7 @@ def _as_finding_lines(x: Any):
     return [str(x).strip()]
 
 
-# ======================= Findings table (caption + black header) =======================
+# ======================= Findings table (SECTION + CAPTION + black header) =======================
 
 def _format_header_cell(cell):
     cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
@@ -188,9 +247,11 @@ def _format_header_cell(cell):
             r.font.color.rgb = RGBColor(255, 255, 255)
             r.font.size = Pt(11)
 
-def _add_findings_table(doc: Document, findings_df: Optional[pd.DataFrame], caption: str = "Summary of Findings"):
+def _add_findings_table(doc: Document, findings_df: Optional[pd.DataFrame],
+                        section_title: str = "Findings",
+                        caption: str = "Summary of Findings"):
     """
-    Adds caption above the table and renders the styled findings table.
+    Adds a SECTION heading and a CAPTION above a styled findings table.
     """
     if findings_df is None or len(findings_df) == 0:
         return
@@ -209,18 +270,21 @@ def _add_findings_table(doc: Document, findings_df: Optional[pd.DataFrame], capt
     col_status  = pick("Finding Status", "Status", "finding status")
 
     if not all([col_imvp, col_impact, col_detail, col_status]):
-        _add_heading(doc, "Findings", size=12)
+        _add_heading(doc, section_title, size=12)
         _normal_run(doc.add_paragraph(), "(Findings table skipped: required columns not found)")
         doc.add_paragraph()
         return
 
-    # Caption above the table
+    # SECTION heading
+    _add_heading(doc, section_title, size=12)
+
+    # CAPTION above the table
     cap = doc.add_paragraph(caption)
     cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
     cap.runs[0].bold = True
     cap.runs[0].font.size = Pt(12)
 
-    # Create table
+    # Table
     table = doc.add_table(rows=1, cols=4)
     _center_table(table)
     try:
@@ -273,19 +337,29 @@ def build_simple_template(
     scope: str = "",
     save_dir: str = "base",
     *,
-    # Cover inputs:
-    model_id: str,
-    model_version: str,
-    model_name: str,
-    report_date: str,
+    # Choose ONE of the two approaches below:
+    use_cover_page: bool = True,                  # True => add separate cover page
+    insert_heading_in_prepend: bool = False,      # True => inject heading at top of prepend doc (disables cover)
+
+    # Heading/cover inputs:
+    model_id: str = "",
+    model_version: str = "",
+    model_name: str = "",
+    report_date: str = "",
+
+    # Findings inputs:
     findings_df: Optional[pd.DataFrame] = None,
+    findings_section_title: str = "Findings",
+    findings_caption: str = "Summary of Findings",
+
+    # Row mapping:
     question_col: str = "text",
     sections_col: str = "sections",
     mrmg_col: Optional[str] = "mrmg_answer",
     heading_col: Optional[str] = None,
     rfr_col: str = "RFR",
     finding_col: Optional[str] = "Findings",
-    page_break_after_prepend: bool = True,
+
     blank_lines_under_mtr: int = 2
 ) -> str:
 
@@ -297,21 +371,38 @@ def build_simple_template(
     os.makedirs(save_dir, exist_ok=True)
     out_path = os.path.join(save_dir, f"{model}_{impact}{('_' + scope) if scope else ''}.docx")
 
-    # Start from template (its content will follow the cover)
+    # Start from template (prepend_docx_path)
     doc = Document(prepend_docx_path) if prepend_docx_path else Document()
 
-    # === COVER PAGE FIRST ===
-    add_cover_page(
-        doc,
-        model_id=model_id,
-        model_version=model_version,
-        model_name=model_name,
-        report_date=report_date,
-        title_text="Model Validation Report"
-    )
+    # Either add a COVER PAGE, or insert heading at TOP of the prepend doc
+    if insert_heading_in_prepend:
+        # Make sure cover page is not added when we inject at the top
+        insert_model_heading_at_top(
+            doc,
+            title_text="Model Validation Report",
+            model_id=model_id,
+            model_version=model_version,
+            model_name=model_name,
+            report_date=report_date,
+            add_chips=True
+        )
+    elif use_cover_page:
+        add_cover_page(
+            doc,
+            model_id=model_id,
+            model_version=model_version,
+            model_name=model_name,
+            report_date=report_date,
+            title_text="Model Validation Report"
+        )
 
-    # Findings table with caption
-    _add_findings_table(doc, findings_df, caption="Summary of Findings")
+    # Findings table with SECTION + CAPTION
+    _add_findings_table(
+        doc,
+        findings_df,
+        section_title=findings_section_title,
+        caption=findings_caption
+    )
 
     # Main rows: Q/A, Section, RFR, etc.
     for i, row in df.iterrows():
@@ -342,7 +433,7 @@ def build_simple_template(
             doc.add_paragraph()
 
         # RFR
-        if rfr_col in df.columns:
+        if rfr_col and rfr_col in df.columns:
             _add_heading(doc, "RFR", size=12)
             _add_rfr_block(doc, row.get(rfr_col))
 
@@ -370,18 +461,3 @@ def build_simple_template(
 
     doc.save(out_path)
     return out_path
-
-out = build_simple_template(
-    df=questions_df,
-    model="ICS CDSS",
-    impact="High",
-    prepend_docx_path="",   # or a .docx path if you have a base template
-    scope="IR1179",
-    model_id="IR1179",
-    model_version="v1.20",
-    model_name="ICS CDSS Model",
-    report_date="10/03/2024",
-    findings_df=findings_df,  # optional Excel-derived DF
-    rfr_col="RFR"
-)
-print("Saved:", out)
