@@ -461,3 +461,18 @@ def build_simple_template(
 
     doc.save(out_path)
     return out_path
+out = build_simple_template(
+    df=questions_df,
+    model="ICS CDSS",
+    impact="High",
+    prepend_docx_path="your_prepend.docx",
+    scope="IR1179",
+    use_cover_page=True,               # default
+    insert_heading_in_prepend=False,   # default
+    model_id="IR1179",
+    model_version="v1.20",
+    model_name="ICS CDSS Model",
+    report_date="10/03/2024",
+    findings_df=findings_df,
+    rfr_col="RFR"
+)
