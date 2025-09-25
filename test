@@ -1,7 +1,7 @@
 from docx import Document
 from docx.shared import Pt, Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.table import WD_ALIGN_VERTICAL
+from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 import os
@@ -11,28 +11,111 @@ from typing import Optional, Any
 import pandas as pd
 
 
-def add_title_to_top(doc: Document, model, impact, scope, title_text="Validation Report (Template)"):
-    # Insert a paragraph at the very beginning
-    if doc.paragraphs:
-        p = doc.paragraphs[0].insert_paragraph_before()
-    else:
-        p = doc.add_paragraph()
-    r = p.add_run(title_text)
-    r.bold = True
-    r.font.size = Pt(16)
+# ======================= Low-level XML helpers =======================
+
+def _set_cell_bg(cell, hex_color: str = "F2F2F2"):
+    """Solid cell background fill."""
+    tc_pr = cell._tc.get_or_add_tcPr()
+    shd = tc_pr.find(qn('w:shd'))
+    if shd is None:
+        shd = OxmlElement('w:shd')
+        tc_pr.append(shd)
+    shd.set(qn('w:fill'), hex_color)
+    shd.set(qn('w:val'), 'clear')
+    shd.set(qn('w:color'), 'auto')
+
+def _set_cell_padding(cell, top=80, bottom=80, left=200, right=200):
+    """Cell padding in twips."""
+    tc_pr = cell._tc.get_or_add_tcPr()
+    tcMar = tc_pr.find(qn('w:tcMar'))
+    if tcMar is None:
+        tcMar = OxmlElement('w:tcMar')
+        tc_pr.append(tcMar)
+    for side, val in [('top', top), ('bottom', bottom), ('start', left), ('end', right)]:
+        el = tcMar.find(qn(f"w:{side}"))
+        if el is None:
+            el = OxmlElement(f"w:{side}")
+            tcMar.append(el)
+        el.set(qn('w:w'), str(val))
+        el.set(qn('w:type'), 'dxa')
+
+def _force_table_borders(table, color="000000", size=8):
+    """Ensure visible grid borders regardless of Word styles."""
+    tbl = table._tbl
+    tblPr = tbl.tblPr or OxmlElement('w:tblPr')
+    if tbl.tblPr is None:
+        tbl.append(tblPr)
+    borders = tblPr.find(qn('w:tblBorders'))
+    if borders is None:
+        borders = OxmlElement('w:tblBorders')
+        tblPr.append(borders)
+
+    def _add(tag):
+        el = borders.find(qn(f'w:{tag}'))
+        if el is None:
+            el = OxmlElement(f'w:{tag}')
+            borders.append(el)
+        el.set(qn('w:val'), 'single')
+        el.set(qn('w:sz'), str(size))
+        el.set(qn('w:space'), '0')
+        el.set(qn('w:color'), color)
+
+    for edge in ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']:
+        _add(edge)
+
+def _center_table(table):
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+
+
+# ======================= Cover page =======================
+
+def _add_cover_chip(doc: Document, label: str, value: str):
+    """Adds an 'oblong' chip (single-cell table) centered on the page."""
+    t = doc.add_table(rows=1, cols=1)
+    _center_table(t)
+    _force_table_borders(t, color="000000", size=8)
+    t.autofit = True
+    cell = t.rows[0].cells[0]
+    _set_cell_bg(cell, "D9D9D9")  # light grey
+    _set_cell_padding(cell, top=100, bottom=100, left=240, right=240)
+    cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+
+    p = cell.paragraphs[0]
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run(f"{label}: {value}")
+    r.bold = True
+    r.font.size = Pt(12)
 
-    # Subtitle line beneath the title
-    sub = doc.add_paragraph()
-    sub_run = sub.add_run(f"Model: {model} | Impact: {impact}{(' | Scope: ' + scope) if scope else ''}")
-    sub_run.font.size = Pt(11)
+    doc.add_paragraph()  # spacer
 
-    # Spacer
-    doc.add_paragraph()
-    return doc
+def add_cover_page(
+    doc: Document,
+    *,
+    model_id: str,
+    model_version: str,
+    model_name: str,
+    report_date: str,
+    title_text: str = "Model Validation Report"
+):
+    """First page: big centered title + 4 chips, then a page break."""
+    title = doc.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    tr = title.add_run(title_text)
+    tr.bold = True
+    tr.font.size = Pt(20)
+
+    doc.add_paragraph()  # spacer
+
+    _add_cover_chip(doc, "Model ID", model_id)
+    _add_cover_chip(doc, "Model Version", model_version)
+    _add_cover_chip(doc, "Model Name", model_name)
+    _add_cover_chip(doc, "Date of Report Generation", report_date)
+
+    doc.add_page_break()
 
 
-# ---------- helpers ----------
+# ======================= Text helpers =======================
+
 def _bold_run(p, text, size=11):
     r = p.add_run(text)
     r.bold = True
@@ -45,7 +128,6 @@ def _normal_run(p, text, size=11):
     return r
 
 def safe_json_loads(cell: Any):
-    """Pass-through for dict/list; try json/literal for strings."""
     if isinstance(cell, (dict, list)) or cell is None:
         return cell
     if not isinstance(cell, str):
@@ -63,34 +145,25 @@ def _add_heading(doc: Document, text: str, size=12):
     p = doc.add_paragraph()
     _bold_run(p, text, size=size)
 
+
+# ======================= RFR renderer =======================
+
 def _add_rfr_block(doc: Document, rfr_obj: Any):
-    """
-    Render an RFR section from a dict like {"Q1": "answer ...", "Q2": "..."}.
-    Also tolerates JSON-ish strings by parsing first.
-    """
     rfr_obj = safe_json_loads(rfr_obj)
     if not rfr_obj:
         _normal_run(doc.add_paragraph(), "(No RFR provided)")
         return
-
     if isinstance(rfr_obj, dict):
         for k, v in rfr_obj.items():
-            # Question key (bold)
             p_q = doc.add_paragraph()
             _bold_run(p_q, f"{str(k).strip()}: ", size=11)
-
-            # Response/value
             p_a = doc.add_paragraph()
             _bold_run(p_a, "Response: ", size=11)
             _normal_run(p_a, str(v).strip())
     else:
-        # Fallback dump
         _normal_run(doc.add_paragraph(), str(rfr_obj).strip())
 
 def _as_finding_lines(x: Any):
-    """
-    Normalize findings to list[str]. Accepts list/ dict / string / JSON-ish.
-    """
     x = safe_json_loads(x)
     if x is None:
         return []
@@ -104,20 +177,9 @@ def _as_finding_lines(x: Any):
     return [str(x).strip()]
 
 
-# ---------- table styling helpers ----------
-def _set_cell_bg(cell, hex_color: str = "000000"):
-    """Set solid background fill for a cell via oXML."""
-    tc_pr = cell._tc.get_or_add_tcPr()
-    shd = tc_pr.find(qn('w:shd'))
-    if shd is None:
-        shd = OxmlElement('w:shd')
-        tc_pr.append(shd)
-    shd.set(qn('w:fill'), hex_color)     # background color
-    shd.set(qn('w:val'), 'clear')        # no pattern
-    shd.set(qn('w:color'), 'auto')
+# ======================= Findings table (caption + black header) =======================
 
 def _format_header_cell(cell):
-    """White, bold, centered text for header cells."""
     cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
     for p in cell.paragraphs:
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -126,51 +188,15 @@ def _format_header_cell(cell):
             r.font.color.rgb = RGBColor(255, 255, 255)
             r.font.size = Pt(11)
 
-def _force_table_borders(table):
+def _add_findings_table(doc: Document, findings_df: Optional[pd.DataFrame], caption: str = "Summary of Findings"):
     """
-    Ensure visible grid borders even if 'Table Grid' style is unavailable.
-    """
-    tbl = table._tbl
-    tblPr = tbl.tblPr or OxmlElement('w:tblPr')
-    if tbl.tblPr is None:
-        tbl.append(tblPr)
-
-    borders = tblPr.find(qn('w:tblBorders'))
-    if borders is None:
-        borders = OxmlElement('w:tblBorders')
-        tblPr.append(borders)
-
-    def _add_border(tag):
-        el = borders.find(qn(f'w:{tag}'))
-        if el is None:
-            el = OxmlElement(f'w:{tag}')
-            borders.append(el)
-        el.set(qn('w:val'), 'single')
-        el.set(qn('w:sz'), '8')     # thickness
-        el.set(qn('w:space'), '0')
-        el.set(qn('w:color'), '000000')
-
-    for edge in ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']:
-        _add_border(edge)
-
-
-# ---------- findings table ----------
-def _add_findings_table(doc: Document, findings_df: Optional[pd.DataFrame]):
-    """
-    Insert a 'Findings' heading and a table with the specified columns, if data exists.
-    Header row will be black with white bold text; table has a visible grid outline.
-    Expected columns (case-insensitive tolerant):
-      - IMVP question
-      - Finding Impact Category
-      - Finding Details
-      - Finding Status
+    Adds caption above the table and renders the styled findings table.
     """
     if findings_df is None or len(findings_df) == 0:
         return
 
-    # Normalize column names for tolerant matching
+    # tolerant column matching
     colmap = {c.lower().strip(): c for c in findings_df.columns}
-
     def pick(*aliases):
         for a in aliases:
             if a.lower() in colmap:
@@ -182,39 +208,40 @@ def _add_findings_table(doc: Document, findings_df: Optional[pd.DataFrame]):
     col_detail  = pick("Finding Details", "Finding Detail", "details", "finding details")
     col_status  = pick("Finding Status", "Status", "finding status")
 
-    cols = [col_imvp, col_impact, col_detail, col_status]
-
-    _add_heading(doc, "Findings", size=12)
-
-    if not all(cols):
+    if not all([col_imvp, col_impact, col_detail, col_status]):
+        _add_heading(doc, "Findings", size=12)
         _normal_run(doc.add_paragraph(), "(Findings table skipped: required columns not found)")
         doc.add_paragraph()
         return
 
+    # Caption above the table
+    cap = doc.add_paragraph(caption)
+    cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    cap.runs[0].bold = True
+    cap.runs[0].font.size = Pt(12)
+
     # Create table
     table = doc.add_table(rows=1, cols=4)
-    # Try style; force borders regardless to be safe
+    _center_table(table)
     try:
         table.style = "Table Grid"
     except Exception:
         pass
-    _force_table_borders(table)
+    _force_table_borders(table, color="000000", size=8)
+    table.autofit = False
 
-    table.autofit = False  # avoid Word auto-shrink for long text
-
-    # Set column widths (tweak as needed)
+    # widths
     widths = [Inches(1.8), Inches(1.8), Inches(3.8), Inches(1.6)]
     for i, w in enumerate(widths):
         for cell in table.columns[i].cells:
             cell.width = w
 
-    # Header row (black background)
+    # Header row
     hdr = table.rows[0].cells
     hdr[0].text = "IMVP Question"
     hdr[1].text = "Finding Impact Category"
     hdr[2].text = "Finding Details"
     hdr[3].text = "Finding Status"
-
     for cell in hdr:
         _set_cell_bg(cell, "000000")
         _format_header_cell(cell)
@@ -226,8 +253,6 @@ def _add_findings_table(doc: Document, findings_df: Optional[pd.DataFrame]):
         row_cells[1].text = str(r.get(col_impact, "") or "").strip()
         row_cells[2].text = str(r.get(col_detail, "") or "").strip()
         row_cells[3].text = str(r.get(col_status, "") or "").strip()
-
-        # Alignments and body font
         for c in row_cells:
             c.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
             for p in c.paragraphs:
@@ -235,11 +260,11 @@ def _add_findings_table(doc: Document, findings_df: Optional[pd.DataFrame]):
                 for run in p.runs:
                     run.font.size = Pt(10)
 
-    # Spacer after table
-    doc.add_paragraph()
+    doc.add_paragraph()  # spacer after table
 
 
-# ---------- main ----------
+# ======================= Main builder =======================
+
 def build_simple_template(
     df: pd.DataFrame,
     model: str,
@@ -248,16 +273,22 @@ def build_simple_template(
     scope: str = "",
     save_dir: str = "base",
     *,
-    findings_df: Optional[pd.DataFrame] = None,   # pass your Excel dataframe here
+    # Cover inputs:
+    model_id: str,
+    model_version: str,
+    model_name: str,
+    report_date: str,
+    findings_df: Optional[pd.DataFrame] = None,
     question_col: str = "text",
     sections_col: str = "sections",
     mrmg_col: Optional[str] = "mrmg_answer",
-    heading_col: Optional[str] = None,            # if you have one
-    rfr_col: str = "RFR",                         # your dict column (already set)
+    heading_col: Optional[str] = None,
+    rfr_col: str = "RFR",
     finding_col: Optional[str] = "Findings",
-    page_break: bool = True,
+    page_break_after_prepend: bool = True,
     blank_lines_under_mtr: int = 2
 ) -> str:
+
     # sanity
     for col in [question_col, sections_col]:
         if col not in df.columns:
@@ -266,17 +297,23 @@ def build_simple_template(
     os.makedirs(save_dir, exist_ok=True)
     out_path = os.path.join(save_dir, f"{model}_{impact}{('_' + scope) if scope else ''}.docx")
 
+    # Start from template (its content will follow the cover)
     doc = Document(prepend_docx_path) if prepend_docx_path else Document()
 
-    # Title + (optional page break)
-    add_title_to_top(doc, model=model, impact=impact, scope=scope)
-    if prepend_docx_path and page_break:
-        doc.add_page_break()
+    # === COVER PAGE FIRST ===
+    add_cover_page(
+        doc,
+        model_id=model_id,
+        model_version=model_version,
+        model_name=model_name,
+        report_date=report_date,
+        title_text="Model Validation Report"
+    )
 
-    # Insert FINDINGS section + table right after prepend/title
-    _add_findings_table(doc, findings_df)
+    # Findings table with caption
+    _add_findings_table(doc, findings_df, caption="Summary of Findings")
 
-    # Rows for Q/A, Sections, RFR, etc.
+    # Main rows: Q/A, Section, RFR, etc.
     for i, row in df.iterrows():
         # Question
         pq = doc.add_paragraph()
@@ -297,7 +334,7 @@ def build_simple_template(
             _normal_run(ph, str(row.get(heading_col, "")).strip())
             doc.add_paragraph()
 
-        # MRMG Assessment (if present)
+        # MRMG Assessment
         if mrmg_col and mrmg_col in df.columns:
             pm = doc.add_paragraph()
             _bold_run(pm, "MRMG Assessment: ")
@@ -309,7 +346,7 @@ def build_simple_template(
             _add_heading(doc, "RFR", size=12)
             _add_rfr_block(doc, row.get(rfr_col))
 
-        # Findings (per-question free text list, if you still want it)
+        # Optional per-question Findings bullets
         if finding_col and finding_col in df.columns:
             _add_heading(doc, "Findings", size=12)
             lines = _as_finding_lines(row.get(finding_col))
@@ -317,20 +354,34 @@ def build_simple_template(
                 for line in lines:
                     p = doc.add_paragraph(style=None)
                     try:
-                        p.style = doc.styles['List Bullet']  # bullet style if available
+                        p.style = doc.styles['List Bullet']
                     except Exception:
                         pass
                     _normal_run(p, line)
             else:
                 _normal_run(doc.add_paragraph(), "(No findings provided)")
 
-        # Modelling Team Response (space)
+        # Modelling Team Response
         pmt = doc.add_paragraph()
         _bold_run(pmt, "Modelling Team Response", size=11)
         for _ in range(max(0, blank_lines_under_mtr)):
             doc.add_paragraph()
-        # spacer
         doc.add_paragraph()
 
     doc.save(out_path)
     return out_path
+
+out = build_simple_template(
+    df=questions_df,
+    model="ICS CDSS",
+    impact="High",
+    prepend_docx_path="",   # or a .docx path if you have a base template
+    scope="IR1179",
+    model_id="IR1179",
+    model_version="v1.20",
+    model_name="ICS CDSS Model",
+    report_date="10/03/2024",
+    findings_df=findings_df,  # optional Excel-derived DF
+    rfr_col="RFR"
+)
+print("Saved:", out)
