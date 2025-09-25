@@ -1,560 +1,252 @@
-# filename: docx_pipeline.py
-# pip install lxml python-docx fuzzywuzzy
-
-import os, re, shutil, time, hashlib, posixpath, logging
-from zipfile import ZipFile
-from typing import Tuple, Dict, Any, List
-
+from docx import Document
+from docx.shared import Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+import os
+import json
+import ast
+from typing import Optional, Any, Iterable
 import pandas as pd
-from fuzzywuzzy import fuzz
-from lxml import etree
 
-# ----------------------------- helpers -----------------------------
-
-def get_text(p, nsmap) -> str:
-    return ''.join(x.text or '' for x in p.xpath('.//w:t', namespaces=nsmap))
-
-def clean_paragraph(p, nsmap):
-    """Normalize a copied paragraph: strip attrs, normalize style, add highlight holder."""
-    p.attrib.clear()
-    w = nsmap['w']
-
-    # fix paragraph properties
-    x = p.find('w:pPr/w:rPr', nsmap)
-    if x is not None:
-        x.getparent().remove(x)
-    if p.find('w:pPr', nsmap) is None:
-        p.insert(0, etree.fromstring(f'<w:pPr xmlns:w="{w}"><w:pStyle /></w:pPr>'))
-    elif p.find('w:pPr/w:pStyle', nsmap) is None:
-        p.find('w:pPr', nsmap).insert(0, etree.fromstring(f'<w:pStyle xmlns:w="{w}"/>'))
-    p.find('w:pPr/w:pStyle', nsmap).set(f'{{{w}}}val', 'Body')
-
-    # fix runs
-    for r in p.findall('w:r', nsmap):
-        r.attrib.clear()
-        for x in r.findall('w:rPr/*', nsmap):
-            if etree.QName(x).localname in ('rFonts', 'rStyle', 'sz', 'szCs', 'lang'):
-                x.getparent().remove(x)
-        if r.find('w:rPr', nsmap) is None:
-            r.insert(0, etree.fromstring(f'<w:rPr xmlns:w="{w}"><w:highlight /></w:rPr>'))
-        elif r.find('w:rPr/w:highlight', nsmap) is None:
-            r.find('w:rPr', nsmap).insert(0, etree.fromstring(f'<w:highlight xmlns:w="{w}"/>'))
-        r.find('w:rPr/w:highlight', nsmap).set(f'{{{w}}}val', 'cyan')
-
-def copy_file(source, dest):
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
-    with open(source, 'rb') as fd:
-        data = fd.read()
-    with open(dest, 'wb') as fd:
-        fd.write(data)
-
-def _clean_txt(s: str) -> str:
-    return (s or "").replace("\u00a0", " ").strip().lower()
-
-# ----------------------------- core classes -----------------------------
-
-class Document:
-    def __init__(self, filepath) -> None:
-        if not (os.path.exists(filepath) and os.path.isfile(filepath) and os.path.normpath(filepath).endswith('.docx')):
-            raise FileNotFoundError(f"Docx not found or invalid: {filepath}")
-
-        user = os.path.basename(os.path.expanduser('~'))
-        self._uid = hashlib.sha256((filepath + str(time.time()*1e7)).encode()).hexdigest()[:5]
-        self._path = os.path.join(os.getcwd(), f"{user}_{self._uid}")
-        if os.path.exists(self._path):
-            shutil.rmtree(self._path)
-        ZipFile(filepath).extractall(self._path)
-
-        self._doc = etree.parse(os.path.join(self._path, 'word', 'document.xml')).getroot()
-        self._cursor = None
-
-    def __del__(self):
-        # best effort cleanup
-        try:
-            if hasattr(self, "_path") and os.path.exists(self._path):
-                shutil.rmtree(self._path)
-        except Exception:
-            pass
-
-    # fallbacks / utilities for dest docs
-    def _last_body_para(self):
-        body = self._doc.find('.//w:body', self._doc.nsmap)
-        paras = body.findall('./w:p', self._doc.nsmap)
-        if paras:
-            return paras[-1]
-        # create one if document is empty
-        w = self._doc.nsmap['w']
-        p = etree.fromstring(f'<w:p xmlns:w="{w}"><w:pPr><w:pStyle w:val="Body"/></w:pPr></w:p>')
-        body.append(p)
-        return p
-
-class ModelDoc(Document):
-    def __init__(self, filepath) -> None:
-        super().__init__(filepath)
-        # styles.xml may be absent in some docs
-        styles_path = os.path.join(self._path, 'word', 'styles.xml')
-        self._stdoc = etree.parse(styles_path).getroot() if os.path.exists(styles_path) else None
-
-    def get_outline_level(self, elem) -> int:
-        """Derive heading/outline level using paragraph and style info."""
-        def get_from_style(pstyle):
-            if self._stdoc is None:
-                return -1
-            olvl = self._stdoc.xpath(f'./w:style[@w:styleId="{pstyle}"]/w:pPr/w:outlineLvl/@w:val', namespaces=self._stdoc.nsmap)
-            if not olvl:
-                basedon = self._stdoc.xpath(f'./w:style[@w:styleId="{pstyle}"]/w:basedOn/@w:val', namespaces=self._stdoc.nsmap)
-                if not basedon:
-                    return -1
-                return get_from_style(basedon[0])
-            return int(olvl[0])
-
-        olvl = elem.xpath('./w:pPr/w:outlineLvl/@w:val', namespaces=self._doc.nsmap)
-        olvl = -1 if len(olvl)==0 else int(olvl[0])
-        if olvl==-1 and elem.find('./w:pPr/w:pStyle', self._doc.nsmap) is not None:
-            pstyle = elem.xpath('./w:pPr/w:pStyle/@w:val', namespaces=self._doc.nsmap)[0]
-            olvl = get_from_style(pstyle)
-            ilvl = elem.xpath('./w:pPr/w:numPr/w:ilvl/@w:val', namespaces=self._doc.nsmap)
-            if olvl!=-1 and ilvl:
-                olvl = int(ilvl[0])
-        return olvl
-
-    def move_cursor(self, to='1') -> str:
-        """Fuzzy match to a section title (ignoring numbers/parentheses); land cursor on that paragraph."""
-        self._cursor, title, last_score = None, '', 0
-        target = re.sub(r'(\d\.?)|(.+)', '', to).lower().strip()
-
-        for p in self._doc.xpath('.//w:body/w:p', namespaces=self._doc.nsmap):
-            text = re.sub(r'(\d\.?)|(.+)', '', get_text(p, self._doc.nsmap)).lower().strip()
-            olvl = self.get_outline_level(p)
-            score = fuzz.ratio(target, text)
-            if score > 80 and score > last_score and olvl not in (-1, 9):
-                last_score = score
-                self._cursor = p
-                title = get_text(p, self._doc.nsmap)
-        return title
-
-    def get_relationships(self, content):
-        # rels and [Content_Types].xml may be absent/corrupt in some docs
-        rels_path = os.path.join(self._path, 'word', '_rels', 'document.xml.rels')
-        idx_path  = os.path.join(self._path, '[Content_Types].xml')
-        if not (os.path.exists(rels_path) and os.path.exists(idx_path)):
-            logging.info("Missing relationships or [Content_Types] in source; skipping rels indexing.")
-            content['rels'] = []
-            return
-
-        reldoc = etree.parse(rels_path).getroot()
-        idxdoc = etree.parse(idx_path).getroot()
-
-        relations = []
-        for v, k, xx in content['rels']:
-            relation = {'id': v, 'key': k, 'elem': xx, 'type': etree.QName(xx).localname}
-            ref = reldoc.find(f'./*[@Id="{v}"]')
-            if ref is None:
-                continue
-            relation['ref'] = etree.fromstring(etree.tostring(ref))
-
-            if relation['ref'].get('TargetMode')!='External':
-                target = relation['ref'].get('Target')
-                relation['source'] = os.path.join(self._path, 'word', *target.split('/'))
-                ext = os.path.splitext(target)[1].lower().replace(".","")
-                idxref = idxdoc.find(f'./*[@Extension="{ext}"]')
-                if idxref is not None:
-                    content['index'][ext] = etree.fromstring(etree.tostring(idxref))
-
-            if relation['type']=='chart':
-                name = os.path.basename(relation['ref'].get('Target'))
-                crel_path = os.path.join(self._path, 'word', 'charts', '_rels', name+'.rels')
-                if not os.path.exists(crel_path):
-                    continue
-                crel = etree.parse(crel_path).getroot()
-                sources = [(x.get('Target'), os.path.join(self._path, 'word', 'charts', *x.get('Target').split('/')))
-                           for x in crel.findall('./') if x.get('TargetMode')!='External']
-                name = f"/word/charts/{name}"
-                cidx = idxdoc.find(f'./*[@PartName="{name}"]')
-                if cidx is not None:
-                    content['index'][name] = etree.fromstring(etree.tostring(cidx))
-                for s, _ in sources:
-                    target = f"/word/{s[3:]}" if s.startswith('..') else f"/word/charts/{os.path.basename(s)}"
-                    if s.endswith('.xml') and target not in content['index']:
-                        x = idxdoc.find(f'./*[@PartName="{target}"]')
-                        if x is not None:
-                            content['index'][target] = etree.fromstring(etree.tostring(x))
-                relation['chart'] = {'name': name, 'rels': crel, 'sources': sources}
-
-            relations.append(relation)
-
-        content['rels'] = relations
-
-    def get_numbering(self, content):
-        """Safe: skip if numbering.xml doesn't exist in source."""
-        num_path = os.path.join(self._path, 'word', 'numbering.xml')
-        if not os.path.exists(num_path):
-            logging.info("Source has no numbering.xml; skipping numbering copy.")
-            content['nums'] = []
-            return
-
-        numdoc = etree.parse(num_path).getroot()
-        numbers = []
-        for v, k, xx in content['nums']:
-            num = {'id': v, 'key': k, 'elem': xx, 'ref': {}}
-            numel = numdoc.find(f'./w:num[@w:numId="{v}"]', numdoc.nsmap)
-            if numel is not None:
-                num['ref']['num'] = etree.fromstring(etree.tostring(numel))
-                anum = num['ref']['num'].xpath('./w:abstractNumId/@w:val', namespaces=numdoc.nsmap)
-                if anum:
-                    an = numdoc.find(f'./w:abstractNum[@w:abstractNumId="{anum[0]}"]', numdoc.nsmap)
-                    if an is not None:
-                        num['ref']['anum'] = etree.fromstring(etree.tostring(an))
-                numbers.append(num)
-        content['nums'] = numbers
-
-    def get_styles(self, content):
-        path = os.path.join(self._path, 'word', 'styles.xml')
-        if not os.path.exists(path):
-            logging.info("Source has no styles.xml; skipping style copy.")
-            content['styles'] = []
-            return
-        stdoc = etree.parse(path).getroot()
-        w = stdoc.nsmap['w']
-        styles = []
-        for v, k, xx in content['styles']:
-            style = {'id': v, 'key': k, 'elem': xx, 'ref': {}}
-            elem = stdoc.find(f'./w:style[@w:styleId="{v}"]', stdoc.nsmap)
-            if elem is not None:
-                style['ref']['elem'] = etree.fromstring(etree.tostring(elem))
-                basedon = style['ref']['elem'].find('./w:basedOn', stdoc.nsmap)
-                if basedon is not None:
-                    basedon = basedon.get(f'{{{w}}}val')
-                    base = stdoc.find(f'./w:style[@w:styleId="{basedon}"]', stdoc.nsmap)
-                    if base is not None:
-                        style['ref']['basedon'] = etree.fromstring(etree.tostring(base))
-                styles.append(style)
-        content['styles'] = styles
-
-    def copy_content(self, start='') -> Tuple[str, Dict[str, Any]]:
-        section_title = self.move_cursor(start)
-        if self._cursor is None:
-            raise ValueError(f"Source section not found (fuzzy): {start}")
-
-        content = {'data': [], 'styles': [], 'nums': [], 'rels': [], 'index': {}}
-
-        while True:
-            nxt = self._cursor.getnext()
-            if nxt is None:
-                break
-
-            # stop if next is a non-body heading with text (new section)
-            if etree.QName(nxt).localname == 'p':
-                if self.get_outline_level(nxt) not in (-1, 9) and get_text(nxt, self._doc.nsmap).strip() != '':
-                    break
-
-            # clone next node
-            xx = etree.fromstring(etree.tostring(nxt))
-
-            # delete unwanted elements
-            exclusions = ['bookmarkStart', 'bookmarkEnd', 'footnoteReference', 'endnoteReference',
-                          'commentRangeStart', 'commentRangeEnd', 'commentReference']
-            for x in xx.xpath(' | '.join(['.//w:'+x for x in exclusions]), namespaces=self._doc.nsmap):
-                x.getparent().remove(x)
-
-            if etree.QName(xx).localname == 'p':
-                clean_paragraph(xx, self._doc.nsmap)
-            elif etree.QName(xx).localname == 'tbl':
-                for x in xx.xpath('.//w:tblStyle', namespaces=self._doc.nsmap):
-                    k = f'{{{self._doc.nsmap["w"]}}}val'
-                    content['styles'].append((x.get(k), k, x))
-
-            # collect rels + numbering refs
-            content['rels'] += [(v, k, x) for x in xx.findall('.//*') for k, v in x.attrib.items() if v.startswith('rId')]
-            content['nums'] += [(v, k, x) for x in xx.findall('.//w:numPr/w:numId', self._doc.nsmap) for k, v in x.attrib.items() if k.endswith('val')]
-
-            content['data'].append(xx)
-            self._cursor = nxt
-
-        # hydrate optional parts safely
-        self.get_relationships(content)
-        self.get_numbering(content)
-        self.get_styles(content)
-        return section_title, content
-
-class ValReport(Document):
-    def __init__(self, filepath, report='main') -> None:
-        super().__init__(filepath)
-        self._type = report
-
-    def move_cursor(self, to='question?'):
-        """Find anchor text; if a following 'Team response' exists, land there.
-        Otherwise, land on the anchor. If not found, fallback to end of doc."""
-        target = _clean_txt(to)
-        self._cursor = None
-        body = self._doc.find('.//w:body', self._doc.nsmap)
-
-        # find anchor
-        anchor = None
-        for p in body.findall('./w:p', self._doc.nsmap):
-            if target and target in _clean_txt(get_text(p, self._doc.nsmap)):
-                anchor = p
-                break
-
-        if anchor is None:
-            self._cursor = self._last_body_para()
-            return
-
-        # look ahead for "Team response"
-        cur = anchor
-        while cur is not None:
-            cur = cur.getnext()
-            if cur is None or etree.QName(cur).localname != 'p':
-                break
-            if 'team response' in _clean_txt(get_text(cur, self._doc.nsmap)):
-                self._cursor = cur
-                return
-
-        # no 'Team response' ahead — use the anchor itself
-        self._cursor = anchor
-
-    # ---------- numbering safety helpers ----------
-
-    def _ensure_numbering_part(self):
-        """Create a minimal numbering.xml and Content_Types override if absent."""
-        num_path = os.path.join(self._path, 'word', 'numbering.xml')
-        if not os.path.exists(num_path):
-            os.makedirs(os.path.dirname(num_path), exist_ok=True)
-            root = etree.Element('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}numbering',
-                                 nsmap={'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'})
-            etree.ElementTree(root).write(num_path, pretty_print=True)
-
-            # add Override in [Content_Types].xml
-            ctypes_path = os.path.join(self._path, '[Content_Types].xml')
-            cdoc = etree.parse(ctypes_path).getroot()
-            if cdoc.find('./*[@PartName="/word/numbering.xml"]') is None:
-                ov = etree.Element('{http://schemas.openxmlformats.org/package/2006/content-types}Override')
-                ov.set('PartName', '/word/numbering.xml')
-                ov.set('ContentType', 'application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml')
-                cdoc.append(ov)
-                etree.ElementTree(cdoc).write(ctypes_path, pretty_print=True)
-
-    def update_index(self, content, index):
-        idxdoc = etree.parse(os.path.join(self._path, '[Content_Types].xml')).getroot()
-        for k, xx in content['index'].items():
-            if etree.QName(xx).localname=='Default':
-                if idxdoc.find(f'./*[@Extension="{k}"]') is None:
-                    idxdoc.insert(0, xx)
-            elif etree.QName(xx).localname=='Override':
-                k2 = os.path.dirname(k)+f'/copy{index}_'+os.path.basename(k)
-                if idxdoc.find(f'./*[@PartName="{k2}"]') is None:
-                    xx.set('PartName', k2)
-                    idxdoc.append(xx)
-        etree.ElementTree(idxdoc).write(os.path.join(self._path, '[Content_Types].xml'), pretty_print=True)
-
-    def put_relationships(self, content, index):
-        reldoc = etree.parse(os.path.join(self._path, 'word', '_rels', 'document.xml.rels')).getroot()
-        for relation in content['rels']:
-            val = relation['id']+'c'+index
-            relation['elem'].set(relation['key'], val)
-            if reldoc.find(f'./*[@Id="{val}"]') is not None:
-                continue
-
-            relation['ref'].set('Id', val)
-            reldoc.append(relation['ref'])
-            if relation['ref'].get('TargetMode')!='External':
-                target = relation['ref'].get('Target')
-                target = posixpath.join(os.path.dirname(target), f'copy{index}_'+os.path.basename(target))
-                relation['ref'].set('Target', target)
-                target_fs = os.path.join(self._path, 'word', *target.split('/'))
-                copy_file(relation['source'], target_fs)
-
-            if relation['type']=='chart':
-                name, crel, sources = relation['chart']['name'], relation['chart']['rels'], relation['chart']['sources']
-                os.makedirs(os.path.join(self._path, 'word', 'charts', '_rels'), exist_ok=True)
-                for rel in crel:
-                    if rel.get('TargetMode')!='External':
-                        target = rel.get('Target')
-                        target = posixpath.join(os.path.dirname(target), f'copy{index}_'+os.path.basename(target))
-                        rel.set('Target', target)
-                for target, source in sources:
-                    target2 = os.path.dirname(target) + f'/copy{index}_' + os.path.basename(target)
-                    target_fs = os.path.join(self._path, 'word', 'charts', *target2.split('/'))
-                    copy_file(source, target_fs)
-                etree.ElementTree(crel).write(os.path.join(self._path, 'word', 'charts', '_rels', f'copy{index}_{os.path.basename(name)}.rels'), pretty_print=True)
-
-        etree.ElementTree(reldoc).write(os.path.join(self._path, 'word', '_rels', 'document.xml.rels'), pretty_print=True)
-
-    def update_numbering(self, content, index):
-        """Safe: ensure dest has numbering part; then add/copy definitions."""
-        if not content.get('nums'):
-            return
-
-        # ensure destination has numbering.xml and content types override
-        self._ensure_numbering_part()
-
-        num_path = os.path.join(self._path, 'word', 'numbering.xml')
-        numdoc = etree.parse(num_path).getroot()
-
-        w = numdoc.nsmap.get('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main')
-        num_ids = set(numdoc.xpath('./w:num/@w:numId', namespaces={'w': w}))
-        anum_ids = set(numdoc.xpath('./w:abstractNum/@w:abstractNumId', namespaces={'w': w}))
-        curr_num_ids, curr_anum_ids = set(), set()
-        suffix = '999'+index
-
-        for num in content['nums']:
-            nid = num['id']+suffix
-            num['elem'].set(num['key'], nid)
-            if 'num' in num['ref'] and nid not in num_ids and nid not in curr_num_ids:
-                curr_num_ids.add(nid)
-                num_el = etree.fromstring(etree.tostring(num['ref']['num']))
-                num_el.set(f'{{{w}}}numId', nid)
-
-                # fix abstract reference
-                anum_el = num_el.find('./w:abstractNumId', namespaces={'w': w})
-                if anum_el is not None:
-                    aid = anum_el.get(f'{{{w}}}val')+suffix
-                    anum_el.set(f'{{{w}}}val', aid)
-                    if 'anum' in num['ref'] and aid not in anum_ids and aid not in curr_anum_ids:
-                        curr_anum_ids.add(aid)
-                        anum_copy = etree.fromstring(etree.tostring(num['ref']['anum']))
-                        anum_copy.set(f'{{{w}}}abstractNumId', aid)
-                        numdoc.insert(0, anum_copy)
-
-                numdoc.append(num_el)
-
-        etree.ElementTree(numdoc).write(num_path, pretty_print=True)
-
-    def update_styles(self, content):
-        stdoc = etree.parse(os.path.join(self._path, 'word', 'styles.xml')).getroot()
-        suffix, w = 'New', stdoc.nsmap['w']
-        for style in content['styles']:
-            style['id'] = style['id'] + suffix
-            style['elem'].set(style['key'], style['id'])
-            if stdoc.find(f'./w:style[@w:styleId="{style["id"]}"]', stdoc.nsmap) is None:
-                style['ref']['elem'].set(f'{{{w}}}styleId', style['id'])
-                if 'basedon' in style['ref']:
-                    basedon = style['ref']['basedon'].get(f'{{{w}}}styleId') + suffix
-                    style['ref']['elem'].find('./w:basedOn', stdoc.nsmap).set(f'{{{w}}}val', basedon)
-                    if stdoc.find(f'./w:style[@w:styleId="{basedon}"]', stdoc.nsmap) is None:
-                        style['ref']['basedon'].set(f'{{{w}}}styleId', basedon)
-                        stdoc.insert(stdoc.index(stdoc.find('./w:style', stdoc.nsmap)), style['ref']['basedon'])
-                stdoc.append(style['ref']['elem'])
-        etree.ElementTree(stdoc).write(os.path.join(self._path, 'word', 'styles.xml'), pretty_print=True)
-
-    def paste_content(self, content, after, index):
-        self.move_cursor(to=after)
-        if self._cursor is None:
-            self._cursor = self._last_body_para()
-
-        for c in content['data']:
-            self._cursor.addnext(c)
-            nxt = self._cursor.getnext()
-            self._cursor = nxt if nxt is not None else self._last_body_para()
-
-        self.put_relationships(content, index)
-        self.update_styles(content)
-        self.update_numbering(content, index)
-        self.update_index(content, index)
-        etree.ElementTree(self._doc).write(os.path.join(self._path, 'word', 'document.xml'), pretty_print=True)
-
-    def put_text(self, after, text, color):
-        self.move_cursor(to=after)
-        if self._cursor is None:
-            self._cursor = self._last_body_para()
-
-        text = re.sub(r'&', 'and', text or '')
-        w = self._doc.nsmap['w']
-        color_xml = f'''<w:rPr><w:highlight w:val="{color}"/></w:rPr>''' if color else ''
-        elem = f'''
-        <w:p xmlns:w="{w}">
-            <w:pPr><w:pStyle w:val="Body"/></w:pPr>
-            <w:r>{color_xml}<w:t>{text}</w:t></w:r>
-        </w:p>
-        '''
-        self._cursor.addnext(etree.fromstring(elem))
-        etree.ElementTree(self._doc).write(os.path.join(self._path, 'word', 'document.xml'), pretty_print=True)
-
-    def save(self, filepath='') -> str:
-        filepath = self._path + '.docx' if filepath=='' else filepath
-        if os.path.exists(filepath):
-            os.remove(filepath)
-        shutil.make_archive('report', 'zip', self._path)
-        shutil.move('report.zip', filepath)
-        return filepath
-
-# ----------------------------- runner -----------------------------
-import re
-
-# regex: matches things like "1", "1.2", "(1.2.3)", "3)", "4-", "5:" at start
-_SECTION_NUM_RX = re.compile(
-    r"""^\s*                 # leading spaces
-        (?:?\d+(?:\.\d+)*?   # 1 or 1.2 or (1.2.3)
-        [\.\:\-]*         # optional separator: ., ), :, -
-        )\s*                # trailing spaces
-    """, re.VERBOSE,
-)
-
-def strip_section_number(title: str) -> str:
+def add_title_to_top(doc: Document, model, impact, scope, title_text="Validation Report (Template)"):
+    # Insert a paragraph at the very beginning
+    if doc.paragraphs:
+        p = doc.paragraphs[0].insert_paragraph_before()
+    else:
+        p = doc.add_paragraph()
+    r = p.add_run(title_text)
+    r.bold = True
+    r.font.size = Pt(16)
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    # Subtitle line beneath the title
+    sub = doc.add_paragraph()
+    sub_run = sub.add_run(f"Model: {model} | Impact: {impact}{(' | Scope: ' + scope) if scope else ''}")
+    sub_run.font.size = Pt(11)
+
+    # Spacer
+    doc.add_paragraph()
+    return doc
+
+# ---------- helpers ----------
+def _bold_run(p, text, size=11):
+    r = p.add_run(text)
+    r.bold = True
+    r.font.size = Pt(size)
+    return r
+
+def _normal_run(p, text, size=11):
+    r = p.add_run(text)
+    r.font.size = Pt(size)
+    return r
+
+def safe_json_loads(cell: Any):
+    """Pass-through for dict/list; try json/literal for strings."""
+    if isinstance(cell, (dict, list)) or cell is None:
+        return cell
+    if not isinstance(cell, str):
+        return cell
+    try:
+        return json.loads(cell)
+    except Exception:
+        pass
+    try:
+        return ast.literal_eval(cell)
+    except Exception:
+        return cell
+
+def _add_heading(doc: Document, text: str, size=12):
+    p = doc.add_paragraph()
+    _bold_run(p, text, size=size)
+
+def _add_rfr_block(doc: Document, rfr_obj: Any):
     """
-    Remove leading numbering from a section title.
-    Examples:
-        '1 Executive Summary' -> 'Executive Summary'
-        '2.1.3 Data Validation' -> 'Data Validation'
-        '(3) Scope' -> 'Scope'
-        '4- Assumptions' -> 'Assumptions'
+    Render an RFR section from a dict like {"Q1": "answer ...", "Q2": "..."}.
+    Also tolerates JSON-ish strings by parsing first.
     """
-    if not isinstance(title, str):
-        return ""
-    return _SECTION_NUM_RX.sub("", title).strip()
+    rfr_obj = safe_json_loads(rfr_obj)
+    if not rfr_obj:
+        _normal_run(doc.add_paragraph(), "(No RFR provided)")
+        return
 
-def run_pipeline(source_docx: str, template_docx: str, mapping_csv: str, out_name: str = "") -> str:
+    if isinstance(rfr_obj, dict):
+        for k, v in rfr_obj.items():
+            # Question key (bold)
+            p_q = doc.add_paragraph()
+            _bold_run(p_q, f"{str(k).strip()}: ", size=11)
+
+            # Response/value
+            p_a = doc.add_paragraph()
+            _bold_run(p_a, "Response: ", size=11)
+            _normal_run(p_a, str(v).strip())
+    else:
+        # Fallback dump
+        _normal_run(doc.add_paragraph(), str(rfr_obj).strip())
+
+def _as_finding_lines(x: Any):
     """
-    Run end-to-end:
-      - source_docx: model document to copy content from
-      - template_docx: base validation template
-      - mapping_csv: CSV with columns: sections, text, (optional) Answer
-      - out_name: optional output .docx name
+    Normalize findings to list[str]. Accepts list/ dict / string / JSON-ish.
     """
-    logging.basicConfig(level=logging.INFO)
-    df = pd.read_csv(mapping_csv).fillna('')
-    required = {'sections', 'text'}
-    missing = required - set(df.columns)
-    if missing:
-        raise ValueError(f"Mapping CSV missing columns: {missing}. Need at least: {required}")
+    x = safe_json_loads(x)
+    if x is None:
+        return []
+    if isinstance(x, list):
+        return [str(it).strip() for it in x if str(it).strip()]
+    if isinstance(x, dict):
+        return [f"{k}: {v}" for k, v in x.items() if str(v).strip()]
+    if isinstance(x, str):
+        s = x.strip()
+        return [s] if s else []
+    return [str(x).strip()]
 
-    source = ModelDoc(source_docx)
-    dest = ValReport(template_docx)
+def _add_findings_table(doc: Document, findings_df: Optional[pd.DataFrame]):
+    """
+    Insert a 'Findings' heading and a table with the specified columns, if data exists.
+    Expected columns (case-insensitive tolerant):
+      - IMVP question
+      - Finding Impact Category
+      - Finding Details
+      - Finding Status
+    """
+    if findings_df is None or len(findings_df) == 0:
+        return
 
-    mapping = df.to_dict(orient='records')
+    # Normalize column names for tolerant matching
+    colmap = {c.lower().strip(): c for c in findings_df.columns}
 
-    for i, row in enumerate(mapping):
-        anchor = row.get('text', '')
-        sections_raw = row.get('sections', '')
-        answers = row.get('mrmg_answer', '')
+    def pick(*aliases):
+        for a in aliases:
+            if a.lower() in colmap:
+                return colmap[a.lower()]
+        return None
 
-        # allow both "A; B" and "A;B"
-        candidates = [s.strip() for s in sections_raw.split(';') if s.strip()]
-        # try later items first (like your original code)
-        for s in reversed(candidates):
-            try:
-                section_title, content = source.copy_content(start=s)
-                section_title = strip_section_number(section_title)
-                dest.paste_content(content, anchor, str(i+1))
+    col_imvp    = pick("IMVP question", "IMVP Question", "imvp_question", "imvp q", "imvp")
+    col_impact  = pick("Finding Impact Category", "Impact Category", "finding impact category", "impact")
+    col_detail  = pick("Finding Details", "Finding Detail", "details", "finding details")
+    col_status  = pick("Finding Status", "Status", "finding status")
 
-                dest.put_text(anchor, f'Model Document Section: {section_title}', 'magenta')
-                if answers:
-                    dest.put_text(anchor, str(answers), 'yellow')
-                # one success per row is enough
-                break
-            except Exception as e:
-                # write an error line but continue with other rows
-                dest.put_text(anchor, f'ERROR copying "{s}": {e}', 'red')
+    cols = [col_imvp, col_impact, col_detail, col_status]
+    if not all(cols):
+        # If any required column is missing, skip gracefully
+        _add_heading(doc, "Findings", size=12)
+        _normal_run(doc.add_paragraph(), "(Findings table skipped: required columns not found)")
+        doc.add_paragraph()
+        return
 
-    out_file = out_name or (os.path.splitext(os.path.basename(source_docx))[0] + " - Validation Report (Auto).docx")
-    final_path = dest.save(out_file)
-    logging.info(f"✅ Report generated: {final_path}")
-    return final_path
+    # Heading
+    _add_heading(doc, "Findings", size=12)
 
-# ----------------------------- example -----------------------------
-if __name__ == "__main__":
-    # Example usage (edit paths):
-    SOURCE = "word.docx"
-    TEMPLATE = r"base\test_C.docx"
-    MAPPING = "mapping\Buiness_C.csv"
-    run_pipeline(SOURCE, TEMPLATE, MAPPING
+    # Create table
+    table = doc.add_table(rows=1, cols=4)
+    hdr_cells = table.rows[0].cells
+    hdr_cells[0].text = "IMVP Question"
+    hdr_cells[1].text = "Finding Impact Category"
+    hdr_cells[2].text = "Finding Details"
+    hdr_cells[3].text = "Finding Status"
+
+    # Rows
+    for _, r in findings_df.iterrows():
+        row_cells = table.add_row().cells
+        row_cells[0].text = str(r.get(col_imvp, "") or "").strip()
+        row_cells[1].text = str(r.get(col_impact, "") or "").strip()
+        row_cells[2].text = str(r.get(col_detail, "") or "").strip()
+        row_cells[3].text = str(r.get(col_status, "") or "").strip()
+
+    # Spacer after table
+    doc.add_paragraph()
+
+
+# ---------- main ----------
+def build_simple_template(
+    df: pd.DataFrame,
+    model: str,
+    impact: str,
+    prepend_docx_path: str,
+    scope: str = "",
+    save_dir: str = "base",
+    *,
+    findings_df: Optional[pd.DataFrame] = None,   # <<< NEW: pass your Excel dataframe here
+    question_col: str = "text",
+    sections_col: str = "sections",
+    mrmg_col: Optional[str] = "mrmg_answer",
+    heading_col: Optional[str] = None,            # if you have one
+    rfr_col: str = "RFR",                         # your dict column (already set)
+    finding_col: Optional[str] = "Findings",
+    page_break: bool = True,
+    blank_lines_under_mtr: int = 2
+) -> str:
+    # sanity
+    for col in [question_col, sections_col]:
+        if col not in df.columns:
+            raise KeyError(f"Missing required column: {col}")
+
+    os.makedirs(save_dir, exist_ok=True)
+    out_path = os.path.join(save_dir, f"{model}_{impact}{('_' + scope) if scope else ''}.docx")
+
+    doc = Document(prepend_docx_path) if prepend_docx_path else Document()
+
+    # Title + (optional page break)
+    add_title_to_top(doc, model=model, impact=impact, scope=scope)
+    if prepend_docx_path and page_break:
+        doc.add_page_break()
+
+    # >>> Insert FINDINGS section + table right after prepend/title
+    _add_findings_table(doc, findings_df)
+
+    # Rows for Q/A, Sections, RFR, etc.
+    for i, row in df.iterrows():
+        # Question
+        pq = doc.add_paragraph()
+        _bold_run(pq, f"Question {i+1}: ", size=12)
+        _normal_run(pq, str(row[question_col]).strip())
+        doc.add_paragraph()
+
+        # Section
+        ps = doc.add_paragraph()
+        _bold_run(ps, "Section: ")
+        _normal_run(ps, str(row[sections_col]).strip())
+        doc.add_paragraph()
+
+        # Optional Heading
+        if heading_col and heading_col in df.columns:
+            ph = doc.add_paragraph()
+            _bold_run(ph, "Heading: ")
+            _normal_run(ph, str(row.get(heading_col, "")).strip())
+            doc.add_paragraph()
+
+        # MRMG Assessment (if present)
+        if mrmg_col and mrmg_col in df.columns:
+            pm = doc.add_paragraph()
+            _bold_run(pm, "MRMG Assessment: ")
+            _normal_run(pm, str(row.get(mrmg_col, "")).strip())
+            doc.add_paragraph()
+
+        # RFR
+        if rfr_col in df.columns:
+            _add_heading(doc, "RFR", size=12)
+            _add_rfr_block(doc, row.get(rfr_col))
+
+        # Findings (per-question free text list, if you still want it)
+        if finding_col and finding_col in df.columns:
+            _add_heading(doc, "Findings", size=12)
+            lines = _as_finding_lines(row.get(finding_col))
+            if lines:
+                for line in lines:
+                    p = doc.add_paragraph(style=None)
+                    try:
+                        p.style = doc.styles['List Bullet']  # bullet style if available
+                    except Exception:
+                        pass
+                    _normal_run(p, line)
+            else:
+                _normal_run(doc.add_paragraph(), "(No findings provided)")
+
+        # Modelling Team Response (space)
+        pmt = doc.add_paragraph()
+        _bold_run(pmt, "Modelling Team Response", size=11)
+        for _ in range(max(0, blank_lines_under_mtr)):
+            doc.add_paragraph()
+        # spacer
+        doc.add_paragraph()
+
+    doc.save(out_path)
+    return out_path
