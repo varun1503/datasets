@@ -1,46 +1,30 @@
-from docx import Document
 from docx.shared import Pt, Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-import os
-import json
-import ast
-from typing import Optional, Any
-import pandas as pd
-from copy import deepcopy
 
+EMU_PER_INCH = 914400
 
-# ---------- text helpers ----------
-def _bold_run(p, text, size=11):
-    r = p.add_run(text)
-    r.bold = True
-    r.font.size = Pt(size)
-    return r
+def _emu_to_inches(v):  # EMU -> inches
+    return float(v) / EMU_PER_INCH
 
-def _normal_run(p, text, size=11):
-    r = p.add_run(text)
-    r.font.size = Pt(size)
-    return r
+def _estimate_col_weight(series):
+    """Heuristic weight = max string length in the column."""
+    # handle NaNs/None robustly
+    lengths = (series.fillna("").astype(str).map(len)).tolist()
+    return max(lengths) if lengths else 1
 
-def safe_json_loads(cell: Any):
-    if isinstance(cell, (dict, list)) or cell is None:
-        return cell
-    if not isinstance(cell, str):
-        return cell
-    try:
-        return json.loads(cell)
-    except Exception:
-        pass
-    try:
-        return ast.literal_eval(cell)
-    except Exception:
-        return cell
+def _format_header_cell(cell):
+    cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+    for p in cell.paragraphs:
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        for r in p.runs:
+            r.font.bold = True
+            r.font.color.rgb = RGBColor(255, 255, 255)
+            r.font.size = Pt(11)
 
-
-# ---------- XML helpers ----------
-def _set_cell_bg(cell, hex_color: str = "F2F2F2"):
+def _set_cell_bg(cell, hex_color: str = "000000"):
     tc_pr = cell._tc.get_or_add_tcPr()
     shd = tc_pr.find(qn('w:shd'))
     if shd is None:
@@ -59,7 +43,7 @@ def _force_table_borders(table, color="000000", size=8):
     if borders is None:
         borders = OxmlElement('w:tblBorders')
         tblPr.append(borders)
-    for edge in ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']:
+    for edge in ['top','left','bottom','right','insideH','insideV']:
         el = borders.find(qn(f'w:{edge}'))
         if el is None:
             el = OxmlElement(f'w:{edge}')
@@ -69,196 +53,102 @@ def _force_table_borders(table, color="000000", size=8):
         el.set(qn('w:space'), '0')
         el.set(qn('w:color'), color)
 
-def _append_doc_body(dst: Document, src: Document):
-    """
-    Safely append all blocks from src into dst:
-    - deep-copy each block (so src stays intact)
-    - skip final sectPr (Word requires it to be last in the document)
-    """
-    dst_body = dst.element.body
-    src_body = src.element.body
-    for child in list(src_body):
-        # Skip trailing sectPr (section properties)
-        if child.tag.endswith('sectPr'):
-            continue
-        dst_body.append(deepcopy(child))
-
-
-# ---------- Cover page ----------
-def add_cover_page(
-    doc: Document,
-    *,
-    model_id: str,
-    model_version: str,
-    model_name: str,
-    report_date: str,
-    title_text: str = "Model Validation Report"
-):
-    title = doc.add_paragraph()
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    tr = title.add_run(title_text)
-    tr.bold = True
-    tr.font.size = Pt(20)
-
-    doc.add_paragraph()
-
-    chips = [
-        f"Model ID: {model_id}",
-        f"Model Version: {model_version}",
-        f"Model Name: {model_name}",
-        f"Date of Report Generation: {report_date}",
-    ]
-    t = doc.add_table(rows=1, cols=len(chips))
-    t.alignment = WD_TABLE_ALIGNMENT.CENTER
-    _force_table_borders(t)
-    for cell, txt in zip(t.rows[0].cells, chips):
-        _set_cell_bg(cell, "D9D9D9")
-        para = cell.paragraphs[0]
-        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        r = para.add_run(txt)
-        r.bold = True
-        r.font.size = Pt(11)
-
-
-# ---------- RFR ----------
-def _add_rfr_block(doc: Document, rfr_obj: Any):
-    rfr_obj = safe_json_loads(rfr_obj)
-    if not rfr_obj:
-        _normal_run(doc.add_paragraph(), "(No RFR provided)")
-        return
-    if isinstance(rfr_obj, dict):
-        for k, v in rfr_obj.items():
-            p_q = doc.add_paragraph()
-            _bold_run(p_q, f"{str(k).strip()}: ", size=11)
-            p_a = doc.add_paragraph()
-            _bold_run(p_a, "Response: ", size=11)
-            _normal_run(p_a, str(v).strip())
-    else:
-        _normal_run(doc.add_paragraph(), str(rfr_obj).strip())
-
-
-# ---------- Findings ----------
-def _format_header_cell(cell):
-    cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-    for p in cell.paragraphs:
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        for r in p.runs:
-            r.font.bold = True
-            r.font.color.rgb = RGBColor(255, 255, 255)
-            r.font.size = Pt(11)
-
-def _add_findings_table(doc: Document, findings_df: Optional[pd.DataFrame]):
+def _add_findings_table_dynamic(doc, findings_df):
     if findings_df is None or len(findings_df) == 0:
         return
 
-    # Section heading + Caption
-    _bold_run(doc.add_paragraph(), "Findings", size=12)
-    cap = doc.add_paragraph("Summary of Findings")
-    cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    cap.runs[0].bold = True
-    cap.runs[0].font.size = Pt(12)
-
-    # table
-    table = doc.add_table(rows=1, cols=4)
-    table.alignment = WD_TABLE_ALIGNMENT.CENTER
-    _force_table_borders(table, "000000")
-
-    hdr = table.rows[0].cells
-    hdr[0].text = "IMVP Question"
-    hdr[1].text = "Finding Impact Category"
-    hdr[2].text = "Finding Details"
-    hdr[3].text = "Finding Status"
-    for cell in hdr:
-        _set_cell_bg(cell, "000000")
-        _format_header_cell(cell)
-
-    # tolerant column access
+    # Normalize / pick columns
     colmap = {c.lower().strip(): c for c in findings_df.columns}
     def pick(*aliases):
         for a in aliases:
             if a.lower() in colmap:
                 return colmap[a.lower()]
         return None
-    c_q = pick("IMVP question", "imvp question", "imvp_question", "imvp q", "imvp")
-    c_ic = pick("Finding Impact Category", "impact category", "finding impact category", "impact")
-    c_fd = pick("Finding Details", "finding detail", "details")
-    c_fs = pick("Finding Status", "status", "finding status")
 
+    c_q = pick("IMVP question","imvp_question","imvp q","imvp")
+    c_ic = pick("Finding Impact Category","impact category","finding impact category","impact")
+    c_fd = pick("Finding Details","finding detail","details","finding details")
+    c_fs = pick("Finding Status","status","finding status")
+    cols = [c_q, c_ic, c_fd, c_fs]
+    headers = ["IMVP Question","Finding Impact Category","Finding Details","Finding Status"]
+    if not all(cols):
+        # fall back to your old static function or show a note
+        p = doc.add_paragraph()
+        r = p.add_run("Findings (required columns missing)")
+        r.bold = True
+        return
+
+    # Section + caption
+    sec = doc.add_paragraph()
+    sr = sec.add_run("Findings")
+    sr.bold = True
+    sr.font.size = Pt(12)
+
+    cap = doc.add_paragraph("Summary of Findings")
+    cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    cap.runs[0].bold = True
+    cap.runs[0].font.size = Pt(12)
+
+    # Build table
+    table = doc.add_table(rows=1, cols=4)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False  # we'll set widths manually
+    _force_table_borders(table, "000000")
+
+    # Header row
+    hdr = table.rows[0].cells
+    for i, h in enumerate(headers):
+        hdr[i].text = h
+        _set_cell_bg(hdr[i], "000000")
+        _format_header_cell(hdr[i])
+
+    # Compute dynamic widths
+    # Page usable width = page_width - left_margin - right_margin (inches)
+    secn = doc.sections[-1]
+    usable_in = _emu_to_inches(secn.page_width - secn.left_margin - secn.right_margin)
+
+    # Heuristic weights from content
+    weights = [
+        _estimate_col_weight(findings_df[cols[0]]),
+        _estimate_col_weight(findings_df[cols[1]]),
+        _estimate_col_weight(findings_df[cols[2]]),
+        _estimate_col_weight(findings_df[cols[3]]),
+    ]
+    if sum(weights) == 0:
+        weights = [1,1,2,1]  # reasonable default bias to Details
+
+    # Min/Max guards (tweak as you like)
+    min_w = [1.2, 1.4, 2.4, 1.2]   # inches
+    max_w = [2.0, 2.4, 5.0, 2.0]
+
+    # First pass proportional widths
+    raw = [w / sum(weights) * usable_in for w in weights]
+
+    # Clamp to min/max, then renormalize if needed
+    clamped = [max(min_w[i], min(max_w[i], raw[i])) for i in range(4)]
+    total = sum(clamped)
+    # If total != usable, scale proportionally but keep mins respected
+    if total != 0 and abs(total - usable_in) > 1e-3:
+        scale = usable_in / total
+        clamped = [max(min_w[i], min(max_w[i], clamped[i] * scale)) for i in range(4)]
+
+    # Apply widths
+    for i, w_in in enumerate(clamped):
+        for cell in table.columns[i].cells:
+            cell.width = Inches(w_in)
+
+    # Data rows
     for _, r in findings_df.iterrows():
         row_cells = table.add_row().cells
-        row_cells[0].text = str(r.get(c_q or "IMVP question", "")).strip()
-        row_cells[1].text = str(r.get(c_ic or "Finding Impact Category", "")).strip()
-        row_cells[2].text = str(r.get(c_fd or "Finding Details", "")).strip()
-        row_cells[3].text = str(r.get(c_fs or "Finding Status", "")).strip()
+        row_cells[0].text = str(r.get(cols[0], "")).strip()
+        row_cells[1].text = str(r.get(cols[1], "")).strip()
+        row_cells[2].text = str(r.get(cols[2], "")).strip()
+        row_cells[3].text = str(r.get(cols[3], "")).strip()
+        for c in row_cells:
+            c.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+            for p in c.paragraphs:
+                p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                for run in p.runs:
+                    run.font.size = Pt(10)
 
-    doc.add_paragraph()
-
-
-# ---------- Main builder ----------
-def build_simple_template(
-    df: pd.DataFrame,
-    model: str,
-    impact: str,
-    prepend_docx_path: str,
-    save_dir: str = "base",
-    *,
-    model_id: str,
-    model_version: str,
-    model_name: str,
-    report_date: str,
-    findings_df: Optional[pd.DataFrame] = None,
-    question_col: str = "text",
-    sections_col: str = "sections",
-    rfr_col: str = "RFR",
-    blank_lines_under_mtr: int = 2
-) -> str:
-
-    os.makedirs(save_dir, exist_ok=True)
-    out_path = os.path.join(save_dir, f"{model}_{impact}.docx")
-
-    # --- 1) Create new doc and add COVER ---
-    doc = Document()
-    add_cover_page(
-        doc,
-        model_id=model_id,
-        model_version=model_version,
-        model_name=model_name,
-        report_date=report_date,
-    )
-    # Separate cover from body with a PAGE BREAK (not a section break)
-    doc.add_page_break()
-
-    # --- 2) Append PREPEND content (deep-copy, before any final sectPr) ---
-    prepend = Document(prepend_docx_path)
-    _append_doc_body(doc, prepend)
-
-    # Ensure Findings start on a fresh page after prepend
-    doc.add_page_break()
-
-    # --- 3) Findings ---
-    _add_findings_table(doc, findings_df)
-
-    # --- 4) Q&A + RFR ---
-    for i, row in df.iterrows():
-        pq = doc.add_paragraph()
-        _bold_run(pq, f"Question {i+1}: ", size=12)
-        _normal_run(pq, str(row[question_col]).strip())
-        doc.add_paragraph()
-
-        ps = doc.add_paragraph()
-        _bold_run(ps, "Section: ")
-        _normal_run(ps, str(row[sections_col]).strip())
-        doc.add_paragraph()
-
-        if rfr_col in df.columns:
-            _bold_run(doc.add_paragraph(), "RFR", size=12)
-            _add_rfr_block(doc, row.get(rfr_col))
-
-        pmt = doc.add_paragraph()
-        _bold_run(pmt, "Modelling Team Response", size=11)
-        for _ in range(max(0, blank_lines_under_mtr)):
-            doc.add_paragraph()
-        doc.add_paragraph()
-
-    doc.save(out_path)
-    return out_path
+    doc.add_paragraph()  # spacer
