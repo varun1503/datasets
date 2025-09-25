@@ -1,11 +1,15 @@
 from docx import Document
-from docx.shared import Pt
+from docx.shared import Pt, Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_ALIGN_VERTICAL
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 import os
 import json
 import ast
-from typing import Optional, Any, Iterable
+from typing import Optional, Any
 import pandas as pd
+
 
 def add_title_to_top(doc: Document, model, impact, scope, title_text="Validation Report (Template)"):
     # Insert a paragraph at the very beginning
@@ -26,6 +30,7 @@ def add_title_to_top(doc: Document, model, impact, scope, title_text="Validation
     # Spacer
     doc.add_paragraph()
     return doc
+
 
 # ---------- helpers ----------
 def _bold_run(p, text, size=11):
@@ -98,9 +103,62 @@ def _as_finding_lines(x: Any):
         return [s] if s else []
     return [str(x).strip()]
 
+
+# ---------- table styling helpers ----------
+def _set_cell_bg(cell, hex_color: str = "000000"):
+    """Set solid background fill for a cell via oXML."""
+    tc_pr = cell._tc.get_or_add_tcPr()
+    shd = tc_pr.find(qn('w:shd'))
+    if shd is None:
+        shd = OxmlElement('w:shd')
+        tc_pr.append(shd)
+    shd.set(qn('w:fill'), hex_color)     # background color
+    shd.set(qn('w:val'), 'clear')        # no pattern
+    shd.set(qn('w:color'), 'auto')
+
+def _format_header_cell(cell):
+    """White, bold, centered text for header cells."""
+    cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+    for p in cell.paragraphs:
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        for r in p.runs:
+            r.font.bold = True
+            r.font.color.rgb = RGBColor(255, 255, 255)
+            r.font.size = Pt(11)
+
+def _force_table_borders(table):
+    """
+    Ensure visible grid borders even if 'Table Grid' style is unavailable.
+    """
+    tbl = table._tbl
+    tblPr = tbl.tblPr or OxmlElement('w:tblPr')
+    if tbl.tblPr is None:
+        tbl.append(tblPr)
+
+    borders = tblPr.find(qn('w:tblBorders'))
+    if borders is None:
+        borders = OxmlElement('w:tblBorders')
+        tblPr.append(borders)
+
+    def _add_border(tag):
+        el = borders.find(qn(f'w:{tag}'))
+        if el is None:
+            el = OxmlElement(f'w:{tag}')
+            borders.append(el)
+        el.set(qn('w:val'), 'single')
+        el.set(qn('w:sz'), '8')     # thickness
+        el.set(qn('w:space'), '0')
+        el.set(qn('w:color'), '000000')
+
+    for edge in ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']:
+        _add_border(edge)
+
+
+# ---------- findings table ----------
 def _add_findings_table(doc: Document, findings_df: Optional[pd.DataFrame]):
     """
     Insert a 'Findings' heading and a table with the specified columns, if data exists.
+    Header row will be black with white bold text; table has a visible grid outline.
     Expected columns (case-insensitive tolerant):
       - IMVP question
       - Finding Impact Category
@@ -125,31 +183,57 @@ def _add_findings_table(doc: Document, findings_df: Optional[pd.DataFrame]):
     col_status  = pick("Finding Status", "Status", "finding status")
 
     cols = [col_imvp, col_impact, col_detail, col_status]
+
+    _add_heading(doc, "Findings", size=12)
+
     if not all(cols):
-        # If any required column is missing, skip gracefully
-        _add_heading(doc, "Findings", size=12)
         _normal_run(doc.add_paragraph(), "(Findings table skipped: required columns not found)")
         doc.add_paragraph()
         return
 
-    # Heading
-    _add_heading(doc, "Findings", size=12)
-
     # Create table
     table = doc.add_table(rows=1, cols=4)
-    hdr_cells = table.rows[0].cells
-    hdr_cells[0].text = "IMVP Question"
-    hdr_cells[1].text = "Finding Impact Category"
-    hdr_cells[2].text = "Finding Details"
-    hdr_cells[3].text = "Finding Status"
+    # Try style; force borders regardless to be safe
+    try:
+        table.style = "Table Grid"
+    except Exception:
+        pass
+    _force_table_borders(table)
 
-    # Rows
+    table.autofit = False  # avoid Word auto-shrink for long text
+
+    # Set column widths (tweak as needed)
+    widths = [Inches(1.8), Inches(1.8), Inches(3.8), Inches(1.6)]
+    for i, w in enumerate(widths):
+        for cell in table.columns[i].cells:
+            cell.width = w
+
+    # Header row (black background)
+    hdr = table.rows[0].cells
+    hdr[0].text = "IMVP Question"
+    hdr[1].text = "Finding Impact Category"
+    hdr[2].text = "Finding Details"
+    hdr[3].text = "Finding Status"
+
+    for cell in hdr:
+        _set_cell_bg(cell, "000000")
+        _format_header_cell(cell)
+
+    # Data rows
     for _, r in findings_df.iterrows():
         row_cells = table.add_row().cells
         row_cells[0].text = str(r.get(col_imvp, "") or "").strip()
         row_cells[1].text = str(r.get(col_impact, "") or "").strip()
         row_cells[2].text = str(r.get(col_detail, "") or "").strip()
         row_cells[3].text = str(r.get(col_status, "") or "").strip()
+
+        # Alignments and body font
+        for c in row_cells:
+            c.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+            for p in c.paragraphs:
+                p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                for run in p.runs:
+                    run.font.size = Pt(10)
 
     # Spacer after table
     doc.add_paragraph()
@@ -164,7 +248,7 @@ def build_simple_template(
     scope: str = "",
     save_dir: str = "base",
     *,
-    findings_df: Optional[pd.DataFrame] = None,   # <<< NEW: pass your Excel dataframe here
+    findings_df: Optional[pd.DataFrame] = None,   # pass your Excel dataframe here
     question_col: str = "text",
     sections_col: str = "sections",
     mrmg_col: Optional[str] = "mrmg_answer",
@@ -189,7 +273,7 @@ def build_simple_template(
     if prepend_docx_path and page_break:
         doc.add_page_break()
 
-    # >>> Insert FINDINGS section + table right after prepend/title
+    # Insert FINDINGS section + table right after prepend/title
     _add_findings_table(doc, findings_df)
 
     # Rows for Q/A, Sections, RFR, etc.
