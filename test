@@ -1,114 +1,74 @@
-from docx import Document
-from docx.shared import Pt, Inches, RGBColor
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK
-from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
-from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
-
-import os
-import json
-import ast
-from typing import Optional, Any
-import pandas as pd
-
-EMU_PER_INCH = 914400
-
-# ======================= Basic text helpers =======================
-
-def _bold_run(p, text, size=11):
-    r = p.add_run(text)
-    r.bold = True
-    r.font.size = Pt(size)
-    return r
-
-def _normal_run(p, text, size=11):
-    r = p.add_run(text)
-    r.font.size = Pt(size)
-    return r
-
-def safe_json_loads(cell: Any):
-    """Pass-through for dict/list; try json/literal for strings."""
-    if isinstance(cell, (dict, list)) or cell is None:
-        return cell
-    if not isinstance(cell, str):
-        return cell
-    try:
-        return json.loads(cell)
-    except Exception:
-        pass
-    try:
-        return ast.literal_eval(cell)
-    except Exception:
-        return cell
-
-def _add_heading(doc: Document, text: str, size=12):
-    p = doc.add_paragraph()
-    _bold_run(p, text, size=size)
-
-def _add_rfr_block(doc: Document, rfr_obj: Any):
-    """
-    Render an RFR section from a dict like {"Q1": "...", "Q2": "..."}.
-    Also tolerates JSON-ish strings by parsing first.
-    """
-    rfr_obj = safe_json_loads(rfr_obj)
-    if not rfr_obj:
-        _normal_run(doc.add_paragraph(), "(No RFR provided)")
+def _add_findings_table(doc: Document, findings_df: Optional[pd.DataFrame]):
+    if findings_df is None or len(findings_df) == 0:
         return
 
-    if isinstance(rfr_obj, dict):
-        for k, v in rfr_obj.items():
-            p_q = doc.add_paragraph()
-            _bold_run(p_q, f"{str(k).strip()}: ", size=11)
+    # Map columns directly (your DataFrame already has exact names)
+    required = ["Risk Pillar", "IMVP question", "Finding Impact Category",
+                "Finding Details", "Finding status"]
+    missing = [c for c in required if c not in findings_df.columns]
+    if missing:
+        p = doc.add_paragraph()
+        r = p.add_run("Findings (required columns missing: " + ", ".join(missing) + ")")
+        r.bold = True
+        return
 
-            p_a = doc.add_paragraph()
-            _bold_run(p_a, "Response: ", size=11)
-            _normal_run(p_a, str(v).strip())
-    else:
-        _normal_run(doc.add_paragraph(), str(rfr_obj).strip())
+    # Section heading
+    sec = doc.add_paragraph()
+    sr = sec.add_run("Findings")
+    sr.bold = True
+    sr.font.size = Pt(12)
 
-def _as_finding_lines(x: Any):
-    """Normalize findings to list[str]. Accepts list/dict/string/JSON-ish."""
-    x = safe_json_loads(x)
-    if x is None:
-        return []
-    if isinstance(x, list):
-        return [str(it).strip() for it in x if str(it).strip()]
-    if isinstance(x, dict):
-        return [f"{k}: {v}" for k, v in x.items() if str(v).strip()]
-    if isinstance(x, str):
-        s = x.strip()
-        return [s] if s else []
-    return [str(x).strip()]
+    cap = doc.add_paragraph("Summary of Findings")
+    cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    cap.runs[0].bold = True
+    cap.runs[0].font.size = Pt(12)
 
-# ======================= Table styling helpers =======================
+    # Build table
+    headers = required
+    table = doc.add_table(rows=1, cols=len(headers))
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
+    _force_table_borders(table, "000000")
 
-def _set_cell_bg(cell, hex_color: str = "000000"):
-    """Set solid background fill for a cell via oXML."""
-    tc_pr = cell._tc.get_or_add_tcPr()
-    shd = tc_pr.find(qn('w:shd'))
-    if shd is None:
-        shd = OxmlElement('w:shd')
-        tc_pr.append(shd)
-    shd.set(qn('w:fill'), hex_color)     # background color
-    shd.set(qn('w:val'), 'clear')        # no pattern
-    shd.set(qn('w:color'), 'auto')
+    # Header row
+    hdr = table.rows[0].cells
+    for i, h in enumerate(headers):
+        hdr[i].text = h
+        _set_cell_bg(hdr[i], "000000")
+        _format_header_cell(hdr[i])
 
-def _format_header_cell(cell):
-    """White, bold, centered text for header cells."""
-    cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-    for p in cell.paragraphs:
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        for r in p.runs:
-            r.font.bold = True
-            r.font.color.rgb = RGBColor(255, 255, 255)
-            r.font.size = Pt(11)
+    # Compute usable page width (with a small safety margin)
+    secn = doc.sections[-1]
+    usable_in = _emu_to_inches(secn.page_width - secn.left_margin - secn.right_margin) - 0.05
 
-def _force_table_borders(table, color="000000", size=8):
-    """Ensure visible grid borders even if 'Table Grid' style is unavailable."""
-    tbl = table._tbl
-    tblPr = tbl.tblPr or OxmlElement('w:tblPr')
-    if tbl.tblPr is None:
-        tbl.append(tblPr)
+    # Assign widths: small cols ~1.0–1.2", big col gets the rest
+    min_w = [1.2, 1.2, 1.5, 3.5, 1.2]   # initial guess in inches
+    # Adjust the 4th column ("Finding Details") dynamically
+    other_total = sum(min_w[i] for i in range(len(headers)) if i != 3)
+    details_width = max(3.0, usable_in - other_total)
+    widths = [min_w[0], min_w[1], min_w[2], details_width, min_w[4]]
+
+    # Apply widths
+    for i, w_in in enumerate(widths):
+        for cell in table.columns[i].cells:
+            cell.width = Inches(w_in)
+
+    # Add rows
+    for _, r in findings_df.iterrows():
+        row_cells = table.add_row().cells
+        row_cells[0].text = str(r.get("Risk Pillar", "")).strip()
+        row_cells[1].text = str(r.get("IMVP question", "")).strip()
+        row_cells[2].text = str(r.get("Finding Impact Category", "")).strip()
+        row_cells[3].text = str(r.get("Finding Details", "")).strip()
+        row_cells[4].text = str(r.get("Finding status", "")).strip()
+        for c in row_cells:
+            c.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+            for p in c.paragraphs:
+                p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                for run in p.runs:
+                    run.font.size = Pt(10)
+
+    doc.add_paragraph()  # spacer        tbl.append(tblPr)
     borders = tblPr.find(qn('w:tblBorders'))
     if borders is None:
         borders = OxmlElement('w:tblBorders')
