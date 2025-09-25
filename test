@@ -47,7 +47,7 @@ def _add_heading(doc: Document, text: str, size=12):
 
 def _add_rfr_block(doc: Document, rfr_obj: Any):
     """
-    Render an RFR section from a dict like {"Q1": "answer ...", "Q2": "..."}.
+    Render an RFR section from a dict like {"Q1": "...", "Q2": "..."}.
     Also tolerates JSON-ish strings by parsing first.
     """
     rfr_obj = safe_json_loads(rfr_obj)
@@ -67,9 +67,7 @@ def _add_rfr_block(doc: Document, rfr_obj: Any):
         _normal_run(doc.add_paragraph(), str(rfr_obj).strip())
 
 def _as_finding_lines(x: Any):
-    """
-    Normalize findings to list[str]. Accepts list/ dict / string / JSON-ish.
-    """
+    """Normalize findings to list[str]. Accepts list/dict/string/JSON-ish."""
     x = safe_json_loads(x)
     if x is None:
         return []
@@ -106,9 +104,7 @@ def _format_header_cell(cell):
             r.font.size = Pt(11)
 
 def _force_table_borders(table, color="000000", size=8):
-    """
-    Ensure visible grid borders even if 'Table Grid' style is unavailable.
-    """
+    """Ensure visible grid borders even if 'Table Grid' style is unavailable."""
     tbl = table._tbl
     tblPr = tbl.tblPr or OxmlElement('w:tblPr')
     if tbl.tblPr is None:
@@ -238,17 +234,18 @@ def _add_findings_table(doc: Document, findings_df: Optional[pd.DataFrame]):
 
     doc.add_paragraph()  # spacer
 
-# ======================= Findings by Risk Pillar =======================
+# ======================= Findings by Section (from Risk Pillar) =======================
 
-def _add_risk_pillar_sections(doc: Document, findings_df: Optional[pd.DataFrame]):
+def _add_section_from_pillar_with_details(doc: Document, findings_df: Optional[pd.DataFrame]):
     """
-    After the findings table, add sections grouped by Risk Pillar.
-    For each pillar, render a bold section heading and bullet the 'Finding Details'
-    for all rows in that pillar. Optionally include Impact/Status/IMVP Question if present.
+    Group by the 'Risk Pillar' column.
+    For each unique value, add a heading: 'Section: <pillar value>'
+    and bullet ONLY the 'Finding Details' entries under it.
     """
     if findings_df is None or len(findings_df) == 0:
         return
 
+    # tolerant column lookup
     colmap = {str(c).strip().lower(): c for c in findings_df.columns}
     def pick(*aliases):
         for a in aliases:
@@ -257,67 +254,52 @@ def _add_risk_pillar_sections(doc: Document, findings_df: Optional[pd.DataFrame]
                 return colmap[k]
         return None
 
-    c_pillar = pick("Risk Pillar", "risk pillar", "pillar")
-    c_details = pick("Finding Details", "finding detail", "details")
-    c_impact  = pick("Finding Impact Category", "impact category", "finding impact category", "impact")
-    c_status  = pick("Finding Status", "status", "finding status")
-    c_imvpq   = pick("IMVP Question", "imvp_question", "imvp q", "imvp")
+    c_pillar  = pick("risk pillar", "pillar")                  # heading source
+    c_details = pick("finding details", "finding detail", "details")  # bullets
 
     if not c_pillar or not c_details:
         p = doc.add_paragraph()
-        r = p.add_run("Risk Pillar sections (missing required columns)")
-        r.bold = True
+        msg = "Findings by Section (from Risk Pillar) requires columns: "
+        missing = []
+        if not c_pillar:  missing.append("Risk Pillar")
+        if not c_details: missing.append("Finding Details")
+        _bold_run(p, msg + ", ".join(missing))
         return
 
-    # Title for the grouped view
-    sec = doc.add_paragraph()
-    run = sec.add_run("Findings by Risk Pillar")
-    run.bold = True
-    run.font.size = Pt(12)
+    # Title
+    title_p = doc.add_paragraph()
+    tr = title_p.add_run("Findings by Section")
+    tr.bold = True
+    tr.font.size = Pt(12)
 
-    # Stable ordering
-    sort_cols = [c_pillar]
-    if c_impact: sort_cols.append(c_impact)
-    if c_status: sort_cols.append(c_status)
-    df_sorted = findings_df.sort_values(sort_cols, kind="stable")
+    # stable order by pillar
+    df_sorted = findings_df.sort_values([c_pillar], kind="stable")
 
-    for pillar, grp in df_sorted.groupby(c_pillar, dropna=False):
-        # Section heading per pillar
+    for pillar_val, grp in df_sorted.groupby(c_pillar, dropna=False):
+        # Heading = "Section: <pillar_val>"
         h = doc.add_paragraph()
-        _bold_run(h, f"{str(pillar) if pd.notna(pillar) else 'Unspecified Pillar'}", size=11)
+        label = f"Section: {str(pillar_val).strip() if pd.notna(pillar_val) else 'Unspecified'}"
+        _bold_run(h, label, size=11)
 
-        # Bullet each finding detail within the pillar
+        # bullets = ONLY Finding Details; dedupe while preserving first occurrence
+        seen = set()
         for _, row in grp.iterrows():
             detail = str(row.get(c_details, "") or "").strip()
-            if not detail:
+            if not detail or detail in seen:
                 continue
-
-            meta_bits = []
-            if c_impact:
-                v = str(row.get(c_impact, "") or "").strip()
-                if v: meta_bits.append(f"Impact: {v}")
-            if c_status:
-                v = str(row.get(c_status, "") or "").strip()
-                if v: meta_bits.append(f"Status: {v}")
-            if c_imvpq:
-                v = str(row.get(c_imvpq, "") or "").strip()
-                if v: meta_bits.append(f"IMVP Q: {v}")
-
-            line = detail
-            if meta_bits:
-                line += "  —  " + " | ".join(meta_bits)
+            seen.add(detail)
 
             p = doc.add_paragraph()
             try:
                 p.style = doc.styles['List Bullet']
             except Exception:
                 pass
-            _normal_run(p, line, size=10)
+            _normal_run(p, detail, size=10)
 
-        # spacer after each pillar section
+        # spacer after each section
         doc.add_paragraph()
 
-# ======================= Title + TOC at very top =======================
+# ======================= Title + (optional) TOC at very top =======================
 
 def _insert_page_break_before(anchor_para):
     """Insert a page break immediately before `anchor_para`."""
@@ -339,9 +321,7 @@ def _insert_paragraph_before(anchor_para, text="", bold=False, align=None, font_
     return p
 
 def _gather_toc_lines(toc_node, level=0):
-    """
-    Depth-first traversal of toc_dict -> list of (text, level).
-    """
+    """Depth-first traversal of toc_dict -> list of (text, level)."""
     lines = []
     if isinstance(toc_node, dict):
         for heading, child in toc_node.items():
@@ -362,51 +342,22 @@ def add_title_and_toc_at_top(
     toc_dict: dict,
 ):
     """
-    Insert, at the very start of the document:
-      - Title (centered, bold)
-      - Subtitle
-      - Page break
-      - 'Table of Contents' heading
-      - TOC items from toc_dict (indented)
-      - Page break
-    Original content from the loaded prepend doc stays after the TOC page.
+    Insert at the very start in CORRECT visual order:
+      Title, Subtitle, Spacer,
+      Page Break,
+      'Table of Contents' heading,
+      TOC items (top -> bottom),
+      Page Break,
+      then original prepend content.
     """
+    # Ensure anchor
     if doc.paragraphs:
         anchor = doc.paragraphs[0]
     else:
         doc.add_paragraph()
         anchor = doc.paragraphs[0]
 
-    # Insert in reverse order to maintain top-down visual order.
-
-    # 5) Page break just before original content
-    _insert_page_break_before(anchor)
-
-    # 4) TOC items (insert from last to first)
-    toc_lines = _gather_toc_lines(toc_dict, level=0)
-    for text, level in reversed(toc_lines):
-        _insert_paragraph_before(
-            anchor_para=anchor,
-            text=text,
-            bold=False,
-            align=None,
-            font_size_pt=11,
-            left_indent_in=0.25 * level
-        )
-
-    # 3) TOC heading
-    _insert_paragraph_before(
-        anchor_para=anchor,
-        text="Table of Contents",
-        bold=True,
-        align=WD_ALIGN_PARAGRAPH.CENTER,
-        font_size_pt=14
-    )
-
-    # 2) Page break between Title and TOC
-    _insert_page_break_before(anchor)
-
-    # 1) Title + subtitle at the very top
+    # 1) Title
     title_text = (
         f"Model ID: {model_id}, "
         f"Model Version: {model_version}, "
@@ -420,6 +371,7 @@ def add_title_and_toc_at_top(
         align=WD_ALIGN_PARAGRAPH.CENTER,
         font_size_pt=16
     )
+    # 2) Subtitle
     _insert_paragraph_before(
         anchor_para=anchor,
         text=f"Model: {model} | Impact: {impact}{(' | Scope: ' + scope) if scope else ''}",
@@ -427,7 +379,35 @@ def add_title_and_toc_at_top(
         align=WD_ALIGN_PARAGRAPH.CENTER,
         font_size_pt=11
     )
-    _insert_paragraph_before(anchor_para=anchor, text="")  # spacer
+    # 3) Spacer
+    _insert_paragraph_before(anchor_para=anchor, text="")
+
+    # 4) Page break (between title and TOC)
+    _insert_page_break_before(anchor)
+
+    # 5) TOC heading
+    _insert_paragraph_before(
+        anchor_para=anchor,
+        text="Table of Contents",
+        bold=True,
+        align=WD_ALIGN_PARAGRAPH.CENTER,
+        font_size_pt=14
+    )
+
+    # 6) TOC items in NATURAL ORDER (no reversed)
+    toc_lines = _gather_toc_lines(toc_dict, level=0)
+    for text, level in toc_lines:
+        _insert_paragraph_before(
+            anchor_para=anchor,
+            text=text,
+            bold=False,
+            align=None,
+            font_size_pt=11,
+            left_indent_in=0.25 * level  # indent per level
+        )
+
+    # 7) Page break (after TOC, before original content)
+    _insert_page_break_before(anchor)
 
 def add_title_only_top(
     doc: Document,
@@ -446,7 +426,6 @@ def add_title_only_top(
         doc.add_paragraph()
         anchor = doc.paragraphs[0]
 
-    # Insert in reverse order so final order is Title, Subtitle, Spacer
     _insert_paragraph_before(anchor_para=anchor, text="")  # spacer
     _insert_paragraph_before(
         anchor_para=anchor,
@@ -481,15 +460,15 @@ def build_simple_template(
     report_date: str,
     prepend_docx_path: str,
     *,
-    toc_dict: Optional[dict] = None,           # <-- optional TOC dict
+    toc_dict: Optional[dict] = None,           # optional TOC dict
     scope: str = "",
     save_dir: str = "base",
     findings_df: Optional[pd.DataFrame] = None,   # Excel findings df
     question_col: str = "text",
     sections_col: str = "sections",
     mrmg_col: Optional[str] = "mrmg_answer",
-    heading_col: Optional[str] = None,            # if you have one
-    rfr_col: str = "RFR",                         # dict/JSON column
+    heading_col: Optional[str] = None,
+    rfr_col: str = "RFR",
     finding_col: Optional[str] = "Findings",
     blank_lines_under_mtr: int = 2
 ) -> str:
@@ -532,8 +511,8 @@ def build_simple_template(
     # Findings summary table
     _add_findings_table(doc, findings_df)
 
-    # Grouped view — Findings by Risk Pillar
-    _add_risk_pillar_sections(doc, findings_df)
+    # Grouped view — Findings by Section (Section = Risk Pillar value; bullets = only Finding Details)
+    _add_section_from_pillar_with_details(doc, findings_df)
 
     # Rows for Q/A, Sections, RFR, etc.
     for i, row in df.iterrows():
@@ -593,9 +572,10 @@ def build_simple_template(
 
     doc.save(out_path)
     return out_path
+
 # df_main = ...        # your Q/A dataframe
-# findings_df = ...    # your Excel findings dataframe (must include "Finding Details" + "Risk Pillar" for grouping)
-# toc_dict = {...}     # your TOC dict, or pass None to skip
+# findings_df = ...    # must include columns: "Risk Pillar" and "Finding Details"
+# toc_dict = {...}     # or None to skip TOC
 
 out_file = build_simple_template(
     df=df_main,
@@ -606,7 +586,7 @@ out_file = build_simple_template(
     model_name="IVR Intent Classifier",
     report_date="2025-09-25",
     prepend_docx_path="path/to/prepend.docx",
-    toc_dict=toc_dict,          # or None
+    toc_dict=toc_dict,          # pass dict or None
     scope="India",
     save_dir="base",
     findings_df=findings_df,
@@ -619,34 +599,3 @@ out_file = build_simple_template(
     blank_lines_under_mtr=2
 )
 print("Saved:", out_file)
-toc_dict = {
-    "1. Validation Assessment Details": {
-        "1.1 Evaluation of Conceptual Soundness": {
-            "1.1.1 Model Documentation": {},
-            "1.1.2 Model Objective & Use": {},
-            "1.1.3 Data Validation": {},
-            "1.1.4 Theory & Approach": {},
-        },
-        "1.2 Outcome Analysis": {},
-        "1.3 Ongoing Monitoring": {},
-        "1.4 Governance": {},
-    },
-    "2. Appendix": {
-        "2.1 MRMG Expectations": {
-            "2.1.1 Model Documentation": {},
-            "2.1.2 Data": {},
-            "2.1.3 Theory and Approach": {},
-            "2.1.4 Outcome Analysis": {},
-            "2.1.5 Ongoing Monitoring": {},
-        },
-        "2.2 Validation Outcome Analysis and Guidance": {
-            "2.2.1 Variable Distribution": {},
-            "2.2.2 Discrimination Power": {},
-            "2.2.3 Accuracy": {},
-            "2.2.4 Population Stability": {},
-            "2.2.5 Sensitivity Analysis": {},
-        },
-        "2.3 Key Definitions": {},
-        "2.4 Modeling Team Information": {},
-    }
-}
