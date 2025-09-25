@@ -339,7 +339,7 @@ def build_simple_template(
     *,
     # Choose ONE of the two approaches below:
     use_cover_page: bool = True,                  # True => add separate cover page
-    insert_heading_in_prepend: bool = False,      # True => inject heading at top of prepend doc (disables cover)
+    insert_heading_in_prepend: bool = False,      # True => inject heading at top of prepend (disables cover)
 
     # Heading/cover inputs:
     model_id: str = "",
@@ -376,7 +376,6 @@ def build_simple_template(
 
     # Either add a COVER PAGE, or insert heading at TOP of the prepend doc
     if insert_heading_in_prepend:
-        # Make sure cover page is not added when we inject at the top
         insert_model_heading_at_top(
             doc,
             title_text="Model Validation Report",
@@ -386,6 +385,9 @@ def build_simple_template(
             report_date=report_date,
             add_chips=True
         )
+        # >>> Ensure Findings start on a NEW PAGE after the prepend (your first page)
+        doc.add_page_break()
+
     elif use_cover_page:
         add_cover_page(
             doc,
@@ -395,6 +397,7 @@ def build_simple_template(
             report_date=report_date,
             title_text="Model Validation Report"
         )
+        # cover already ends with a page break
 
     # Findings table with SECTION + CAPTION
     _add_findings_table(
@@ -433,7 +436,7 @@ def build_simple_template(
             doc.add_paragraph()
 
         # RFR
-        if rfr_col and rfr_col in df.columns:
+        if rfr_col in df.columns:  # (fixed condition)
             _add_heading(doc, "RFR", size=12)
             _add_rfr_block(doc, row.get(rfr_col))
 
@@ -461,18 +464,3 @@ def build_simple_template(
 
     doc.save(out_path)
     return out_path
-out = build_simple_template(
-    df=questions_df,
-    model="ICS CDSS",
-    impact="High",
-    prepend_docx_path="your_prepend.docx",
-    scope="IR1179",
-    use_cover_page=True,               # default
-    insert_heading_in_prepend=False,   # default
-    model_id="IR1179",
-    model_version="v1.20",
-    model_name="ICS CDSS Model",
-    report_date="10/03/2024",
-    findings_df=findings_df,
-    rfr_col="RFR"
-)
