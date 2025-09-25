@@ -463,4 +463,359 @@ def build_simple_template(
         doc.add_paragraph()
 
     doc.save(out_path)
+    return out_path        ]
+        for cell, txt in zip(t.rows[0].cells, labels):
+            _set_cell_bg(cell, "D9D9D9")
+            _set_cell_padding(cell, top=80, bottom=80, left=200, right=200)
+            cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+            para = cell.paragraphs[0]
+            para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = para.add_run(txt)
+            run.bold = True
+            run.font.size = Pt(11)
+        _move_last_block_to_top(doc)
+
+    # 3) Spacer under the chips/title
+    sp = doc.add_paragraph()
+    sp.add_run("")
+    _move_last_block_to_top(doc)
+
+
+# ======================= Cover page (optional alternative) =======================
+
+def _add_cover_chip(doc: Document, label: str, value: str):
+    """Adds an 'oblong' chip (single-cell table) centered on the page."""
+    t = doc.add_table(rows=1, cols=1)
+    _center_table(t)
+    _force_table_borders(t, color="000000", size=8)
+    t.autofit = True
+    cell = t.rows[0].cells[0]
+    _set_cell_bg(cell, "D9D9D9")  # light grey
+    _set_cell_padding(cell, top=100, bottom=100, left=240, right=240)
+    cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+
+    p = cell.paragraphs[0]
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run(f"{label}: {value}")
+    r.bold = True
+    r.font.size = Pt(12)
+
+    doc.add_paragraph()  # spacer
+
+def add_cover_page(
+    doc: Document,
+    *,
+    model_id: str,
+    model_version: str,
+    model_name: str,
+    report_date: str,
+    title_text: str = "Model Validation Report"
+):
+    """First page: big centered title + 4 chips, then a page break."""
+    title = doc.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    tr = title.add_run(title_text)
+    tr.bold = True
+    tr.font.size = Pt(20)
+
+    doc.add_paragraph()  # spacer
+
+    _add_cover_chip(doc, "Model ID", model_id)
+    _add_cover_chip(doc, "Model Version", model_version)
+    _add_cover_chip(doc, "Model Name", model_name)
+    _add_cover_chip(doc, "Date of Report Generation", report_date)
+
+    doc.add_page_break()
+
+
+# ======================= Text helpers =======================
+
+def _bold_run(p, text, size=11):
+    r = p.add_run(text)
+    r.bold = True
+    r.font.size = Pt(size)
+    return r
+
+def _normal_run(p, text, size=11):
+    r = p.add_run(text)
+    r.font.size = Pt(size)
+    return r
+
+def safe_json_loads(cell: Any):
+    if isinstance(cell, (dict, list)) or cell is None:
+        return cell
+    if not isinstance(cell, str):
+        return cell
+    try:
+        return json.loads(cell)
+    except Exception:
+        pass
+    try:
+        return ast.literal_eval(cell)
+    except Exception:
+        return cell
+
+def _add_heading(doc: Document, text: str, size=12):
+    p = doc.add_paragraph()
+    _bold_run(p, text, size=size)
+
+
+# ======================= RFR renderer =======================
+
+def _add_rfr_block(doc: Document, rfr_obj: Any):
+    rfr_obj = safe_json_loads(rfr_obj)
+    if not rfr_obj:
+        _normal_run(doc.add_paragraph(), "(No RFR provided)")
+        return
+    if isinstance(rfr_obj, dict):
+        for k, v in rfr_obj.items():
+            p_q = doc.add_paragraph()
+            _bold_run(p_q, f"{str(k).strip()}: ", size=11)
+            p_a = doc.add_paragraph()
+            _bold_run(p_a, "Response: ", size=11)
+            _normal_run(p_a, str(v).strip())
+    else:
+        _normal_run(doc.add_paragraph(), str(rfr_obj).strip())
+
+def _as_finding_lines(x: Any):
+    x = safe_json_loads(x)
+    if x is None:
+        return []
+    if isinstance(x, list):
+        return [str(it).strip() for it in x if str(it).strip()]
+    if isinstance(x, dict):
+        return [f"{k}: {v}" for k, v in x.items() if str(v).strip()]
+    if isinstance(x, str):
+        s = x.strip()
+        return [s] if s else []
+    return [str(x).strip()]
+
+
+# ======================= Findings table (SECTION + CAPTION + black header) =======================
+
+def _format_header_cell(cell):
+    cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+    for p in cell.paragraphs:
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        for r in p.runs:
+            r.font.bold = True
+            r.font.color.rgb = RGBColor(255, 255, 255)
+            r.font.size = Pt(11)
+
+def _add_findings_table(doc: Document, findings_df: Optional[pd.DataFrame],
+                        section_title: str = "Findings",
+                        caption: str = "Summary of Findings"):
+    """
+    Adds a SECTION heading and a CAPTION above a styled findings table.
+    """
+    if findings_df is None or len(findings_df) == 0:
+        return
+
+    # tolerant column matching
+    colmap = {c.lower().strip(): c for c in findings_df.columns}
+    def pick(*aliases):
+        for a in aliases:
+            if a.lower() in colmap:
+                return colmap[a.lower()]
+        return None
+
+    col_imvp    = pick("IMVP question", "IMVP Question", "imvp_question", "imvp q", "imvp")
+    col_impact  = pick("Finding Impact Category", "Impact Category", "finding impact category", "impact")
+    col_detail  = pick("Finding Details", "Finding Detail", "details", "finding details")
+    col_status  = pick("Finding Status", "Status", "finding status")
+
+    if not all([col_imvp, col_impact, col_detail, col_status]):
+        _add_heading(doc, section_title, size=12)
+        _normal_run(doc.add_paragraph(), "(Findings table skipped: required columns not found)")
+        doc.add_paragraph()
+        return
+
+    # SECTION heading
+    _add_heading(doc, section_title, size=12)
+
+    # CAPTION above the table
+    cap = doc.add_paragraph(caption)
+    cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    cap.runs[0].bold = True
+    cap.runs[0].font.size = Pt(12)
+
+    # Table
+    table = doc.add_table(rows=1, cols=4)
+    _center_table(table)
+    try:
+        table.style = "Table Grid"
+    except Exception:
+        pass
+    _force_table_borders(table, color="000000", size=8)
+    table.autofit = False
+
+    # widths
+    widths = [Inches(1.8), Inches(1.8), Inches(3.8), Inches(1.6)]
+    for i, w in enumerate(widths):
+        for cell in table.columns[i].cells:
+            cell.width = w
+
+    # Header row
+    hdr = table.rows[0].cells
+    hdr[0].text = "IMVP Question"
+    hdr[1].text = "Finding Impact Category"
+    hdr[2].text = "Finding Details"
+    hdr[3].text = "Finding Status"
+    for cell in hdr:
+        _set_cell_bg(cell, "000000")
+        _format_header_cell(cell)
+
+    # Data rows
+    for _, r in findings_df.iterrows():
+        row_cells = table.add_row().cells
+        row_cells[0].text = str(r.get(col_imvp, "") or "").strip()
+        row_cells[1].text = str(r.get(col_impact, "") or "").strip()
+        row_cells[2].text = str(r.get(col_detail, "") or "").strip()
+        row_cells[3].text = str(r.get(col_status, "") or "").strip()
+        for c in row_cells:
+            c.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+            for p in c.paragraphs:
+                p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                for run in p.runs:
+                    run.font.size = Pt(10)
+
+    doc.add_paragraph()  # spacer after table
+
+
+# ======================= Main builder =======================
+
+def build_simple_template(
+    df: pd.DataFrame,
+    model: str,
+    impact: str,
+    prepend_docx_path: str,
+    scope: str = "",
+    save_dir: str = "base",
+    *,
+    # Choose ONE of the two approaches below:
+    use_cover_page: bool = True,                  # True => add separate cover page
+    insert_heading_in_prepend: bool = False,      # True => inject heading at top of prepend (disables cover)
+
+    # Heading/cover inputs:
+    model_id: str = "",
+    model_version: str = "",
+    model_name: str = "",
+    report_date: str = "",
+
+    # Findings inputs:
+    findings_df: Optional[pd.DataFrame] = None,
+    findings_section_title: str = "Findings",
+    findings_caption: str = "Summary of Findings",
+
+    # Row mapping:
+    question_col: str = "text",
+    sections_col: str = "sections",
+    mrmg_col: Optional[str] = "mrmg_answer",
+    heading_col: Optional[str] = None,
+    rfr_col: str = "RFR",
+    finding_col: Optional[str] = "Findings",
+
+    blank_lines_under_mtr: int = 2
+) -> str:
+
+    # sanity
+    for col in [question_col, sections_col]:
+        if col not in df.columns:
+            raise KeyError(f"Missing required column: {col}")
+
+    os.makedirs(save_dir, exist_ok=True)
+    out_path = os.path.join(save_dir, f"{model}_{impact}{('_' + scope) if scope else ''}.docx")
+
+    # Start from template (prepend_docx_path)
+    doc = Document(prepend_docx_path) if prepend_docx_path else Document()
+
+    # Either add a COVER PAGE, or insert heading at TOP of the prepend doc
+    if insert_heading_in_prepend:
+        insert_model_heading_at_top(
+            doc,
+            title_text="Model Validation Report",
+            model_id=model_id,
+            model_version=model_version,
+            model_name=model_name,
+            report_date=report_date,
+            add_chips=True
+        )
+        # >>> Ensure Findings start on a NEW PAGE after the prepend (your first page)
+        doc.add_page_break()
+
+    elif use_cover_page:
+        add_cover_page(
+            doc,
+            model_id=model_id,
+            model_version=model_version,
+            model_name=model_name,
+            report_date=report_date,
+            title_text="Model Validation Report"
+        )
+        # cover already ends with a page break
+
+    # Findings table with SECTION + CAPTION
+    _add_findings_table(
+        doc,
+        findings_df,
+        section_title=findings_section_title,
+        caption=findings_caption
+    )
+
+    # Main rows: Q/A, Section, RFR, etc.
+    for i, row in df.iterrows():
+        # Question
+        pq = doc.add_paragraph()
+        _bold_run(pq, f"Question {i+1}: ", size=12)
+        _normal_run(pq, str(row[question_col]).strip())
+        doc.add_paragraph()
+
+        # Section
+        ps = doc.add_paragraph()
+        _bold_run(ps, "Section: ")
+        _normal_run(ps, str(row[sections_col]).strip())
+        doc.add_paragraph()
+
+        # Optional Heading
+        if heading_col and heading_col in df.columns:
+            ph = doc.add_paragraph()
+            _bold_run(ph, "Heading: ")
+            _normal_run(ph, str(row.get(heading_col, "")).strip())
+            doc.add_paragraph()
+
+        # MRMG Assessment
+        if mrmg_col and mrmg_col in df.columns:
+            pm = doc.add_paragraph()
+            _bold_run(pm, "MRMG Assessment: ")
+            _normal_run(pm, str(row.get(mrmg_col, "")).strip())
+            doc.add_paragraph()
+
+        # RFR
+        if rfr_col in df.columns:  # (fixed condition)
+            _add_heading(doc, "RFR", size=12)
+            _add_rfr_block(doc, row.get(rfr_col))
+
+        # Optional per-question Findings bullets
+        if finding_col and finding_col in df.columns:
+            _add_heading(doc, "Findings", size=12)
+            lines = _as_finding_lines(row.get(finding_col))
+            if lines:
+                for line in lines:
+                    p = doc.add_paragraph(style=None)
+                    try:
+                        p.style = doc.styles['List Bullet']
+                    except Exception:
+                        pass
+                    _normal_run(p, line)
+            else:
+                _normal_run(doc.add_paragraph(), "(No findings provided)")
+
+        # Modelling Team Response
+        pmt = doc.add_paragraph()
+        _bold_run(pmt, "Modelling Team Response", size=11)
+        for _ in range(max(0, blank_lines_under_mtr)):
+            doc.add_paragraph()
+        doc.add_paragraph()
+
+    doc.save(out_path)
     return out_path
