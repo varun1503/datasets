@@ -1,71 +1,31 @@
-def _add_findings_table(doc: Document, findings_df: Optional[pd.DataFrame]):
-    if findings_df is None or len(findings_df) == 0:
-        return
+Here’s a clean, rephrased version of your three tasks for creating them in a structured way:
 
-    # Map columns directly (your DataFrame already has exact names)
-    required = ["Risk Pillar", "IMVP question", "Finding Impact Category",
-                "Finding Details", "Finding status"]
-    missing = [c for c in required if c not in findings_df.columns]
-    if missing:
-        p = doc.add_paragraph()
-        r = p.add_run("Findings (required columns missing: " + ", ".join(missing) + ")")
-        r.bold = True
-        return
 
-    # Section heading
-    sec = doc.add_paragraph()
-    sr = sec.add_run("Findings")
-    sr.bold = True
-    sr.font.size = Pt(12)
+---
 
-    cap = doc.add_paragraph("Summary of Findings")
-    cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    cap.runs[0].bold = True
-    cap.runs[0].font.size = Pt(12)
+Task 1: Incorporate RFR and Findings into the Annotation Validation Report
 
-    # Build table
-    headers = required
-    table = doc.add_table(rows=1, cols=len(headers))
-    table.alignment = WD_TABLE_ALIGNMENT.CENTER
-    table.autofit = False
-    _force_table_borders(table, "000000")
+Description:
+In the annotation validation report, each section is associated with IMBP questions. These questions often have corresponding findings, and based on those findings, relevant RFR (Request for Response) questions need to be included. This task focuses on ensuring that the findings and RFRs are properly integrated into the annotated validation report under the correct sections.
 
-    # Header row
-    hdr = table.rows[0].cells
-    for i, h in enumerate(headers):
-        hdr[i].text = h
-        _set_cell_bg(hdr[i], "000000")
-        _format_header_cell(hdr[i])
 
-    # Compute usable page width (with a small safety margin)
-    secn = doc.sections[-1]
-    usable_in = _emu_to_inches(secn.page_width - secn.left_margin - secn.right_margin) - 0.05
+---
 
-    # Assign widths: small cols ~1.0–1.2", big col gets the rest
-    min_w = [1.2, 1.2, 1.5, 3.5, 1.2]   # initial guess in inches
-    # Adjust the 4th column ("Finding Details") dynamically
-    other_total = sum(min_w[i] for i in range(len(headers)) if i != 3)
-    details_width = max(3.0, usable_in - other_total)
-    widths = [min_w[0], min_w[1], min_w[2], details_width, min_w[4]]
+Task 2: Add Fixed Table to the Validation Report Template
 
-    # Apply widths
-    for i, w_in in enumerate(widths):
-        for cell in table.columns[i].cells:
-            cell.width = Inches(w_in)
+Description:
+A static reference table needs to be incorporated into the validation report. For this, a predefined (pretend) Word document containing the table is used. The table should be appended seamlessly into the main validation report document, preserving formatting and structure.
 
-    # Add rows
-    for _, r in findings_df.iterrows():
-        row_cells = table.add_row().cells
-        row_cells[0].text = str(r.get("Risk Pillar", "")).strip()
-        row_cells[1].text = str(r.get("IMVP question", "")).strip()
-        row_cells[2].text = str(r.get("Finding Impact Category", "")).strip()
-        row_cells[3].text = str(r.get("Finding Details", "")).strip()
-        row_cells[4].text = str(r.get("Finding status", "")).strip()
-        for c in row_cells:
-            c.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-            for p in c.paragraphs:
-                p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-                for run in p.runs:
-                    run.font.size = Pt(10)
 
-    doc.add_paragraph()  # spacer
+---
+
+Task 3: Include Table of Contents, Cover Page, and Findings into the Validation Report
+
+Description:
+This task involves enhancing the validation report with a professional structure. The report should begin with a cover page that includes the model ID, model description, and the date of report generation. Following the cover page, a dynamically generated table of contents should be added, covering all headings and subheadings. Afterward, the predefined document (pretend Word doc) should be appended, followed by the findings table and RFR findings, ensuring a logical and consistent flow.
+
+
+---
+
+Do you want me to also format these as a JSON/YAML task definition (so you can directly add them into your pipeline/task tracker), or keep them in this descriptive style?
+
