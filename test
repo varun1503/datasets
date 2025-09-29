@@ -1,58 +1,78 @@
-Here’s a crisp one-pager for your sprint review that captures all three tasks in a concise, professional way:
+def run_pipeline(source_docx: str, template_docx: str, mapping_csv: str, out_name: str = "") -> str:
+    """
+    Run end-to-end:
+      - source_docx: model document to copy content from
+      - template_docx: base validation template
+      - mapping_csv: CSV with columns: sections, text, (optional) Answer
+      - out_name: optional output .docx name
+    """
+    logging.basicConfig(level=logging.INFO)
+    df = pd.read_csv(mapping_csv).fillna('')
+    required = {'sections', 'text'}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Mapping CSV missing columns: {missing}. Need at least: {required}")
 
+    source = ModelDoc(source_docx)
+    dest = ValReport(template_docx)
 
----
+    # ---------- NEW: make a marker BEFORE "MRMG Assessment" once ----------
+    MRMG_HDG = "MRMG Assessment"
+    MRMG_MARKER = "<<__MODEL_BEFORE_MRMG__>>"
 
-Sprint Review – One Pager
+    # Implement this tiny helper in ValReport if you don't have it:
+    #   - find the paragraph whose text matches MRMG_HDG (normalize spacing/case if needed)
+    #   - insert a new empty paragraph BEFORE it containing MRMG_MARKER (unique text)
+    #   - do nothing if a paragraph with MRMG_MARKER already exists
+    dest.ensure_marker_before(MRMG_HDG, MRMG_MARKER)
+    # ----------------------------------------------------------------------
 
-Objective
+    mapping = df.to_dict(orient='records')
 
-Enhance the Validation Report pipeline by integrating RFRs, findings, static tables, and structural elements (cover page, TOC) to ensure completeness and compliance.
+    for i, row in enumerate(mapping):
+        anchor = row.get('text', '')
+        sections_raw = row.get('sections', '')
+        answers = row.get('mrmg_answer', '')
 
+        # redirect anchor if target is MRMG Assessment -> paste BEFORE via marker
+        anchor_norm = (anchor or '').strip().lower()
+        anchor_effective = MRMG_MARKER if anchor_norm == MRMG_HDG.lower() else anchor
 
----
+        candidates = [s.strip() for s in sections_raw.split(';') if s.strip()]
+        for s in reversed(candidates):
+            try:
+                section_title, content = source.copy_content(start=s)
+                section_title = strip_section_number(section_title)
 
-Key Tasks Completed
+                # paste at anchor_effective (marker when MRMG Assessment)
+                dest.paste_content(content, anchor_effective, str(i+1))
 
-1. RFR & Findings Integration
+                dest.put_text(anchor_effective, f'Model Document Section: {section_title}', 'magenta')
+                if answers:
+                    dest.put_text(anchor_effective, str(answers), 'yellow')
+                break
+            except Exception as e:
+                dest.put_text(anchor_effective, f'ERROR copying "{s}": {e}', 'red')
 
-Incorporated RFR questions and findings into the annotated validation report.
+    out_file = out_name or (os.path.splitext(os.path.basename(source_docx))[0] + " - Validation Report (Auto).docx")
+    final_path = dest.save(out_file)
+    logging.info(f"✅ Report generated: {final_path}")
+    return final_path
+def ensure_marker_before(self, heading_text: str, marker_text: str):
+    """
+    Insert a marker paragraph with `marker_text` immediately BEFORE the paragraph
+    whose text matches `heading_text`. Idempotent (won't insert twice).
+    Assumes paste_content/put_text can resolve anchors by exact paragraph text.
+    """
+    # 1) if marker already exists, return
+    if self._find_paragraph_by_text(marker_text) is not None:
+        return
 
-Linked IMBP questions → Findings → RFRs within each section.
+    # 2) locate heading paragraph
+    p = self._find_paragraph_by_text(heading_text, normalize=True)
+    if p is None:
+        return  # silently skip if heading not found
 
-
-
-2. Static Table Inclusion
-
-Added a predefined fixed table from the pretend Word document into the validation report template.
-
-Ensured seamless formatting and proper placement.
-
-
-
-3. Cover Page, TOC & Findings Table
-
-Created cover page with model ID, model description, and validation date.
-
-Added dynamic table of contents with headings and subheadings.
-
-Appended pretend doc, findings table, and RFR findings for a complete report package.
-
-
-
-
-
----
-
-Outcome
-
-Validation report now has end-to-end completeness: RFRs, findings, fixed tables, TOC, and cover page integrated.
-
-Ready for downstream ingestion and review.
-
-
-
----
-
-Do you want me to also make this visually styled in tabular format (like a summary table with columns: Task – Description – Outcome) so it looks more polished for the sprint deck?
-
+    # 3) insert a new paragraph before it and set its text to marker_text
+    new_p = p.insert_paragraph_before()
+    new_p.add_run(marker_text)
