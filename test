@@ -76,3 +76,78 @@ def ensure_marker_before(self, heading_text: str, marker_text: str):
     # 3) insert a new paragraph before it and set its text to marker_text
     new_p = p.insert_paragraph_before()
     new_p.add_run(marker_text)
+class ValReport:
+    def __init__(self, template_docx: str):
+        from docx import Document
+        self.doc = Document(template_docx)
+
+    def _find_paragraph_by_text(self, text: str, normalize: bool = False):
+        """
+        Return the first paragraph that matches `text`.
+        If normalize=True, compare in lowercase and strip extra whitespace.
+        """
+        target = text.strip()
+        if normalize:
+            target = target.lower()
+
+        for p in self.doc.paragraphs:
+            txt = p.text.strip()
+            if normalize:
+                txt = txt.lower()
+            if txt == target:
+                return p
+        return None
+
+    def ensure_marker_before(self, heading_text: str, marker_text: str):
+        """
+        Insert a marker paragraph with `marker_text` immediately BEFORE the paragraph
+        whose text matches `heading_text`. Idempotent.
+        """
+        # Already there?
+        if self._find_paragraph_by_text(marker_text):
+            return
+
+        heading_p = self._find_paragraph_by_text(heading_text, normalize=True)
+        if not heading_p:
+            return  # heading not found
+
+        new_p = heading_p.insert_paragraph_before()
+        new_p.add_run(marker_text)
+
+class ValReport:
+    def __init__(self, template_docx: str):
+        from docx import Document
+        self.doc = Document(template_docx)
+
+    def _find_paragraph_by_text(self, text: str, normalize: bool = False):
+        """
+        Return the first paragraph that matches `text`.
+        If normalize=True, compare in lowercase and strip extra whitespace.
+        """
+        target = text.strip()
+        if normalize:
+            target = target.lower()
+
+        for p in self.doc.paragraphs:
+            txt = p.text.strip()
+            if normalize:
+                txt = txt.lower()
+            if txt == target:
+                return p
+        return None
+
+    def ensure_marker_before(self, heading_text: str, marker_text: str):
+        """
+        Insert a marker paragraph with `marker_text` immediately BEFORE the paragraph
+        whose text matches `heading_text`. Idempotent.
+        """
+        # Already there?
+        if self._find_paragraph_by_text(marker_text):
+            return
+
+        heading_p = self._find_paragraph_by_text(heading_text, normalize=True)
+        if not heading_p:
+            return  # heading not found
+
+        new_p = heading_p.insert_paragraph_before()
+        new_p.add_run(marker_text)
