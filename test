@@ -1,153 +1,30 @@
-def run_pipeline(source_docx: str, template_docx: str, mapping_csv: str, out_name: str = "") -> str:
-    """
-    Run end-to-end:
-      - source_docx: model document to copy content from
-      - template_docx: base validation template
-      - mapping_csv: CSV with columns: sections, text, (optional) Answer
-      - out_name: optional output .docx name
-    """
-    logging.basicConfig(level=logging.INFO)
-    df = pd.read_csv(mapping_csv).fillna('')
-    required = {'sections', 'text'}
-    missing = required - set(df.columns)
-    if missing:
-        raise ValueError(f"Mapping CSV missing columns: {missing}. Need at least: {required}")
+Got it 👍 You want just one detailed point per diagram (a single summary statement that captures what the whole diagram/block does).
 
-    source = ModelDoc(source_docx)
-    dest = ValReport(template_docx)
+Here’s the simplified version:
 
-    # ---------- NEW: make a marker BEFORE "MRMG Assessment" once ----------
-    MRMG_HDG = "MRMG Assessment"
-    MRMG_MARKER = "<<__MODEL_BEFORE_MRMG__>>"
 
-    # Implement this tiny helper in ValReport if you don't have it:
-    #   - find the paragraph whose text matches MRMG_HDG (normalize spacing/case if needed)
-    #   - insert a new empty paragraph BEFORE it containing MRMG_MARKER (unique text)
-    #   - do nothing if a paragraph with MRMG_MARKER already exists
-    dest.ensure_marker_before(MRMG_HDG, MRMG_MARKER)
-    # ----------------------------------------------------------------------
+---
 
-    mapping = df.to_dict(orient='records')
+Diagram 1 – ACE Workflow Platform (On-Premise to S3)
 
-    for i, row in enumerate(mapping):
-        anchor = row.get('text', '')
-        sections_raw = row.get('sections', '')
-        answers = row.get('mrmg_answer', '')
+📌 Transfers documents from Griffin (Docs Center) through the ACE workflow platform and stores them securely in S3 within the on-prem environment.
 
-        # redirect anchor if target is MRMG Assessment -> paste BEFORE via marker
-        anchor_norm = (anchor or '').strip().lower()
-        anchor_effective = MRMG_MARKER if anchor_norm == MRMG_HDG.lower() else anchor
 
-        candidates = [s.strip() for s in sections_raw.split(';') if s.strip()]
-        for s in reversed(candidates):
-            try:
-                section_title, content = source.copy_content(start=s)
-                section_title = strip_section_number(section_title)
+---
 
-                # paste at anchor_effective (marker when MRMG Assessment)
-                dest.paste_content(content, anchor_effective, str(i+1))
+Diagram 2 – Data Processing API (Hydra-GCP)
 
-                dest.put_text(anchor_effective, f'Model Document Section: {section_title}', 'magenta')
-                if answers:
-                    dest.put_text(anchor_effective, str(answers), 'yellow')
-                break
-            except Exception as e:
-                dest.put_text(anchor_effective, f'ERROR copying "{s}": {e}', 'red')
+📌 Parses PDF files, extracts required information, validates adequacy and accuracy, and processes the file within Hydra on GCP.
 
-    out_file = out_name or (os.path.splitext(os.path.basename(source_docx))[0] + " - Validation Report (Auto).docx")
-    final_path = dest.save(out_file)
-    logging.info(f"✅ Report generated: {final_path}")
-    return final_path
-def ensure_marker_before(self, heading_text: str, marker_text: str):
-    """
-    Insert a marker paragraph with `marker_text` immediately BEFORE the paragraph
-    whose text matches `heading_text`. Idempotent (won't insert twice).
-    Assumes paste_content/put_text can resolve anchors by exact paragraph text.
-    """
-    # 1) if marker already exists, return
-    if self._find_paragraph_by_text(marker_text) is not None:
-        return
 
-    # 2) locate heading paragraph
-    p = self._find_paragraph_by_text(heading_text, normalize=True)
-    if p is None:
-        return  # silently skip if heading not found
+---
 
-    # 3) insert a new paragraph before it and set its text to marker_text
-    new_p = p.insert_paragraph_before()
-    new_p.add_run(marker_text)
-class ValReport:
-    def __init__(self, template_docx: str):
-        from docx import Document
-        self.doc = Document(template_docx)
+Diagram 3 – Business Rule & Output Layer (LUMI/GCP)
 
-    def _find_paragraph_by_text(self, text: str, normalize: bool = False):
-        """
-        Return the first paragraph that matches `text`.
-        If normalize=True, compare in lowercase and strip extra whitespace.
-        """
-        target = text.strip()
-        if normalize:
-            target = target.lower()
+📌 Applies business rules to extracted data, validates against the database, generates reports, and stores final results in LUMI Data Warehouse on GCP.
 
-        for p in self.doc.paragraphs:
-            txt = p.text.strip()
-            if normalize:
-                txt = txt.lower()
-            if txt == target:
-                return p
-        return None
 
-    def ensure_marker_before(self, heading_text: str, marker_text: str):
-        """
-        Insert a marker paragraph with `marker_text` immediately BEFORE the paragraph
-        whose text matches `heading_text`. Idempotent.
-        """
-        # Already there?
-        if self._find_paragraph_by_text(marker_text):
-            return
+---
 
-        heading_p = self._find_paragraph_by_text(heading_text, normalize=True)
-        if not heading_p:
-            return  # heading not found
+Do you want me to also make these short one-liners appear inside the diagram blocks (so each diagram has one central description), or keep them as external notes?
 
-        new_p = heading_p.insert_paragraph_before()
-        new_p.add_run(marker_text)
-
-class ValReport:
-    def __init__(self, template_docx: str):
-        from docx import Document
-        self.doc = Document(template_docx)
-
-    def _find_paragraph_by_text(self, text: str, normalize: bool = False):
-        """
-        Return the first paragraph that matches `text`.
-        If normalize=True, compare in lowercase and strip extra whitespace.
-        """
-        target = text.strip()
-        if normalize:
-            target = target.lower()
-
-        for p in self.doc.paragraphs:
-            txt = p.text.strip()
-            if normalize:
-                txt = txt.lower()
-            if txt == target:
-                return p
-        return None
-
-    def ensure_marker_before(self, heading_text: str, marker_text: str):
-        """
-        Insert a marker paragraph with `marker_text` immediately BEFORE the paragraph
-        whose text matches `heading_text`. Idempotent.
-        """
-        # Already there?
-        if self._find_paragraph_by_text(marker_text):
-            return
-
-        heading_p = self._find_paragraph_by_text(heading_text, normalize=True)
-        if not heading_p:
-            return  # heading not found
-
-        new_p = heading_p.insert_paragraph_before()
-        new_p.add_run(marker_text)
