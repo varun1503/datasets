@@ -1,9 +1,8 @@
 from docx import Document
 from docx.text.paragraph import Paragraph
 from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
-import pandas as pd
 import json, ast, re
+import pandas as pd
 
 def _to_dict_safe(x):
     if isinstance(x, dict):
@@ -30,7 +29,6 @@ def _insert_paragraph_after(paragraph: Paragraph, text: str = "") -> Paragraph:
     return new_para
 
 def _norm(s: str) -> str:
-    # collapse multiple spaces, lowercase
     return re.sub(r"\s+", " ", (s or "")).strip().lower()
 
 def replace_finding_details_section(
@@ -39,59 +37,75 @@ def replace_finding_details_section(
     output_path: str,
     finding_col: str = "Finding Details",
     rfr_col: str = "rfr_value",
+    mrmg_col: str = "MRMG_Assessment",
     end_heading_text: str = "Validation Assessment Details",
 ):
+    """
+    Removes everything from 'Finding Details' (inclusive)
+    through 'Validation Assessment Details' (inclusive),
+    then inserts new formatted findings/challenges/responses/assessments.
+    """
     doc = Document(doc_path)
     paragraphs = doc.paragraphs
 
-    # 1) find "Finding Details" heading
+    # 1️⃣ Find 'Finding Details' heading
     start_idx = None
     for i, p in enumerate(paragraphs):
         if "finding details" in _norm(p.text):
             start_idx = i
             break
     if start_idx is None:
-        raise ValueError("Could not find a paragraph containing 'Finding Details'.")
+        raise ValueError("Could not find 'Finding Details' section.")
 
-    # 2) find the end marker heading "Validation Assessment Details"
+    # 2️⃣ Find 'Validation Assessment Details' heading
     end_idx = None
-    end_norm = _norm(end_heading_text)
     for j in range(start_idx + 1, len(paragraphs)):
-        if end_norm in _norm(paragraphs[j].text):
+        if _norm(end_heading_text) in _norm(paragraphs[j].text):
             end_idx = j
             break
     if end_idx is None:
-        # fallback: if not found, default to end of doc
         end_idx = len(paragraphs)
 
-    # 3) delete everything after 'Finding Details' up to (but not including) end heading
-    for k in range(end_idx - 1, start_idx, -1):
+    # 3️⃣ Delete inclusive range: from 'Finding Details' to 'Validation Assessment Details'
+    for k in range(end_idx, start_idx - 1, -1):
         elm = paragraphs[k]._element
         elm.getparent().remove(elm)
 
-    # 4) insert new blocks after the 'Finding Details' heading
-    anchor = paragraphs[start_idx]
-    m_counter = 1
+    # 4️⃣ Insert new content after the removed section
+    anchor = doc.paragraphs[start_idx - 1] if start_idx > 0 else doc.paragraphs[0]
 
+    m_counter = 1
     for _, row in df.iterrows():
         finding_text = str(row.get(finding_col, "") or "").strip()
         rfr_dict = _to_dict_safe(row.get(rfr_col, {}))
+        mrmg_text = str(row.get(mrmg_col, "") or "").strip()
+
+        # Handle multiple challenge-response pairs
         items = list(rfr_dict.items()) or [( "", "" )]
 
         for q, resp in items:
+            # Finding
             p = _insert_paragraph_after(anchor, f"Finding M{m_counter}")
             if p.runs: p.runs[0].bold = True
             p = _insert_paragraph_after(p, finding_text)
 
+            # Challenge
             p = _insert_paragraph_after(p, f"Challenge M{m_counter}")
             if p.runs: p.runs[0].bold = True
             p = _insert_paragraph_after(p, str(q).strip())
 
+            # Modeling Team Response
             p = _insert_paragraph_after(p, f"Modeling Team Response M{m_counter}")
             if p.runs: p.runs[0].bold = True
             p = _insert_paragraph_after(p, str(resp).strip())
 
-            p = _insert_paragraph_after(p, "")  # spacer
+            # MRMG Assessment
+            p = _insert_paragraph_after(p, f"MRMG Assessment M{m_counter}")
+            if p.runs: p.runs[0].bold = True
+            p = _insert_paragraph_after(p, mrmg_text)
+
+            # Spacer
+            p = _insert_paragraph_after(p, "")
             anchor = p
             m_counter += 1
 
