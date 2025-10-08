@@ -3,108 +3,95 @@ from docx.text.paragraph import Paragraph
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 import pandas as pd
-import json, ast
+import json, ast, re
 
 def _to_dict_safe(x):
-    """Return x if dict; parse if it's a JSON/Python string; else {}."""
     if isinstance(x, dict):
         return x
     if isinstance(x, str):
-        x = x.strip()
-        if not x:
+        s = x.strip()
+        if not s:
             return {}
-        # Try JSON then literal_eval
         try:
-            return json.loads(x)
+            return json.loads(s)
         except Exception:
             try:
-                return ast.literal_eval(x)
+                return ast.literal_eval(s)
             except Exception:
                 return {}
     return {}
 
 def _insert_paragraph_after(paragraph: Paragraph, text: str = "") -> Paragraph:
-    """Create and return a new paragraph *after* the given paragraph."""
     new_p = OxmlElement("w:p")
     paragraph._p.addnext(new_p)
     new_para = Paragraph(new_p, paragraph._parent)
     if text:
-        run = new_para.add_run(text)
+        new_para.add_run(text)
     return new_para
 
-def replace_finding_details_section(doc_path: str, df: pd.DataFrame, output_path: str,
-                                    finding_col: str = "Finding Details",
-                                    rfr_col: str = "rfr_value"):
-    """
-    - Finds the paragraph containing 'Finding Details' (case-insensitive).
-    - Deletes everything until next Heading.
-    - Inserts for each row:
-        Finding M#                <- df[finding_col]
-        Challenge M#              <- dict key(s) from df[rfr_col]
-        Modeling Team Response M# <- dict value(s) from df[rfr_col]
-      If multiple key/value pairs exist, they’re rendered as separate M# blocks.
-    """
+def _norm(s: str) -> str:
+    # collapse multiple spaces, lowercase
+    return re.sub(r"\s+", " ", (s or "")).strip().lower()
+
+def replace_finding_details_section(
+    doc_path: str,
+    df: pd.DataFrame,
+    output_path: str,
+    finding_col: str = "Finding Details",
+    rfr_col: str = "rfr_value",
+    end_heading_text: str = "Validation Assessment Details",
+):
     doc = Document(doc_path)
     paragraphs = doc.paragraphs
 
-    # 1) Locate 'Finding Details' header and the end of section.
-    start_idx, end_idx = None, None
+    # 1) find "Finding Details" heading
+    start_idx = None
     for i, p in enumerate(paragraphs):
-        if "finding details" in (p.text or "").strip().lower():
+        if "finding details" in _norm(p.text):
             start_idx = i
             break
-
     if start_idx is None:
         raise ValueError("Could not find a paragraph containing 'Finding Details'.")
 
-    # Find next Heading after start to know where this section ends
+    # 2) find the end marker heading "Validation Assessment Details"
+    end_idx = None
+    end_norm = _norm(end_heading_text)
     for j in range(start_idx + 1, len(paragraphs)):
-        p = paragraphs[j]
-        if p.style and p.style.name and p.style.name.startswith("Heading"):
+        if end_norm in _norm(paragraphs[j].text):
             end_idx = j
             break
     if end_idx is None:
+        # fallback: if not found, default to end of doc
         end_idx = len(paragraphs)
 
-    # 2) Delete everything between start and end (keep the 'Finding Details' heading itself)
+    # 3) delete everything after 'Finding Details' up to (but not including) end heading
     for k in range(end_idx - 1, start_idx, -1):
         elm = paragraphs[k]._element
         elm.getparent().remove(elm)
 
-    # 3) Insert fresh content *after* the 'Finding Details' heading
-    anchor = paragraphs[start_idx]  # we will insert after this
+    # 4) insert new blocks after the 'Finding Details' heading
+    anchor = paragraphs[start_idx]
     m_counter = 1
 
     for _, row in df.iterrows():
         finding_text = str(row.get(finding_col, "") or "").strip()
         rfr_dict = _to_dict_safe(row.get(rfr_col, {}))
-
-        # If there are no pairs in rfr_dict, still render a single block with empty challenge/response
         items = list(rfr_dict.items()) or [( "", "" )]
 
         for q, resp in items:
-            # Finding M#
             p = _insert_paragraph_after(anchor, f"Finding M{m_counter}")
-            if p.runs:
-                p.runs[0].bold = True
+            if p.runs: p.runs[0].bold = True
             p = _insert_paragraph_after(p, finding_text)
 
-            # Challenge M#
             p = _insert_paragraph_after(p, f"Challenge M{m_counter}")
-            if p.runs:
-                p.runs[0].bold = True
+            if p.runs: p.runs[0].bold = True
             p = _insert_paragraph_after(p, str(q).strip())
 
-            # Modeling Team Response M#
             p = _insert_paragraph_after(p, f"Modeling Team Response M{m_counter}")
-            if p.runs:
-                p.runs[0].bold = True
+            if p.runs: p.runs[0].bold = True
             p = _insert_paragraph_after(p, str(resp).strip())
 
-            # Spacer line
-            p = _insert_paragraph_after(p, "")
-
-            # Move anchor forward so subsequent blocks keep correct order
+            p = _insert_paragraph_after(p, "")  # spacer
             anchor = p
             m_counter += 1
 
