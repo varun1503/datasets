@@ -1,126 +1,89 @@
-import os, time, logging
+from docx import Document
+from docx.text.paragraph import Paragraph
 import pandas as pd
 
-# import your classes
-# from your_module import ModelDoc, ValReport
-
-def run_pipeline(
-    source_docx: str,
-    template_docx: str,
-    mapping_csv: str,
-    out_name: str = "",
-    *,
-    model_value: str | None = None,     # only used for logging (replaces model.value)
-    impact_value: str | None = None,    # only used for logging (replaces impact.value)
-    scopes_value: list[str] | None = None,  # replaces scopes.value (pass a list or None)
-    logpath: str | None = None,
-    print_progress: bool = True
-) -> str:
+def replace_finding_details_section(doc_path: str, df: pd.DataFrame, output_path: str):
     """
-    Run end-to-end (keeps your original logic):
-      - source_docx: model document to copy content from
-      - template_docx: base validation template
-      - mapping_csv: CSV with columns: sections, text, (optional) mrmg_answer/Answer
-      - out_name: optional output .docx name
+    Opens an existing Word doc, finds the 'Finding Details' section,
+    removes all content below it until the next heading, and inserts
+    formatted findings/challenges/responses from the given DataFrame.
     """
 
-    # --- setup & logging (same spirit as your code) ---
-    start_time = time.time()
-    user = os.path.expanduser('~').split('/')[-1]
-    if logpath is None:
-        logpath = os.path.join(os.getcwd(), 'user_logs.log')
+    doc = Document(doc_path)
+    paragraphs = doc.paragraphs
 
-    logger = logging.getLogger(__name__)
-    # Ensure we have a handler to the desired file
-    if not logging.getLogger().handlers:
-        logging.basicConfig(filename=logpath, format='%(asctime)s%(message)s', level=logging.INFO)
-    else:
-        has_same = False
-        for h in logging.getLogger().handlers:
-            if getattr(h, "baseFilename", None) == os.path.abspath(logpath):
-                has_same = True
-                break
-        if not has_same:
-            fh = logging.FileHandler(logpath)
-            fh.setFormatter(logging.Formatter('%(asctime)s%(message)s'))
-            fh.setLevel(logging.INFO)
-            logging.getLogger().addHandler(fh)
+    # ---------- 1️⃣ Find the start and end of 'Finding Details' section ----------
+    start_idx = None
+    end_idx = None
 
-    # scope suffix (your original widget logic)
-    if scopes_value and len(scopes_value) > 0:
-        scope_suffix = '_' + scopes_value[0]
-    else:
-        scope_suffix = ''
+    for i, p in enumerate(paragraphs):
+        text = p.text.strip().lower()
+        if "finding details" in text:
+            start_idx = i
+            continue
 
-    # paths
-    filepath = os.path.abspath(source_docx)
-    base_path = os.path.abspath(template_docx)
-    mapping_path = os.path.abspath(mapping_csv)
+        # If we've found start, next bold heading signals the end
+        if start_idx is not None and (p.style.name.startswith("Heading") or "page" in text.lower()):
+            end_idx = i
+            break
 
-    # output name (your pattern)
-    file_name = out_name or (os.path.basename(filepath)[:-5] + ' - Validation Report (Auto).docx')
+    if start_idx is None:
+        raise ValueError("Could not find 'Finding Details' section in the document.")
 
-    # objects
-    source = ModelDoc(filepath)
-    dest = ValReport(base_path)
+    if end_idx is None:
+        end_idx = len(paragraphs)
 
-    # CSV read: keep exactly your logic (fillna -> dict records)
-    mapping = pd.read_csv(mapping_path).fillna('').to_dict(orient='records')
+    # ---------- 2️⃣ Delete existing content under 'Finding Details' ----------
+    remove_indices = list(range(start_idx + 1, end_idx))
+    for idx in reversed(remove_indices):
+        p = paragraphs[idx]._element
+        p.getparent().remove(p)
 
-    # processing loop (kept same behavior)
-    total = max(len(mapping), 1)
-    for i, row in enumerate(mapping, 1):
-        if print_progress:
-            print(f'Your validation report is getting populated...\nProgress: {round(i/total * 100, 0)}%')
+    # ---------- 3️⃣ Insert new content ----------
+    insert_paragraph = paragraphs[start_idx]
 
-        sections_field = str(row.get('sections', ''))
-        # your original used '; ' — also tolerate ';' if needed
-        parts = sections_field.split('; ') if '; ' in sections_field else sections_field.split(';')
+    for i, row in df.iterrows():
+        # Finding
+        p = insert_paragraph.insert_paragraph_before(f"Finding M{i+1}")
+        r = p.runs[0]
+        r.bold = True
 
-        for s in reversed(parts):
-            s = s.strip()
-            if not s:
-                continue
-            if print_progress:
-                print(s, row.get('text', ''))
-            try:
-                section_title, c = source.copy_content(start=s)
-                dest.paste_content(c, row.get('text', ''), str(i))
-                dest.put_text(row.get('text', ''), 'Model Document Section: ' + section_title, 'magenta')
-                dest.put_text(row.get('text', ''), ' ', '')
-                break  # success for this row
-            except Exception:
-                try:
-                    dest.put_text(row.get('text', ''), 'ERROR: Model Document Section ' + s, 'red')
-                    if print_progress:
-                        print('ERROR: ', (s, row.get('text', '')))
-                except Exception:
-                    if print_progress:
-                        print('ERROR: The following mapping is incorrect:\n', (s, row.get('text', '')))
-                # continue trying remaining candidates
+        p = insert_paragraph.insert_paragraph_before(str(row.get("Finding Details", "")))
+        p.style = "Normal"
 
-    # save
-    final_path = dest.save(file_name)
+        # Challenge
+        p = insert_paragraph.insert_paragraph_before(f"Challenge M{i+1}")
+        r = p.runs[0]
+        r.bold = True
 
-    end_time = time.time()
-    # Logging - userID : filename : Button configs : runtime
-    logger.info(f";{user};{os.path.basename(filepath)[:-5]};{(model_value, impact_value, scopes_value)};{end_time - start_time:.2f}")
+        p = insert_paragraph.insert_paragraph_before(str(row.get("RFR Key Question", "")))
+        p.style = "Normal"
 
-    if print_progress:
-        print('Completed! Please download the report now')
+        # Modeling Team Response
+        p = insert_paragraph.insert_paragraph_before(f"Modeling Team Response M{i+1}")
+        r = p.runs[0]
+        r.bold = True
 
-    return os.path.abspath(final_path)
+        p = insert_paragraph.insert_paragraph_before(str(row.get("Modeling Team Response", "")))
+        p.style = "Normal"
 
-if __name__ == "__main__":
-    out = run_pipeline(
-        source_docx=r"data_type\5211_IVR_Intent_Recognition_US_Market_v1.1_Documentation.docx",
-        template_docx=r"base\test_C.docx",               # <-- pass your real template path
-        mapping_csv=r"data_type\Technology_C.csv",
-        out_name="",                                      # leave "" to auto-name from source
-        model_value="test",                               # only for logging line
-        impact_value="C",                                 # only for logging line
-        scopes_value=["Retail"],                          # or []/None
-        logpath=r"c:\Users\vvaishy\Documents\hpt_rasa\mrmg_preprocess\600004454-validationreport\user_logs.log",
-        print_progress=True
-    )
-    print("Saved to:", out)
+        # Add a blank line between findings
+        insert_paragraph.insert_paragraph_before("")
+
+    # ---------- 4️⃣ Save updated document ----------
+    doc.save(output_path)
+    print(f"✅ Updated document saved to: {output_path}")
+
+
+# Example usage
+df = pd.DataFrame({
+    "Finding Details": ["Model trained for US market without retraining for ANZ/Canada"],
+    "RFR Key Question": ["Model trained only on US data (2022–23), now used for ANZ/Canada"],
+    "Modeling Team Response": ["Modeling team added key assumptions for retraining."]
+})
+
+replace_finding_details_section(
+    doc_path="your_existing_template.docx",
+    df=df,
+    output_path="updated_validation_report.docx"
+)
