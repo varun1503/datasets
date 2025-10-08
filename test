@@ -5,33 +5,20 @@ import json, ast, re
 import pandas as pd
 
 def _to_dict_safe(x):
-    if isinstance(x, dict):
-        return x
+    if isinstance(x, dict): return x
     if isinstance(x, str):
         s = x.strip()
-        if not s:
-            return {}
-        try:
-            return json.loads(s)
+        if not s: return {}
+        try: return json.loads(s)
         except Exception:
-            try:
-                return ast.literal_eval(s)
-            except Exception:
-                return {}
+            try: return ast.literal_eval(s)
+            except Exception: return {}
     return {}
 
-def _insert_paragraph_after(paragraph: Paragraph, text: str = "") -> Paragraph:
-    new_p = OxmlElement("w:p")
-    paragraph._p.addnext(new_p)
-    new_para = Paragraph(new_p, paragraph._parent)
-    if text:
-        new_para.add_run(text)
-    return new_para
-
-def _norm(s: str) -> str:
+def _norm(s):  # normalize for matching
     return re.sub(r"\s+", " ", (s or "")).strip().lower()
 
-def replace_finding_details_section(
+def replace_finding_details_section_keep_headings(
     doc_path: str,
     df: pd.DataFrame,
     output_path: str,
@@ -40,74 +27,73 @@ def replace_finding_details_section(
     mrmg_col: str = "MRMG_Assessment",
     end_heading_text: str = "Validation Assessment Details",
 ):
-    """
-    Removes everything from 'Finding Details' (inclusive)
-    through 'Validation Assessment Details' (inclusive),
-    then inserts new formatted findings/challenges/responses/assessments.
-    """
     doc = Document(doc_path)
     paragraphs = doc.paragraphs
 
-    # 1️⃣ Find 'Finding Details' heading
-    start_idx = None
-    for i, p in enumerate(paragraphs):
-        if "finding details" in _norm(p.text):
-            start_idx = i
-            break
+    # 1) find start ("Finding Details") and end ("Validation Assessment Details")
+    start_idx = next((i for i,p in enumerate(paragraphs) if "finding details" in _norm(p.text)), None)
     if start_idx is None:
-        raise ValueError("Could not find 'Finding Details' section.")
+        raise ValueError("Could not find 'Finding Details' heading.")
 
-    # 2️⃣ Find 'Validation Assessment Details' heading
-    end_idx = None
-    for j in range(start_idx + 1, len(paragraphs)):
-        if _norm(end_heading_text) in _norm(paragraphs[j].text):
-            end_idx = j
-            break
+    end_idx = next((j for j in range(start_idx+1, len(paragraphs))
+                    if _norm(end_heading_text) in _norm(paragraphs[j].text)), None)
     if end_idx is None:
-        end_idx = len(paragraphs)
+        raise ValueError(f"Could not find '{end_heading_text}' heading.")
 
-    # 3️⃣ Delete inclusive range: from 'Finding Details' to 'Validation Assessment Details'
-    for k in range(end_idx, start_idx - 1, -1):
+    # 2) delete everything BETWEEN (keep both headings)
+    for k in range(end_idx-1, start_idx, -1):
         elm = paragraphs[k]._element
         elm.getparent().remove(elm)
 
-    # 4️⃣ Insert new content after the removed section
-    anchor = doc.paragraphs[start_idx - 1] if start_idx > 0 else doc.paragraphs[0]
+    # 3) insert new content immediately BEFORE the end heading
+    end_heading_para = paragraphs[start_idx+1]  # after deletions, this is now the end heading
 
-    m_counter = 1
+    # helper: insert paragraph BEFORE a given paragraph
+    def insert_before(anchor_para: Paragraph, text: str = "") -> Paragraph:
+        new_p = OxmlElement("w:p")
+        anchor_para._p.addprevious(new_p)
+        new_para = Paragraph(new_p, anchor_para._parent)
+        if text: new_para.add_run(text)
+        return new_para
+
+    # Build items so M1 appears first (insert in reverse)
+    blocks = []
+    m = 1
     for _, row in df.iterrows():
         finding_text = str(row.get(finding_col, "") or "").strip()
         rfr_dict = _to_dict_safe(row.get(rfr_col, {}))
         mrmg_text = str(row.get(mrmg_col, "") or "").strip()
+        pairs = list(rfr_dict.items()) or [("", "")]
+        for q, resp in pairs:
+            blocks.append({
+                "m": m,
+                "finding": finding_text,
+                "challenge": str(q).strip(),
+                "response": str(resp).strip(),
+                "mrmg": mrmg_text
+            })
+            m += 1
 
-        # Handle multiple challenge-response pairs
-        items = list(rfr_dict.items()) or [( "", "" )]
+    # Insert in reverse so the earliest block ends up farthest from the end heading (M1 first).
+    for b in reversed(blocks):
+        p = insert_before(end_heading_para, f"MRMG Assessment M{b['m']}")
+        if p.runs: p.runs[0].bold = True
+        p = insert_before(end_heading_para, b["mrmg"])
 
-        for q, resp in items:
-            # Finding
-            p = _insert_paragraph_after(anchor, f"Finding M{m_counter}")
-            if p.runs: p.runs[0].bold = True
-            p = _insert_paragraph_after(p, finding_text)
+        p = insert_before(end_heading_para, f"Modeling Team Response M{b['m']}")
+        if p.runs: p.runs[0].bold = True
+        p = insert_before(end_heading_para, b["response"])
 
-            # Challenge
-            p = _insert_paragraph_after(p, f"Challenge M{m_counter}")
-            if p.runs: p.runs[0].bold = True
-            p = _insert_paragraph_after(p, str(q).strip())
+        p = insert_before(end_heading_para, f"Challenge M{b['m']}")
+        if p.runs: p.runs[0].bold = True
+        p = insert_before(end_heading_para, b["challenge"])
 
-            # Modeling Team Response
-            p = _insert_paragraph_after(p, f"Modeling Team Response M{m_counter}")
-            if p.runs: p.runs[0].bold = True
-            p = _insert_paragraph_after(p, str(resp).strip())
+        p = insert_before(end_heading_para, f"Finding M{b['m']}")
+        if p.runs: p.runs[0].bold = True
+        p = insert_before(end_heading_para, b["finding"])
 
-            # MRMG Assessment
-            p = _insert_paragraph_after(p, f"MRMG Assessment M{m_counter}")
-            if p.runs: p.runs[0].bold = True
-            p = _insert_paragraph_after(p, mrmg_text)
-
-            # Spacer
-            p = _insert_paragraph_after(p, "")
-            anchor = p
-            m_counter += 1
+        # spacer
+        insert_before(end_heading_para, "")
 
     doc.save(output_path)
     print(f"✅ Updated document saved to: {output_path}")
