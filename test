@@ -1,8 +1,8 @@
 import os, time, logging
 import pandas as pd
 
-# assumes you already have:
-# from your_module import ModelDoc, ValReport, strip_section_number
+# import your classes
+# from your_module import ModelDoc, ValReport
 
 def run_pipeline(
     source_docx: str,
@@ -10,130 +10,117 @@ def run_pipeline(
     mapping_csv: str,
     out_name: str = "",
     *,
-    model_value: str | None = None,
-    impact_value: str | None = None,
-    scope_value: str | None = None,
+    model_value: str | None = None,     # only used for logging (replaces model.value)
+    impact_value: str | None = None,    # only used for logging (replaces impact.value)
+    scopes_value: list[str] | None = None,  # replaces scopes.value (pass a list or None)
     logpath: str | None = None,
     print_progress: bool = True
 ) -> str:
     """
-    Run end-to-end:
+    Run end-to-end (keeps your original logic):
       - source_docx: model document to copy content from
       - template_docx: base validation template
-      - mapping_csv: CSV with columns: sections, text, (optional) mrmg_answer
+      - mapping_csv: CSV with columns: sections, text, (optional) mrmg_answer/Answer
       - out_name: optional output .docx name
-    Notes:
-      - Preserves your CSV read logic and paste behavior.
-      - No notebook/widgets required.
     """
 
-    # --- setup & logging (kept equivalent to your snippet) ---
+    # --- setup & logging (same spirit as your code) ---
     start_time = time.time()
     user = os.path.expanduser('~').split('/')[-1]
-
     if logpath is None:
-        logpath = os.path.join(os.getcwd(), "user_logs.log")
+        logpath = os.path.join(os.getcwd(), 'user_logs.log')
 
     logger = logging.getLogger(__name__)
-    # If basicConfig was set before, calling again is a no-op; ensure handler exists:
+    # Ensure we have a handler to the desired file
     if not logging.getLogger().handlers:
         logging.basicConfig(filename=logpath, format='%(asctime)s%(message)s', level=logging.INFO)
     else:
-        # still set our file handler if none points to logpath
-        paths = [getattr(h, "baseFilename", None) for h in logging.getLogger().handlers if hasattr(h, "baseFilename")]
-        if logpath not in (paths or []):
+        has_same = False
+        for h in logging.getLogger().handlers:
+            if getattr(h, "baseFilename", None) == os.path.abspath(logpath):
+                has_same = True
+                break
+        if not has_same:
             fh = logging.FileHandler(logpath)
             fh.setFormatter(logging.Formatter('%(asctime)s%(message)s'))
             fh.setLevel(logging.INFO)
             logging.getLogger().addHandler(fh)
 
-    # scope string (same logic you had for widget scopes)
-    scope = f"_{scope_value}" if scope_value else ""
+    # scope suffix (your original widget logic)
+    if scopes_value and len(scopes_value) > 0:
+        scope_suffix = '_' + scopes_value[0]
+    else:
+        scope_suffix = ''
 
-    # --- inputs ---
+    # paths
     filepath = os.path.abspath(source_docx)
-    base_path = os.path.abspath(template_docx)  # you passed a path directly
+    base_path = os.path.abspath(template_docx)
     mapping_path = os.path.abspath(mapping_csv)
 
-    # output name (same pattern as your code)
-    file_name = out_name or (os.path.splitext(os.path.basename(filepath))[0] + ' - Validation Report (Auto).docx')
+    # output name (your pattern)
+    file_name = out_name or (os.path.basename(filepath)[:-5] + ' - Validation Report (Auto).docx')
 
-    # --- load docs ---
+    # objects
     source = ModelDoc(filepath)
     dest = ValReport(base_path)
 
-    # --- CSV: keep your exact logic (fillna -> dict records) ---
-    df = pd.read_csv(mapping_path).fillna('')
-    mapping = df.to_dict(orient='records')
+    # CSV read: keep exactly your logic (fillna -> dict records)
+    mapping = pd.read_csv(mapping_path).fillna('').to_dict(orient='records')
 
-    # --- processing loop (kept behavior; prints progress if enabled) ---
+    # processing loop (kept same behavior)
     total = max(len(mapping), 1)
     for i, row in enumerate(mapping, 1):
         if print_progress:
-            pct = round(i / total * 100, 0)
-            print(f'Your validation report is getting populated... Progress: {pct}%')
+            print(f'Your validation report is getting populated...\nProgress: {round(i/total * 100, 0)}%')
 
-        # Accept both "A; B" and "A;B"
-        sections_raw = str(row.get('sections', ''))
-        # try your original split first ('; ') but tolerate plain ';'
-        parts = [p for p in sections_raw.split('; ') if p] if '; ' in sections_raw else [p for p in sections_raw.split(';') if p]
+        sections_field = str(row.get('sections', ''))
+        # your original used '; ' — also tolerate ';' if needed
+        parts = sections_field.split('; ') if '; ' in sections_field else sections_field.split(';')
 
-        # text anchor and optional answer column names (you used 'text' and 'mrmg_answer' in examples)
-        anchor = str(row.get('text', ''))
-        answers = row.get('mrmg_answer', '') or row.get('Answer', '')
-
-        # try later items first (as in your earlier logic)
         for s in reversed(parts):
+            s = s.strip()
+            if not s:
+                continue
+            if print_progress:
+                print(s, row.get('text', ''))
             try:
-                section_title, content = source.copy_content(start=s)
-                # optional: normalize title if you use this helper elsewhere
+                section_title, c = source.copy_content(start=s)
+                dest.paste_content(c, row.get('text', ''), str(i))
+                dest.put_text(row.get('text', ''), 'Model Document Section: ' + section_title, 'magenta')
+                dest.put_text(row.get('text', ''), ' ', '')
+                break  # success for this row
+            except Exception:
                 try:
-                    section_title = strip_section_number(section_title)
+                    dest.put_text(row.get('text', ''), 'ERROR: Model Document Section ' + s, 'red')
+                    if print_progress:
+                        print('ERROR: ', (s, row.get('text', '')))
                 except Exception:
-                    pass
+                    if print_progress:
+                        print('ERROR: The following mapping is incorrect:\n', (s, row.get('text', '')))
+                # continue trying remaining candidates
 
-                dest.paste_content(content, anchor, str(i))
-                dest.put_text(anchor, 'Model Document Section: ' + section_title, 'magenta')
-                if answers:
-                    dest.put_text(anchor, str(answers), 'yellow')
-                # keep your blank spacer
-                dest.put_text(anchor, ' ', '')
-                break  # one success per row is enough
-            except Exception as e:
-                # keep your error-then-continue approach
-                try:
-                    dest.put_text(anchor, f'ERROR: Model Document Section {s}', 'red')
-                except Exception:
-                    # last-resort console notice
-                    print('ERROR: The following mapping is incorrect:\n', (s, anchor))
-                # continue to next candidate s
-
-    # --- save & log ---
+    # save
     final_path = dest.save(file_name)
-    end_time = time.time()
 
-    # Logging - userID : filename : Button configs : runtime  (widgets replaced by provided values)
-    logger.info(f";{user};{os.path.splitext(os.path.basename(filepath))[0]};{(model_value, impact_value, scope_value)};{end_time - start_time:.2f}")
+    end_time = time.time()
+    # Logging - userID : filename : Button configs : runtime
+    logger.info(f";{user};{os.path.basename(filepath)[:-5]};{(model_value, impact_value, scopes_value)};{end_time - start_time:.2f}")
 
     if print_progress:
         print('Completed! Please download the report now')
-        print(f"Saved: {os.path.abspath(final_path)}")
-
-
-
 
     return os.path.abspath(final_path)
 
 if __name__ == "__main__":
     out = run_pipeline(
-        source_docx="data_type/5211_IVR_Intent_Recognition_US_Market_v1.1_Documentation.docx",
-        template_docx="base/test_C.docx",                    # your template path
-        mapping_csv="data_type/Technology_C.csv",
-        out_name="",                                         # leave "" to use default naming
-        model_value="test",                                  # optional; for logging only
-        impact_value="C",                                    # optional; for logging only
-        scope_value=None,                                    # or e.g. "Retail"
+        source_docx=r"data_type\5211_IVR_Intent_Recognition_US_Market_v1.1_Documentation.docx",
+        template_docx=r"base\test_C.docx",               # <-- pass your real template path
+        mapping_csv=r"data_type\Technology_C.csv",
+        out_name="",                                      # leave "" to auto-name from source
+        model_value="test",                               # only for logging line
+        impact_value="C",                                 # only for logging line
+        scopes_value=["Retail"],                          # or []/None
         logpath=r"c:\Users\vvaishy\Documents\hpt_rasa\mrmg_preprocess\600004454-validationreport\user_logs.log",
         print_progress=True
     )
-    print(out)
+    print("Saved to:", out)
