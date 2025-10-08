@@ -1,89 +1,112 @@
 from docx import Document
 from docx.text.paragraph import Paragraph
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 import pandas as pd
+import json, ast
 
-def replace_finding_details_section(doc_path: str, df: pd.DataFrame, output_path: str):
-    """
-    Opens an existing Word doc, finds the 'Finding Details' section,
-    removes all content below it until the next heading, and inserts
-    formatted findings/challenges/responses from the given DataFrame.
-    """
+def _to_dict_safe(x):
+    """Return x if dict; parse if it's a JSON/Python string; else {}."""
+    if isinstance(x, dict):
+        return x
+    if isinstance(x, str):
+        x = x.strip()
+        if not x:
+            return {}
+        # Try JSON then literal_eval
+        try:
+            return json.loads(x)
+        except Exception:
+            try:
+                return ast.literal_eval(x)
+            except Exception:
+                return {}
+    return {}
 
+def _insert_paragraph_after(paragraph: Paragraph, text: str = "") -> Paragraph:
+    """Create and return a new paragraph *after* the given paragraph."""
+    new_p = OxmlElement("w:p")
+    paragraph._p.addnext(new_p)
+    new_para = Paragraph(new_p, paragraph._parent)
+    if text:
+        run = new_para.add_run(text)
+    return new_para
+
+def replace_finding_details_section(doc_path: str, df: pd.DataFrame, output_path: str,
+                                    finding_col: str = "Finding Details",
+                                    rfr_col: str = "rfr_value"):
+    """
+    - Finds the paragraph containing 'Finding Details' (case-insensitive).
+    - Deletes everything until next Heading.
+    - Inserts for each row:
+        Finding M#                <- df[finding_col]
+        Challenge M#              <- dict key(s) from df[rfr_col]
+        Modeling Team Response M# <- dict value(s) from df[rfr_col]
+      If multiple key/value pairs exist, they’re rendered as separate M# blocks.
+    """
     doc = Document(doc_path)
     paragraphs = doc.paragraphs
 
-    # ---------- 1️⃣ Find the start and end of 'Finding Details' section ----------
-    start_idx = None
-    end_idx = None
-
+    # 1) Locate 'Finding Details' header and the end of section.
+    start_idx, end_idx = None, None
     for i, p in enumerate(paragraphs):
-        text = p.text.strip().lower()
-        if "finding details" in text:
+        if "finding details" in (p.text or "").strip().lower():
             start_idx = i
-            continue
-
-        # If we've found start, next bold heading signals the end
-        if start_idx is not None and (p.style.name.startswith("Heading") or "page" in text.lower()):
-            end_idx = i
             break
 
     if start_idx is None:
-        raise ValueError("Could not find 'Finding Details' section in the document.")
+        raise ValueError("Could not find a paragraph containing 'Finding Details'.")
 
+    # Find next Heading after start to know where this section ends
+    for j in range(start_idx + 1, len(paragraphs)):
+        p = paragraphs[j]
+        if p.style and p.style.name and p.style.name.startswith("Heading"):
+            end_idx = j
+            break
     if end_idx is None:
         end_idx = len(paragraphs)
 
-    # ---------- 2️⃣ Delete existing content under 'Finding Details' ----------
-    remove_indices = list(range(start_idx + 1, end_idx))
-    for idx in reversed(remove_indices):
-        p = paragraphs[idx]._element
-        p.getparent().remove(p)
+    # 2) Delete everything between start and end (keep the 'Finding Details' heading itself)
+    for k in range(end_idx - 1, start_idx, -1):
+        elm = paragraphs[k]._element
+        elm.getparent().remove(elm)
 
-    # ---------- 3️⃣ Insert new content ----------
-    insert_paragraph = paragraphs[start_idx]
+    # 3) Insert fresh content *after* the 'Finding Details' heading
+    anchor = paragraphs[start_idx]  # we will insert after this
+    m_counter = 1
 
-    for i, row in df.iterrows():
-        # Finding
-        p = insert_paragraph.insert_paragraph_before(f"Finding M{i+1}")
-        r = p.runs[0]
-        r.bold = True
+    for _, row in df.iterrows():
+        finding_text = str(row.get(finding_col, "") or "").strip()
+        rfr_dict = _to_dict_safe(row.get(rfr_col, {}))
 
-        p = insert_paragraph.insert_paragraph_before(str(row.get("Finding Details", "")))
-        p.style = "Normal"
+        # If there are no pairs in rfr_dict, still render a single block with empty challenge/response
+        items = list(rfr_dict.items()) or [( "", "" )]
 
-        # Challenge
-        p = insert_paragraph.insert_paragraph_before(f"Challenge M{i+1}")
-        r = p.runs[0]
-        r.bold = True
+        for q, resp in items:
+            # Finding M#
+            p = _insert_paragraph_after(anchor, f"Finding M{m_counter}")
+            if p.runs:
+                p.runs[0].bold = True
+            p = _insert_paragraph_after(p, finding_text)
 
-        p = insert_paragraph.insert_paragraph_before(str(row.get("RFR Key Question", "")))
-        p.style = "Normal"
+            # Challenge M#
+            p = _insert_paragraph_after(p, f"Challenge M{m_counter}")
+            if p.runs:
+                p.runs[0].bold = True
+            p = _insert_paragraph_after(p, str(q).strip())
 
-        # Modeling Team Response
-        p = insert_paragraph.insert_paragraph_before(f"Modeling Team Response M{i+1}")
-        r = p.runs[0]
-        r.bold = True
+            # Modeling Team Response M#
+            p = _insert_paragraph_after(p, f"Modeling Team Response M{m_counter}")
+            if p.runs:
+                p.runs[0].bold = True
+            p = _insert_paragraph_after(p, str(resp).strip())
 
-        p = insert_paragraph.insert_paragraph_before(str(row.get("Modeling Team Response", "")))
-        p.style = "Normal"
+            # Spacer line
+            p = _insert_paragraph_after(p, "")
 
-        # Add a blank line between findings
-        insert_paragraph.insert_paragraph_before("")
+            # Move anchor forward so subsequent blocks keep correct order
+            anchor = p
+            m_counter += 1
 
-    # ---------- 4️⃣ Save updated document ----------
     doc.save(output_path)
     print(f"✅ Updated document saved to: {output_path}")
-
-
-# Example usage
-df = pd.DataFrame({
-    "Finding Details": ["Model trained for US market without retraining for ANZ/Canada"],
-    "RFR Key Question": ["Model trained only on US data (2022–23), now used for ANZ/Canada"],
-    "Modeling Team Response": ["Modeling team added key assumptions for retraining."]
-})
-
-replace_finding_details_section(
-    doc_path="your_existing_template.docx",
-    df=df,
-    output_path="updated_validation_report.docx"
-)
