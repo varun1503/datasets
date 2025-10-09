@@ -1,99 +1,177 @@
 from docx import Document
 from docx.text.paragraph import Paragraph
 from docx.oxml import OxmlElement
-import json, ast, re
+import re
 import pandas as pd
 
-def _to_dict_safe(x):
-    if isinstance(x, dict): return x
-    if isinstance(x, str):
-        s = x.strip()
-        if not s: return {}
-        try: return json.loads(s)
-        except Exception:
-            try: return ast.literal_eval(s)
-            except Exception: return {}
-    return {}
-
-def _norm(s):  # normalize for matching
+# ---------- helpers ----------
+def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip().lower()
 
-def replace_finding_details_section_keep_headings(
-    doc_path: str,
-    df: pd.DataFrame,
-    output_path: str,
-    finding_col: str = "Finding Details",
-    rfr_col: str = "rfr_value",
-    mrmg_col: str = "MRMG_Assessment",
-    end_heading_text: str = "Validation Assessment Details",
-):
-    doc = Document(doc_path)
-    paragraphs = doc.paragraphs
+def _insert_paragraph_after(paragraph: Paragraph, text: str = "") -> Paragraph:
+    new_p = OxmlElement("w:p")
+    paragraph._p.addnext(new_p)
+    new_para = Paragraph(new_p, paragraph._parent)
+    if text:
+        new_para.add_run(text)
+    return new_para
 
-    # 1) find start ("Finding Details") and end ("Validation Assessment Details")
-    start_idx = next((i for i,p in enumerate(paragraphs) if "finding details" in _norm(p.text)), None)
-    if start_idx is None:
-        raise ValueError("Could not find 'Finding Details' heading.")
+def _insert_paragraph_before(paragraph: Paragraph, text: str = "") -> Paragraph:
+    new_p = OxmlElement("w:p")
+    paragraph._p.addprevious(new_p)
+    new_para = Paragraph(new_p, paragraph._parent)
+    if text:
+        new_para.add_run(text)
+    return new_para
 
-    end_idx = next((j for j in range(start_idx+1, len(paragraphs))
-                    if _norm(end_heading_text) in _norm(paragraphs[j].text)), None)
-    if end_idx is None:
-        raise ValueError(f"Could not find '{end_heading_text}' heading.")
+def _find_first_idx_after(paragraphs, start_idx, predicate, stop_idx=None):
+    """Find first paragraph index >= start_idx+1 that matches predicate; stop at stop_idx if provided."""
+    end = stop_idx if stop_idx is not None else len(paragraphs)
+    for i in range(start_idx + 1, end):
+        if predicate(paragraphs[i]):
+            return i
+    return None
 
-    # 2) delete everything BETWEEN (keep both headings)
-    for k in range(end_idx-1, start_idx, -1):
+def _delete_range(paragraphs, i_from, i_to):
+    """Delete paragraphs in [i_from, i_to] inclusive (safe if None or i_from>i_to)."""
+    if i_from is None or i_to is None or i_from > i_to:
+        return
+    for k in range(i_to, i_from - 1, -1):
         elm = paragraphs[k]._element
         elm.getparent().remove(elm)
 
-    # 3) insert new content immediately BEFORE the end heading
-    end_heading_para = paragraphs[start_idx+1]  # after deletions, this is now the end heading
+def _extract_s_number(tag_text: str) -> str:
+    """Return 'S#' from things like 'Test S2' or '' if not found."""
+    m = re.search(r"\bS\s*(\d+)\b", tag_text or "", flags=re.IGNORECASE)
+    return f"S{m.group(1)}" if m else ""
 
-    # helper: insert paragraph BEFORE a given paragraph
-    def insert_before(anchor_para: Paragraph, text: str = "") -> Paragraph:
-        new_p = OxmlElement("w:p")
-        anchor_para._p.addprevious(new_p)
-        new_para = Paragraph(new_p, anchor_para._parent)
-        if text: new_para.add_run(text)
-        return new_para
+# ---------- main ----------
+def insert_mrmg_assessment_blocks(
+    doc_path: str,
+    df: pd.DataFrame,
+    output_path: str,
+    tag_col: str = "text",                 # e.g., "Test S1", "Test S2"
+    mrmg_col: str = "MRMG_Assessment",     # assessment text
+    mtr_heading_label: str = "Modelling Team Response",  # could be "Modeling Team Response" in your file; add variants below
+    mrmg_eval_label: str = "MRMG Evaluation",
+):
+    """
+    For each row in df:
+      - Locate the section whose heading (or anchor paragraph) contains df[tag_col] (e.g., "Test S2").
+      - Within that section, insert 'MRMG Assessment S#' block:
+            Prefer: AFTER the 'Modelling Team Response S#' content,
+            Else:   BEFORE the 'MRMG Evaluation S#' heading.
+      - If an existing 'MRMG Assessment S#' is between those anchors, remove it first.
+    """
+    doc = Document(doc_path)
+    paragraphs = doc.paragraphs
 
-    # Build items so M1 appears first (insert in reverse)
-    blocks = []
-    m = 1
+    # Allow both spellings for the response heading
+    mtr_labels = { _norm(mtr_heading_label), _norm("Modeling Team Response") }
+
     for _, row in df.iterrows():
-        finding_text = str(row.get(finding_col, "") or "").strip()
-        rfr_dict = _to_dict_safe(row.get(rfr_col, {}))
-        mrmg_text = str(row.get(mrmg_col, "") or "").strip()
-        pairs = list(rfr_dict.items()) or [("", "")]
-        for q, resp in pairs:
-            blocks.append({
-                "m": m,
-                "finding": finding_text,
-                "challenge": str(q).strip(),
-                "response": str(resp).strip(),
-                "mrmg": mrmg_text
-            })
-            m += 1
+        tag = str(row.get(tag_col, "")).strip()
+        assess_text = str(row.get(mrmg_col, "") or "").strip()
+        if not tag or not assess_text:
+            continue
 
-    # Insert in reverse so the earliest block ends up farthest from the end heading (M1 first).
-    for b in reversed(blocks):
-        p = insert_before(end_heading_para, f"MRMG Assessment M{b['m']}")
-        if p.runs: p.runs[0].bold = True
-        p = insert_before(end_heading_para, b["mrmg"])
+        tag_norm = _norm(tag)
+        s_num = _extract_s_number(tag)  # "S1", "S2", or ""
+        # Build normalized patterns for sub-headings
+        def _is_mtr_heading(p):
+            t = _norm(p.text)
+            # match "Modelling Team Response", optional "S#", tolerant to spaces/case
+            return any(lbl in t for lbl in mtr_labels) and (s_num.lower() in t if s_num else True)
 
-        p = insert_before(end_heading_para, f"Modeling Team Response M{b['m']}")
-        if p.runs: p.runs[0].bold = True
-        p = insert_before(end_heading_para, b["response"])
+        def _is_mrmg_eval_heading(p):
+            t = _norm(p.text)
+            return (_norm(mrmg_eval_label) in t) and (s_num.lower() in t if s_num else True)
 
-        p = insert_before(end_heading_para, f"Challenge M{b['m']}")
-        if p.runs: p.runs[0].bold = True
-        p = insert_before(end_heading_para, b["challenge"])
+        # 1) Find the "tag" paragraph (e.g., "Test S2")
+        start_idx = next((i for i,p in enumerate(paragraphs) if tag_norm in _norm(p.text)), None)
+        if start_idx is None:
+            # If exact tag not found, try a looser match like "test s#" anywhere
+            alt = _extract_s_number(tag)
+            if alt:
+                start_idx = next((i for i,p in enumerate(paragraphs) if alt.lower() in _norm(p.text)), None)
+        if start_idx is None:
+            # Could not place this row
+            continue
 
-        p = insert_before(end_heading_para, f"Finding M{b['m']}")
-        if p.runs: p.runs[0].bold = True
-        p = insert_before(end_heading_para, b["finding"])
+        # 2) Define the section boundary: until next "Test Sx" or document end
+        next_tag_idx = _find_first_idx_after(
+            paragraphs, start_idx,
+            lambda p: bool(re.search(r"\btest\s*s?\s*\d+\b", _norm(p.text), flags=re.IGNORECASE))
+        )
+        section_end = next_tag_idx if next_tag_idx is not None else len(paragraphs)
 
-        # spacer
-        insert_before(end_heading_para, "")
+        # 3) Find the MTR heading and MRMG Evaluation heading within this section
+        mtr_idx = _find_first_idx_after(paragraphs, start_idx, _is_mtr_heading, stop_idx=section_end)
+        eval_idx = _find_first_idx_after(paragraphs, start_idx, _is_mrmg_eval_heading, stop_idx=section_end)
+
+        # 4) Decide insertion anchor:
+        #    - If MTR exists: insert AFTER its content, i.e., just before MRMG Evaluation if present,
+        #      otherwise at the end of the section.
+        #    - Else: insert just BEFORE MRMG Evaluation if present; else at end of section.
+        if mtr_idx is not None:
+            # the "content end" of MTR is right before eval_idx (if eval exists) or section_end
+            insertion_before_idx = eval_idx if eval_idx is not None else section_end
+        else:
+            insertion_before_idx = eval_idx if eval_idx is not None else section_end
+
+        # Find the paragraph object to insert BEFORE:
+        anchor_before = paragraphs[insertion_before_idx] if insertion_before_idx < len(paragraphs) else None
+
+        # 5) Remove any existing "MRMG Assessment S#" block between MTR (or start) and Eval (or section_end)
+        assess_heading_norm = _norm(f"MRMG Assessment {s_num}") if s_num else _norm("MRMG Assessment")
+        scan_from = mtr_idx if mtr_idx is not None else start_idx
+        scan_to = (eval_idx - 1) if eval_idx is not None else (section_end - 1)
+
+        # find any assessment heading and delete heading + following paragraph (the content), conservatively
+        ah = None
+        for i in range(scan_from + 1, scan_to + 1):
+            if assess_heading_norm in _norm(paragraphs[i].text):
+                ah = i
+                break
+        if ah is not None:
+            # delete heading and the immediate next paragraph as its body (if within range)
+            del_to = min(ah + 1, len(paragraphs) - 1)
+            _delete_range(paragraphs, ah, del_to)
+
+            # recompute references after deletion
+            paragraphs = doc.paragraphs
+            # Need to refresh indices after deletion. Recompute anchor_before
+            if insertion_before_idx is not None and insertion_before_idx < len(paragraphs):
+                anchor_before = paragraphs[insertion_before_idx]
+
+        # 6) Insert the new Assessment heading + body
+        heading_text = f"MRMG Assessment {s_num}" if s_num else "MRMG Assessment"
+        if anchor_before is not None:
+            p_head = _insert_paragraph_before(anchor_before, heading_text)
+            if p_head.runs: p_head.runs[0].bold = True
+            _insert_paragraph_before(anchor_before, assess_text)
+            # spacer
+            _insert_paragraph_before(anchor_before, "")
+        else:
+            # append at end if no anchor
+            tail = paragraphs[-1]
+            p_head = _insert_paragraph_after(tail, heading_text)
+            if p_head.runs: p_head.runs[0].bold = True
+            _insert_paragraph_after(p_head, assess_text)
+            _insert_paragraph_after(p_head, "")
 
     doc.save(output_path)
     print(f"✅ Updated document saved to: {output_path}")
+
+# df should have at least: 'text' (e.g., "Test S2"), 'MRMG_Assessment'
+# Optional: you can also keep 'section', 'question' for your own reference.
+
+insert_mrmg_assessment_blocks(
+    doc_path="input.docx",
+    df=df,  # your dataframe with rows for Test S1, S2, ...
+    output_path="output.docx",
+    tag_col="text",
+    mrmg_col="MRMG_Assessment",
+    mtr_heading_label="Modelling Team Response",  # will also match "Modeling Team Response"
+    mrmg_eval_label="MRMG Evaluation"
+)
