@@ -4,20 +4,18 @@ from docx.oxml import OxmlElement
 import re, json, ast
 import pandas as pd
 
-# ------- helpers -------
+# ---------- helpers ----------
 def _norm(s): return re.sub(r"\s+", " ", (s or "")).strip().lower()
 
 def _insert_before(p: Paragraph, text=""):
-    new_p = OxmlElement("w:p")
-    p._p.addprevious(new_p)
-    q = Paragraph(new_p, p._parent)
+    new_p = OxmlElement("w:p"); p._p.addprevious(new_p)
+    q = Paragraph(new_p, p._parent); 
     if text: q.add_run(text)
     return q
 
 def _insert_after(p: Paragraph, text=""):
-    new_p = OxmlElement("w:p")
-    p._p.addnext(new_p)
-    q = Paragraph(new_p, p._parent)
+    new_p = OxmlElement("w:p"); p._p.addnext(new_p)
+    q = Paragraph(new_p, p._parent); 
     if text: q.add_run(text)
     return q
 
@@ -38,64 +36,61 @@ def _safe_dict(x):
             except Exception: return {}
     return {}
 
-def _snum(text):  # "S2" if present, else ""
-    m = re.search(r"\bS\s*(\d+)\b", text or "", re.IGNORECASE)
+def _snum(text):  # returns like "S2" if present, else ""
+    m = re.search(r"\bS\s*(\d+)\b", text or "", flags=re.IGNORECASE)
     return f"S{m.group(1)}" if m else ""
 
 def _looks_like_test(p):
     return bool(re.search(r"\btest\b", _norm(p.text)))
 
-# ------- main -------
-def insert_rfr_and_mrmg_blocks(
+# ---------- main ----------
+def insert_rfr_and_mrmg_with_tags(
     doc_path: str,
     df: pd.DataFrame,
     output_path: str,
-    tag_col: str = "text",
-    rfr_col: str = "rfr_value",          # dict: { "Challenge S# ...": "MTR ..." }
-    mrmg_col: str = "MRMG_Assessment",   # str
+    tag_col: str = "text",            # e.g., "Test S1"
+    rfr_col: str = "rfr_value",       # dict: {<challenge text>: <model team response>}
+    mrmg_col: str = "MRMG_Assessment",
+    mtr_heading_base: str = "Modelling Team Response",  # heading text to write
 ):
     """
-    For each df row:
-      - Find the section anchored by df[tag_col] (e.g., "Test S2")
-      - Preferred insertion anchor: just BEFORE "MRMG Evaluation" in that section
-        Fallback: right AFTER "Modelling/Modeling Team Response" heading
-        Else: end of that Test section
-      - Clear any existing RFR (Challenge.../Modeling Team Response...) and MRMG Assessment in that slot
-      - Insert RFR pairs first, then MRMG Assessment
-      - Skip RFR if rfr dict is empty or missing
+    For each df row (per Test S# tag):
+      Insert:
+        Challenge S#                <-- dict key
+        Modelling Team Response S#  <-- dict value
+        MRMG Assessment S#          <-- df[mrmg_col]
+      Place before 'MRMG Evaluation ...' if present; else after 'Modelling/Modeling Team Response ...'; else end.
+      Clear older Challenge/Response/Assessment for that S# in that slot first.
     """
     doc = Document(doc_path)
 
     for _, row in df.iterrows():
         tag = str(row.get(tag_col, "") or "").strip()
-        assess = str(row.get(mrmg_col, "") or "").strip()
-        rfr_dict = _safe_dict(row.get(rfr_col, {}))
+        rfr = _safe_dict(row.get(rfr_col, {}))
+        mrmg = str(row.get(mrmg_col, "") or "").strip()
+        if not tag: 
+            continue
 
-        if not tag:
-            continue  # need a tag to locate the section
+        sn = _snum(tag)  # "S1", "S2", ...
 
-        # 1) locate the "Test ..." anchor (or fallback by S#)
-        tag_norm = _norm(tag)
+        # 1) locate tag paragraph (exact, else by S-number)
         paras = doc.paragraphs
+        tag_norm = _norm(tag)
         start_idx = next((i for i,p in enumerate(paras) if tag_norm in _norm(p.text)), None)
+        if start_idx is None and sn:
+            start_idx = next((i for i,p in enumerate(paras) if sn.lower() in _norm(p.text)), None)
         if start_idx is None:
-            sn = _snum(tag)
-            if sn:
-                start_idx = next((i for i,p in enumerate(paras) if sn.lower() in _norm(p.text)), None)
-        if start_idx is None:
-            continue  # can't find section for this row
+            continue
 
         # 2) section end = next "Test ..." or doc end
         next_test = None
         for j in range(start_idx+1, len(paras)):
             if _looks_like_test(paras[j]):
-                next_test = j
-                break
+                next_test = j; break
         section_end = next_test if next_test is not None else len(paras)
 
-        # 3) find MTR and MRMG Evaluation (no strict S# requirement)
-        mtr_idx = None
-        eval_idx = None
+        # 3) find MTR and MRMG Evaluation (no strict S# requirement for matching)
+        mtr_idx, eval_idx = None, None
         for j in range(start_idx+1, section_end):
             t = _norm(paras[j].text)
             if mtr_idx is None and ("modelling team response" in t or "modeling team response" in t):
@@ -105,78 +100,78 @@ def insert_rfr_and_mrmg_blocks(
             if mtr_idx is not None and eval_idx is not None:
                 break
 
-        # 4) choose anchor (insert BEFORE this paragraph)
+        # 4) choose anchor to insert BEFORE
         if eval_idx is not None:
             anchor_before = paras[eval_idx]
         elif mtr_idx is not None:
-            # create a blank right after MTR heading to anchor
-            anchor_before = _insert_after(paras[mtr_idx])
+            anchor_before = _insert_after(paras[mtr_idx])  # a blank after the MTR heading
         else:
             base = paras[section_end-1] if section_end > start_idx+1 else paras[start_idx]
             anchor_before = _insert_after(base)
 
-        # 5) clear any existing RFR & MRMG Assessment between MTR (or start) and Eval (or section_end)
+        # 5) clear old Challenge/Response/Assessment S# between MTR/start and Eval/section_end
         scan_from = mtr_idx if mtr_idx is not None else start_idx
         scan_to = (eval_idx-1) if eval_idx is not None else (section_end-1)
-        # collect ranges to delete: headings that look like Challenge..., Modeling Team Response..., MRMG Assessment...
-        kill_ranges = []
+        kill = []
         i = scan_from + 1
         while i <= scan_to and i < len(doc.paragraphs):
-            txt = _norm(doc.paragraphs[i].text)
-            if (txt.startswith("challenge") or
-                txt.startswith("modeling team response") or
-                txt.startswith("modelling team response") or
-                txt.startswith("mrmg assessment")):
-                # delete heading + next line as its body (if present)
+            t = _norm(doc.paragraphs[i].text)
+            if (t.startswith(f"challenge {sn.lower()}") or
+                t.startswith(f"{_norm(mtr_heading_base)} {sn.lower()}") or
+                t.startswith(f"modeling team response {sn.lower()}") or
+                t.startswith(f"mrmg assessment {sn.lower()}")):
                 start_del = i
-                end_del = min(i+1, len(doc.paragraphs)-1)
-                kill_ranges.append((start_del, end_del))
+                end_del = min(i+1, len(doc.paragraphs)-1)  # heading + next body line
+                kill.append((start_del, end_del))
                 i = end_del + 1
                 continue
             i += 1
-        # perform deletions
-        for a,b in reversed(kill_ranges):
+        for a,b in reversed(kill):
             _delete_range(doc.paragraphs, a, b)
 
-        # refresh refs after deletion
+        # refresh references after deletion
         paras = doc.paragraphs
-        # re-point anchor if needed (best effort; if it moved, find the first paragraph whose text matches the old anchor text)
-        # If anchor_before is now detached, fall back to last paragraph
         try:
-            _ = anchor_before._p  # access to check it still exists
+            _ = anchor_before._p
         except Exception:
             anchor_before = paras[min(eval_idx, len(paras)-1)] if eval_idx is not None else paras[-1]
 
-        # 6) insert RFR (if present): for each dict item -> Challenge … + Modeling Team Response …
-        if rfr_dict:
-            # preserve item order if it's an OrderedDict-like; else normal dict order (Py3.7+ preserves insertion)
-            for ch, resp in rfr_dict.items():
-                ch_heading = ch.strip() if ch else "Challenge"
-                # If key doesn't start with "Challenge", prefix it for clarity
-                if not _norm(ch_heading).startswith("challenge"):
-                    ch_heading = f"Challenge {ch_heading}"
+        # 6) insert RFR pairs: Challenge S# + Modelling Team Response S#
+        if rfr:
+            for ch_text, resp_text in rfr.items():
+                # headings with S#
+                ch_head = f"Challenge {sn}" if sn else "Challenge"
+                mtr_head = f"{mtr_heading_base} {sn}" if sn else mtr_heading_base
 
-                head = _insert_before(anchor_before, ch_heading)
-                if head.runs: head.runs[0].bold = True
-                _insert_before(anchor_before, str(resp or "").strip())
+                # Challenge heading + body
+                p = _insert_before(anchor_before, ch_head)
+                if p.runs: p.runs[0].bold = True
+                _insert_before(anchor_before, str(ch_text or "").strip())
+
+                # Modelling Team Response heading + body
+                p = _insert_before(anchor_before, mtr_head)
+                if p.runs: p.runs[0].bold = True
+                _insert_before(anchor_before, str(resp_text or "").strip())
+
                 _insert_before(anchor_before, "")  # spacer after each pair
 
-        # 7) insert MRMG Assessment (if provided)
-        if assess:
-            head = _insert_before(anchor_before, "MRMG Assessment")
-            if head.runs: head.runs[0].bold = True
-            _insert_before(anchor_before, assess)
+        # 7) insert MRMG Assessment S#
+        if mrmg:
+            a_head = f"MRMG Assessment {sn}" if sn else "MRMG Assessment"
+            p = _insert_before(anchor_before, a_head)
+            if p.runs: p.runs[0].bold = True
+            _insert_before(anchor_before, mrmg)
             _insert_before(anchor_before, "")  # spacer
 
     doc.save(output_path)
     print(f"✅ Wrote: {output_path}")
 
-
-insert_rfr_and_mrmg_blocks(
+insert_rfr_and_mrmg_with_tags(
     doc_path="input.docx",
-    df=df,                     # must have columns: text, MRMG_Assessment, rfr_value
+    df=df,  # needs columns: text, rfr_value (dict or str), MRMG_Assessment
     output_path="output.docx",
     tag_col="text",
     rfr_col="rfr_value",
     mrmg_col="MRMG_Assessment",
+    mtr_heading_base="Modelling Team Response",  # written in the doc (spelling you want)
 )
