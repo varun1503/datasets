@@ -1,114 +1,35 @@
-from docx import Document
-from docx.text.paragraph import Paragraph
-from docx.oxml import OxmlElement
-from docx.shared import Pt
-import json, ast, re
-import pandas as pd
+import json
+import os
 
-# ---------- helpers ----------
-def _to_dict_safe(x):
-    if isinstance(x, dict):
-        return x
-    if isinstance(x, str):
-        s = x.strip()
-        if not s:
-            return {}
-        try:
-            return json.loads(s)
-        except Exception:
-            try:
-                return ast.literal_eval(s)
-            except Exception:
-                return {}
-    return {}
-
-def _format_run(run, bold=False):
-    """Apply Times New Roman 11 formatting, optionally bold."""
-    run.font.name = "Times New Roman"
-    run.font.size = Pt(11)
-    run.bold = bool(bold)
-
-def _insert_paragraph_after(paragraph: Paragraph, text: str = "", bold=False) -> Paragraph:
-    """Insert a paragraph after `paragraph` with Times New Roman 11, bold if requested."""
-    new_p = OxmlElement("w:p")
-    paragraph._p.addnext(new_p)
-    new_para = Paragraph(new_p, paragraph._parent)
-    if text:
-        run = new_para.add_run(text)
-        _format_run(run, bold=bold)
-    return new_para
-
-def _norm(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "")).strip().lower()
-
-# ---------- main ----------
-def replace_finding_details_section(
-    doc_path: str,
-    df: pd.DataFrame,
-    output_path: str,
-    finding_col: str = "Finding Details",
-    rfr_col: str = "rfr_value",
-    mrmg_col: str = "MRMG_Assessment",
-    end_heading_text: str = "Validation Assessment Details",
-):
+def secrets_to_json(secret_file_path, output_json_path=None):
     """
-    Removes everything from 'Finding Details' (inclusive)
-    through 'Validation Assessment Details' (inclusive),
-    then inserts new formatted findings/challenges/responses/assessments.
-    All text: Times New Roman, size 11; headings bold.
+    Convert a key=value style secrets file (no extension) to JSON.
+    Example line format:
+        KEY=value
+        # comment line (ignored)
     """
-    doc = Document(doc_path)
-    paragraphs = doc.paragraphs
+    secrets = {}
+    
+    with open(secret_file_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            # Skip blank or comment lines
+            if not line or line.startswith('#'):
+                continue
+            
+            # Split only on first '='
+            if '=' in line:
+                key, value = line.split('=', 1)
+                secrets[key.strip()] = value.strip()
+    
+    # Default JSON output path if not provided
+    if not output_json_path:
+        output_json_path = os.path.splitext(secret_file_path)[0] + '.json'
+    
+    with open(output_json_path, 'w') as out:
+        json.dump(secrets, out, indent=4)
+    
+    print(f"✅ Converted '{secret_file_path}' → '{output_json_path}'")
 
-    # 1️⃣ Locate 'Finding Details'
-    start_idx = next((i for i, p in enumerate(paragraphs) if "finding details" in _norm(p.text)), None)
-    if start_idx is None:
-        raise ValueError("Could not find 'Finding Details' section.")
-
-    # 2️⃣ Locate 'Validation Assessment Details'
-    end_idx = next((j for j in range(start_idx + 1, len(paragraphs))
-                    if _norm(end_heading_text) in _norm(paragraphs[j].text)), None)
-    if end_idx is None:
-        end_idx = len(paragraphs)
-
-    # 3️⃣ Delete inclusive range
-    for k in range(end_idx, start_idx - 1, -1):
-        elm = paragraphs[k]._element
-        elm.getparent().remove(elm)
-
-    # 4️⃣ Anchor for reinsertion
-    anchor = doc.paragraphs[start_idx - 1] if start_idx > 0 else doc.paragraphs[0]
-
-    # 5️⃣ Insert new content with formatting
-    m_counter = 1
-    for _, row in df.iterrows():
-        finding_text = str(row.get(finding_col, "") or "").strip()
-        rfr_dict = _to_dict_safe(row.get(rfr_col, {}))
-        mrmg_text = str(row.get(mrmg_col, "") or "").strip()
-
-        items = list(rfr_dict.items()) or [("", "")]
-
-        for q, resp in items:
-            # Finding
-            p = _insert_paragraph_after(anchor, f"Finding M{m_counter}", bold=True)
-            p = _insert_paragraph_after(p, finding_text, bold=False)
-
-            # Challenge
-            p = _insert_paragraph_after(p, f"Challenge M{m_counter}", bold=True)
-            p = _insert_paragraph_after(p, str(q).strip(), bold=False)
-
-            # Modeling Team Response
-            p = _insert_paragraph_after(p, f"Modeling Team Response M{m_counter}", bold=True)
-            p = _insert_paragraph_after(p, str(resp).strip(), bold=False)
-
-            # MRMG Assessment
-            p = _insert_paragraph_after(p, f"MRMG Assessment M{m_counter}", bold=True)
-            p = _insert_paragraph_after(p, mrmg_text, bold=False)
-
-            # Spacer
-            p = _insert_paragraph_after(p, "", bold=False)
-            anchor = p
-            m_counter += 1
-
-    doc.save(output_path)
-    print(f"✅ Updated document saved to: {output_path} (Times New Roman, 11pt; headings bold)")
+# Example usage
+secrets_to_json("secrets")   # file has no extension
