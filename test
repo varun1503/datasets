@@ -1,35 +1,157 @@
-import json
-import os
+here’s a crisp task breakdown you can drop straight into your sprint board. I included all four tasks you described (you initially said three, but you specified a fourth—so I captured it, too).
 
-def secrets_to_json(secret_file_path, output_json_path=None):
-    """
-    Convert a key=value style secrets file (no extension) to JSON.
-    Example line format:
-        KEY=value
-        # comment line (ignored)
-    """
-    secrets = {}
-    
-    with open(secret_file_path, 'r') as f:
-        for line in f:
-            line = line.strip()
-            # Skip blank or comment lines
-            if not line or line.startswith('#'):
-                continue
-            
-            # Split only on first '='
-            if '=' in line:
-                key, value = line.split('=', 1)
-                secrets[key.strip()] = value.strip()
-    
-    # Default JSON output path if not provided
-    if not output_json_path:
-        output_json_path = os.path.splitext(secret_file_path)[0] + '.json'
-    
-    with open(output_json_path, 'w') as out:
-        json.dump(secrets, out, indent=4)
-    
-    print(f"✅ Converted '{secret_file_path}' → '{output_json_path}'")
+Task 1 — Build “Annotation Report Template” function
 
-# Example usage
-secrets_to_json("secrets")   # file has no extension
+Goal: Generate a base Validation Report from (a) the model document (source), (b) the question template DOCX, and (c) a CSV mapping (sections → questions).
+
+Deliverable / API:
+
+Function: run_pipeline(source_docx, template_docx, mapping_csv, out_name=None) -> str
+
+Output: a DOCX with:
+
+Pre-built Table of Contents
+
+All sections and subsections from the template
+
+All tables present in the template
+
+Modeling Team Response (MTR) blocks inserted with empty placeholders
+
+
+
+Acceptance Criteria:
+
+Given valid inputs, the function produces a DOCX without errors.
+
+TOC appears at the top and updates correctly (fields refresh on open).
+
+Every template question is placed under the correct heading.
+
+MTR placeholders exist for every test question and are empty.
+
+All template tables are preserved (structure, merged cells, widths).
+
+The function returns the output path and the file opens in Word without repair prompts.
+
+
+
+---
+
+Task 2 — Append “Finding Details” section with Challenge, MTR, MRMG Assessment
+
+Goal: In a single section titled “Finding Details”, append each finding with:
+
+Challenge (problem statement),
+
+Modeling Team Response (specific to the finding),
+
+MRMG Assessment (review/assessment text).
+
+
+Inputs:
+
+A dataframe (or CSV) with at least: Finding Details, Challenge, Modeling_Team_Response, MRMG_Assessment (column names can be mapped).
+
+
+Acceptance Criteria:
+
+A top-level “Finding Details” section is present (exact text).
+
+For each finding row, a clearly separated block is added with subheadings:
+
+“Challenge”
+
+“Modeling Team Response”
+
+“MRMG Assessment”
+
+
+Order of findings matches input order.
+
+No content from this task leaks into S1/S2 per-tag sections.
+
+Formatting is consistent: headings bold, body normal, spacing uniform (no orphan bullets/lines).
+
+If a field is missing/blank, a placeholder “—” is inserted (no crashes).
+
+
+
+---
+
+Task 3 — Generate MRMG Responses for all Test Questions (post-MTR), with Findings/RFR mentions
+
+Goal: For every test question in the report, add an MRMG Response subsection after the corresponding Modeling Team Response, and explicitly mention linked Findings and/or RFR items if present.
+
+Inputs:
+
+Questions list (from Task 1 result)
+
+Optional mappings: question → related findings / RFR ids (from CSV/DF)
+
+
+Acceptance Criteria:
+
+For each question block:
+
+Order is Question → MTR → MRMG Response.
+
+If associated finding(s) exist, MRMG Response contains a bullet “Related Findings: …”.
+
+If associated RFR(s) exist, MRMG Response contains a bullet “Related RFR: …”.
+
+
+Where no associations exist, MRMG Response still appears with placeholder text ready for authoring.
+
+No duplication of MRMG Response blocks.
+
+Cross-references (IDs/titles) match input mapping.
+
+
+
+---
+
+Task 4 — Heading Numbering & Text Reformatting (Finalize Document)
+
+Goal: Normalize heading numbering, text formatting, and overall document style, producing the final, submission-ready Validation Report.
+
+Scope:
+
+Ensure all headings carry the correct number (e.g., 1, 1.1, 1.1.1) consistent with the template hierarchy.
+
+Reformat text (fonts, sizes, spacing, list levels) to template styles.
+
+Preserve figure/table captions; do not renumber model tables beyond template rules.
+
+
+Acceptance Criteria:
+
+All headings display correct numbers and levels, consistent across the doc.
+
+Body text adheres to template styles (font family/size, line spacing, paragraph spacing).
+
+Lists render correctly (no broken numbering, no mixed bullet styles).
+
+TOC regenerates with correct page numbers and heading labels.
+
+No style regressions in tables (column widths, merged cells intact).
+
+The final DOCX opens without repair prompts and passes a quick manual scan for layout issues (no overflow beyond page margins).
+
+
+
+---
+
+Notes & Dependencies
+
+T2 depends on the base doc from T1.
+
+T3 depends on the structured sections/questions from T1 and any mapping to findings/RFR.
+
+T4 runs last to unify numbering/styles across all injected content.
+
+Consider adding small CLI wrappers for each task for pipeline CI runs.
+
+
+If you want, I can also turn these into Jira tickets with concise descriptions and checklists.
+
