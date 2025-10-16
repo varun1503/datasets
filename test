@@ -1,198 +1,75 @@
-# accuracy_check.py
-# pip install fuzzysearch
+# pdf_text_extractor.py
+# pip install pdfminer.six
 
-from __future__ import annotations
-from dataclasses import dataclass, field
-from typing import List, Tuple, Optional, Dict
-import re
 import os
+from pdfminer.high_level import extract_text
+from pdfminer.layout import LAParams
 
-from fuzzysearch import find_near_matches
 
+class PDFTextExtractor:
+    """
+    A class to extract text from PDF files and save them as .txt files.
+    """
 
-@dataclass
-class AccuracyCheck:
-    max_l_dist: int = 1
-    credit_bureau_list: List[str] = field(default_factory=lambda: [
-        "Experian",
-        "D&B corporation",
-        "TransUnion Consumer Relations",
-        "LexisNexis Risk Solutions Bureau LLC",
-    ])
-    across_page_filler: str = "Continued  on  reverse  side"
-    lead_sentence_1: str = "Here's the reason we made the decision"
-    lead_sentence_2: str = "Reason(s) for Our Decision"
-
-    # ----------------------------- helpers -----------------------------
+    def __init__(self, save_dir: str):
+        """
+        Initialize with a directory where extracted text files will be saved.
+        """
+        self.save_dir = save_dir
+        os.makedirs(save_dir, exist_ok=True)
 
     @staticmethod
-    def _slice_next_sentences(content: str, start_idx: int, n_sentences: int) -> str:
+    def list_file_paths(folder_path: str) -> list[str]:
         """
-        Return the next N sentences from content starting at start_idx (inclusive).
-        Sentences split on ., !, ? followed by whitespace/newline.
+        Recursively lists all PDF file paths in the folder (excluding checkpoints).
         """
-        if start_idx < 0 or start_idx >= len(content):
+        file_paths = []
+        for root, _, files in os.walk(folder_path):
+            for file in files:
+                if "checkpoint" not in file.lower() and file.lower().endswith(".pdf"):
+                    file_paths.append(os.path.join(root, file))
+        return file_paths
+
+    def pdf_to_text(self, pdf_path: str) -> str:
+        """
+        Extracts text from a single PDF file and saves it to a corresponding .txt file.
+        """
+        try:
+            text = extract_text(pdf_path, laparams=LAParams())
+        except Exception as e:
+            print(f"[ERROR] Failed to extract {pdf_path}: {e}")
             return ""
-        tail = content[start_idx:]
-        # Normalize whitespace to make splitting more reliable
-        tail = re.sub(r"[ \t]+", " ", tail)
-        # Split into sentences
-        parts = re.split(r"(?<=[\.!?])\s+", tail)
-        take = max(1, n_sentences)
-        return " ".join(parts[:take]).strip()
 
-    def _get_credit_bureaus(self, content: str) -> List[str]:
-        found = []
-        for item in self.credit_bureau_list:
-            if item in content:
-                found.append(item)
-        return found
+        path_parts = os.path.normpath(pdf_path).split(os.sep)
+        # Example: /data/letters/abc.pdf → save_dir/letters_abc.txt
+        new_filename = "_".join(path_parts[-2:]) + ".txt"
+        output_path = os.path.join(self.save_dir, new_filename)
 
-    @staticmethod
-    def _get_dates(content: str) -> List[str]:
-        # Example: "September 12, 2024"
-        pattern = (
-            r"(?:January|February|March|April|May|June|July|August|September|October|November|December)"
-            r"\s+(?:[1-9]|[12]\d|3[01]),?\s+\d{4}"
-        )
-        return re.findall(pattern, content)
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(text)
 
-    # ----------------------------- extractors -----------------------------
+        print(f"[OK] Extracted → {output_path}")
+        return output_path
 
-    def find_fico_score(self, content: str) -> str:
-        hits = find_near_matches("FICO score was", content, max_l_dist=self.max_l_dist)
-        if not hits:
-            return "not found"
-        s = hits[0].start
-        block = self._slice_next_sentences(content, s, 3)
-        # Often the number is in the same first sentence; trim at first period if present
-        first_sentence = block.split(".")[0]
-        return first_sentence.strip() if first_sentence else block
-
-    def find_factors(self, content: str) -> str:
-        hits = find_near_matches(
-            "The following are the key factors that contributed to your FICO score",
-            content,
-            max_l_dist=self.max_l_dist,
-        )
-        if not hits:
-            return "not found"
-        s = hits[0].start
-        return self._slice_next_sentences(content, s, 7)
-
-    def find_creditor(self, content: str) -> str:
-        hits = find_near_matches("The creditor is", content, max_l_dist=self.max_l_dist)
-        if not hits:
-            return "not found"
-        s = hits[0].start
-        return self._slice_next_sentences(content, s, 2)
-
-    def find_your_right(self, content: str) -> str:
+    def pdf_to_text_batch(self, folder_path: str):
         """
-        Only extract if a recognized bureau is present in the document (to mirror your logic).
+        Extracts text from all PDFs in the folder and saves them in the save_dir.
         """
-        bureaus = self._get_credit_bureaus(content)
-        if not bureaus:
-            return "not found (no credit bureau detected in document)"
+        file_paths = self.list_file_paths(folder_path)
+        if not file_paths:
+            print("[INFO] No PDF files found.")
+            return
 
-        hits = find_near_matches(
-            "Your Right to Get Your Credit Report", content, max_l_dist=self.max_l_dist
-        )
-        if not hits:
-            return "not found"
-        s = hits[0].start
-        block = self._slice_next_sentences(content, s, 10)
-        if self.across_page_filler in block:
-            block = self._slice_next_sentences(content, s, 17)
-        return block
+        for pdf_path in file_paths:
+            self.pdf_to_text(pdf_path)
 
-    def find_credit_bureaus(self, content: str) -> List[str]:
-        return self._get_credit_bureaus(content)
-
-    def find_5th_subfactor(self, content: str) -> str:
-        hits = find_near_matches(
-            "inquiries on your report in the last 12 months",
-            content,
-            max_l_dist=self.max_l_dist,
-        )
-        if not hits:
-            return "not found"
-        s = hits[0].start
-        return self._slice_next_sentences(content, s, 2)
-
-    def find_decline_reason(self, content: str) -> str:
-        hits1 = find_near_matches(self.lead_sentence_1, content, max_l_dist=self.max_l_dist)
-        hits2 = find_near_matches(self.lead_sentence_2, content, max_l_dist=self.max_l_dist)
-
-        if not hits1 and not hits2:
-            return "not found"
-
-        s = (hits1 or hits2)[0].start
-        return self._slice_next_sentences(content, s, 15)
-
-    def find_first_date(self, content: str) -> str:
-        dates = self._get_dates(content)
-        return dates[0] if dates else "not found"
-
-    # ----------------------------- orchestrator -----------------------------
-
-    def analyze_text(self, content: str) -> Dict[str, str | List[str]]:
-        """
-        Run all extractors on a single text blob and return a dict of results.
-        """
-        return {
-            "First Date": self.find_first_date(content),
-            "FICO Score": self.find_fico_score(content),
-            "FICO Factors": self.find_factors(content),
-            "Creditor": self.find_creditor(content),
-            "Your Right Section": self.find_your_right(content),
-            "Credit Bureaus Found": ", ".join(self.find_credit_bureaus(content)) or "none",
-            "5th Subfactor (Inquiries 12mo)": self.find_5th_subfactor(content),
-            "Decline Reason": self.find_decline_reason(content),
-        }
-
-    def run(self, file_paths_txt: List[str], output_txt_path: str) -> None:
-        """
-        Read each input **text** file, extract all signals, and write a consolidated **text** report.
-        """
-        lines: List[str] = []
-        lines.append("=" * 96)
-        lines.append("ACCURACY CHECK REPORT")
-        lines.append("=" * 96)
-        lines.append("")
-
-        for path in file_paths_txt:
-            try:
-                with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                    content = f.read()
-            except Exception as e:
-                lines.append(f"FILE: {path}")
-                lines.append(f"ERROR reading file: {e}")
-                lines.append("-" * 96)
-                continue
-
-            results = self.analyze_text(content)
-
-            lines.append(f"FILE: {path}")
-            for k, v in results.items():
-                lines.append(f"{k}: {v if isinstance(v, str) else str(v)}")
-            lines.append("-" * 96)
-
-        # Ensure output directory exists
-        os.makedirs(os.path.dirname(os.path.abspath(output_txt_path)), exist_ok=True)
-        with open(output_txt_path, "w", encoding="utf-8") as out:
-            out.write("\n".join(lines))
+        print(f"[DONE] Batch processing completed for {len(file_paths)} files.")
 
 
 # ----------------------------- example usage -----------------------------
 if __name__ == "__main__":
-    # Replace with your actual list of text file paths
-    file_paths_txt = [
-        # "data/file1.txt",
-        # "data/file2.txt",
-    ]
-    out_path = "accuracy_report.txt"
+    folder_path = ""  # Path to your folder containing PDFs
+    save_dir = ""     # Path to save extracted text files
 
-    checker = AccuracyCheck(max_l_dist=1)
-    checker.run(file_paths_txt, out_path)
-    print(f"Wrote report to: {out_path}")
+    extractor = PDFTextExtractor(save_dir)
+    extractor.pdf_to_text_batch(folder_path)
