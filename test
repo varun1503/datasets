@@ -1,47 +1,198 @@
-Here’s a user story–style one-pager for your E2 Readiness and Pipeline Validation, with a clear story heading, description, and acceptance criteria — ideal for sprint documentation or Jira entry.
+# accuracy_check.py
+# pip install fuzzysearch
+
+from __future__ import annotations
+from dataclasses import dataclass, field
+from typing import List, Tuple, Optional, Dict
+import re
+import os
+
+from fuzzysearch import find_near_matches
 
 
----
+@dataclass
+class AccuracyCheck:
+    max_l_dist: int = 1
+    credit_bureau_list: List[str] = field(default_factory=lambda: [
+        "Experian",
+        "D&B corporation",
+        "TransUnion Consumer Relations",
+        "LexisNexis Risk Solutions Bureau LLC",
+    ])
+    across_page_filler: str = "Continued  on  reverse  side"
+    lead_sentence_1: str = "Here's the reason we made the decision"
+    lead_sentence_2: str = "Reason(s) for Our Decision"
 
-Story Title:
+    # ----------------------------- helpers -----------------------------
 
-E2 Readiness – Validation and Testing of End-to-End Data Ingestion Pipeline (Chunking, Embedding, and Ingestion Services)
+    @staticmethod
+    def _slice_next_sentences(content: str, start_idx: int, n_sentences: int) -> str:
+        """
+        Return the next N sentences from content starting at start_idx (inclusive).
+        Sentences split on ., !, ? followed by whitespace/newline.
+        """
+        if start_idx < 0 or start_idx >= len(content):
+            return ""
+        tail = content[start_idx:]
+        # Normalize whitespace to make splitting more reliable
+        tail = re.sub(r"[ \t]+", " ", tail)
+        # Split into sentences
+        parts = re.split(r"(?<=[\.!?])\s+", tail)
+        take = max(1, n_sentences)
+        return " ".join(parts[:take]).strip()
+
+    def _get_credit_bureaus(self, content: str) -> List[str]:
+        found = []
+        for item in self.credit_bureau_list:
+            if item in content:
+                found.append(item)
+        return found
+
+    @staticmethod
+    def _get_dates(content: str) -> List[str]:
+        # Example: "September 12, 2024"
+        pattern = (
+            r"(?:January|February|March|April|May|June|July|August|September|October|November|December)"
+            r"\s+(?:[1-9]|[12]\d|3[01]),?\s+\d{4}"
+        )
+        return re.findall(pattern, content)
+
+    # ----------------------------- extractors -----------------------------
+
+    def find_fico_score(self, content: str) -> str:
+        hits = find_near_matches("FICO score was", content, max_l_dist=self.max_l_dist)
+        if not hits:
+            return "not found"
+        s = hits[0].start
+        block = self._slice_next_sentences(content, s, 3)
+        # Often the number is in the same first sentence; trim at first period if present
+        first_sentence = block.split(".")[0]
+        return first_sentence.strip() if first_sentence else block
+
+    def find_factors(self, content: str) -> str:
+        hits = find_near_matches(
+            "The following are the key factors that contributed to your FICO score",
+            content,
+            max_l_dist=self.max_l_dist,
+        )
+        if not hits:
+            return "not found"
+        s = hits[0].start
+        return self._slice_next_sentences(content, s, 7)
+
+    def find_creditor(self, content: str) -> str:
+        hits = find_near_matches("The creditor is", content, max_l_dist=self.max_l_dist)
+        if not hits:
+            return "not found"
+        s = hits[0].start
+        return self._slice_next_sentences(content, s, 2)
+
+    def find_your_right(self, content: str) -> str:
+        """
+        Only extract if a recognized bureau is present in the document (to mirror your logic).
+        """
+        bureaus = self._get_credit_bureaus(content)
+        if not bureaus:
+            return "not found (no credit bureau detected in document)"
+
+        hits = find_near_matches(
+            "Your Right to Get Your Credit Report", content, max_l_dist=self.max_l_dist
+        )
+        if not hits:
+            return "not found"
+        s = hits[0].start
+        block = self._slice_next_sentences(content, s, 10)
+        if self.across_page_filler in block:
+            block = self._slice_next_sentences(content, s, 17)
+        return block
+
+    def find_credit_bureaus(self, content: str) -> List[str]:
+        return self._get_credit_bureaus(content)
+
+    def find_5th_subfactor(self, content: str) -> str:
+        hits = find_near_matches(
+            "inquiries on your report in the last 12 months",
+            content,
+            max_l_dist=self.max_l_dist,
+        )
+        if not hits:
+            return "not found"
+        s = hits[0].start
+        return self._slice_next_sentences(content, s, 2)
+
+    def find_decline_reason(self, content: str) -> str:
+        hits1 = find_near_matches(self.lead_sentence_1, content, max_l_dist=self.max_l_dist)
+        hits2 = find_near_matches(self.lead_sentence_2, content, max_l_dist=self.max_l_dist)
+
+        if not hits1 and not hits2:
+            return "not found"
+
+        s = (hits1 or hits2)[0].start
+        return self._slice_next_sentences(content, s, 15)
+
+    def find_first_date(self, content: str) -> str:
+        dates = self._get_dates(content)
+        return dates[0] if dates else "not found"
+
+    # ----------------------------- orchestrator -----------------------------
+
+    def analyze_text(self, content: str) -> Dict[str, str | List[str]]:
+        """
+        Run all extractors on a single text blob and return a dict of results.
+        """
+        return {
+            "First Date": self.find_first_date(content),
+            "FICO Score": self.find_fico_score(content),
+            "FICO Factors": self.find_factors(content),
+            "Creditor": self.find_creditor(content),
+            "Your Right Section": self.find_your_right(content),
+            "Credit Bureaus Found": ", ".join(self.find_credit_bureaus(content)) or "none",
+            "5th Subfactor (Inquiries 12mo)": self.find_5th_subfactor(content),
+            "Decline Reason": self.find_decline_reason(content),
+        }
+
+    def run(self, file_paths_txt: List[str], output_txt_path: str) -> None:
+        """
+        Read each input **text** file, extract all signals, and write a consolidated **text** report.
+        """
+        lines: List[str] = []
+        lines.append("=" * 96)
+        lines.append("ACCURACY CHECK REPORT")
+        lines.append("=" * 96)
+        lines.append("")
+
+        for path in file_paths_txt:
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+            except Exception as e:
+                lines.append(f"FILE: {path}")
+                lines.append(f"ERROR reading file: {e}")
+                lines.append("-" * 96)
+                continue
+
+            results = self.analyze_text(content)
+
+            lines.append(f"FILE: {path}")
+            for k, v in results.items():
+                lines.append(f"{k}: {v if isinstance(v, str) else str(v)}")
+            lines.append("-" * 96)
+
+        # Ensure output directory exists
+        os.makedirs(os.path.dirname(os.path.abspath(output_txt_path)), exist_ok=True)
+        with open(output_txt_path, "w", encoding="utf-8") as out:
+            out.write("\n".join(lines))
 
 
----
+# ----------------------------- example usage -----------------------------
+if __name__ == "__main__":
+    # Replace with your actual list of text file paths
+    file_paths_txt = [
+        # "data/file1.txt",
+        # "data/file2.txt",
+    ]
+    out_path = "accuracy_report.txt"
 
-Description:
-
-The goal of this story is to ensure full E2 readiness for the data ingestion pipeline, validating its functionality, stability, and integration across environments. The pipeline comprises three major services — Chunking, Embedding, and Ingestion — which together form the backbone of the MRMG document processing and vector storage system.
-
-The team conducted E1 environment testing to verify service-level functionality, API responsiveness, and internal data flow between components. Each service was deployed, tested, and monitored for errors, latency, and schema compatibility. After successful validation in E1, the focus shifted to E2 readiness, where environment configurations, credentials, Kafka topic connectivity, and DataStax vector database endpoints were validated for production-like stability.
-
-The E2 readiness phase confirmed that all three services — Chunking, Embedding, and Ingestion — can seamlessly operate together as a unified system, handling document ingestion from source to vector index. This ensures the pipeline is deployment-ready for E2, capable of supporting MRMG use cases with full observability, logging, and error recovery in place.
-
-
----
-
-Acceptance Criteria:
-
-✅ Chunking Service successfully processes and splits uploaded documents into structured chunks with metadata enrichment.
-
-✅ Embedding Service generates embeddings using the configured model (e.g., GPT-4o embeddings) and pushes them to the ingestion pipeline without failures.
-
-✅ Ingestion Service ingests the processed embeddings and metadata into DataStax vector tables, maintaining correct schema alignment.
-
-✅ Kafka topics for chunking, embedding, and ingestion are connected, authenticated, and consuming messages end-to-end without error.
-
-✅ Environment variables and secrets are configured correctly in E2 (AuthBlue, AiDa FeatureOps, DataStax endpoints, etc.).
-
-✅ API endpoints for all services return valid responses with 200 OK in E2.
-
-✅ Logs confirm full message flow from document upload to vector ingestion with no broken stages.
-
-✅ E1 testing validated integration behavior; E2 readiness confirms stability, scalability, and data accuracy across services.
-
-
-
----
-
-Would you like me to extend this with a “Testing Summary” section (e.g., tools used, results, latency benchmarks, and sample logs) for sprint documentation or demo notes?
-
+    checker = AccuracyCheck(max_l_dist=1)
+    checker.run(file_paths_txt, out_path)
+    print(f"Wrote report to: {out_path}")
