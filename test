@@ -1,2 +1,197 @@
-import sys, os
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+# adequacy_letter_check.py
+# pip install fuzzysearch
+
+from __future__ import annotations
+from dataclasses import dataclass, field
+from typing import List, Dict, Tuple, Pattern
+import os
+import re
+
+from fuzzysearch import find_near_matches
+
+
+@dataclass
+class AdequacyCheck:
+    """
+    Extract common fields from Adverse Action letter TEXT files.
+    """
+    max_l_dist: int = 1
+    ecoa_string: str = "The federal Equal Credit Opportunity Act"
+    continued_filler: str = "Continued  on  next  page"
+    url_pattern: Pattern[str] = re.compile(
+        r'www\.[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*(?:/[a-zA-Z0-9\-_.~%]+)*'
+    )
+    phone_regex: Pattern[str] = re.compile(
+        r'(?:\d{3}|\d{3})[-. ]?\d{3}[-. ]?\d{4}'
+    )
+
+    # ----------------------------- helpers -----------------------------
+
+    @staticmethod
+    def _slice_next_sentences(content: str, start_idx: int, n_sentences: int) -> str:
+        """Return next N sentences from content starting at start_idx."""
+        if start_idx < 0 or start_idx >= len(content):
+            return ""
+        tail = re.sub(r"[ \t]+", " ", content[start_idx:])
+        parts = re.split(r"(?<=[\.!?])\s+", tail)
+        return " ".join(parts[:max(1, n_sentences)]).strip()
+
+    @staticmethod
+    def _max_common_substring(s1: str, s2: str) -> Tuple[str, int]:
+        """Longest common contiguous substring length (DP), lowercase & no spaces."""
+        a = s1.lower().replace(" ", "")
+        b = s2.lower().replace(" ", "")
+        m, n = len(a), len(b)
+        dp = [[0]*(n+1) for _ in range(m+1)]
+        best = (0, 0)  # (length, end_pos_in_a)
+        for i in range(1, m+1):
+            for j in range(1, n+1):
+                if a[i-1] == b[j-1]:
+                    dp[i][j] = dp[i-1][j-1] + 1
+                    if dp[i][j] > best[0]:
+                        best = (dp[i][j], i)
+        length, end = best
+        return (a[end-length:end], length)
+
+    # ----------------------------- extractors -----------------------------
+
+    def extract_salutation_name(self, content: str) -> str:
+        """
+        Capture name after 'Dear' or 'Hi ' until a ',' or ':'.
+        """
+        m = re.search(r"(Dear|Hi\s)", content)
+        if not m:
+            return "not found"
+        s = m.end()
+        out = []
+        for ch in content[s:]:
+            if ch not in {",", ":"}:
+                out.append(ch)
+            else:
+                break
+        name = "".join(out).strip()
+        return name or "not found"
+
+    def extract_applied_product(self, content: str) -> str:
+        """
+        Extract text between 'applying for ' and the next period.
+        """
+        m = re.search(r"applying for (.+?)\.", content, flags=re.IGNORECASE | re.DOTALL)
+        return m.group(1).strip() if m else "not found"
+
+    def find_ecoa(self, content: str) -> str:
+        hits = find_near_matches(self.ecoa_string, content, max_l_dist=self.max_l_dist)
+        if not hits:
+            return "not found"
+        s = hits[0].start
+        block = self._slice_next_sentences(content, s, 10)
+        if self.continued_filler in block:
+            block = self._slice_next_sentences(content, s, 17)
+        return block
+
+    def find_ohio_notice(self, content: str) -> str:
+        hits = find_near_matches("Notice to Ohio Residents", content, max_l_dist=1)
+        if not hits:
+            return "not found"
+        s = hits[0].start
+        return self._slice_next_sentences(content, s, 1)
+
+    def find_your_options(self, content: str) -> str:
+        hits = find_near_matches("your options", content, max_l_dist=0)
+        if not hits:
+            return "not found"
+        s = hits[0].start
+        return self._slice_next_sentences(content, s, 1)
+
+    def find_signatory(self, content: str) -> str:
+        hits = find_near_matches("Sincerely", content, max_l_dist=1)
+        if not hits:
+            return "not found"
+        s = hits[0].start
+        return self._slice_next_sentences(content, s, 3)
+
+    def get_top_address_lines(self, content: str, n_lines: int = 7) -> str:
+        """
+        Heuristic: the address is in the first few lines of the document.
+        """
+        lines = content.splitlines()
+        block = lines[:max(1, n_lines)]
+        return "\n".join(block).strip() if block else "not found"
+
+    def get_phone_numbers(self, content: str) -> List[str]:
+        return re.findall(self.phone_regex, content)
+
+    def extract_urls(self, content: str) -> List[str]:
+        urls = re.findall(self.url_pattern, content) or []
+        if "americanexpress.com" in content and "americanexpress.com" not in urls:
+            urls.append("americanexpress.com")
+        return urls
+
+    # ----------------------------- orchestrator -----------------------------
+
+    def analyze_text(self, content: str) -> Dict[str, str | List[str]]:
+        """
+        Run all extractors on a single text blob and return a dict of results.
+        """
+        return {
+            "Salutation Name": self.extract_salutation_name(content),
+            "Applied Product": self.extract_applied_product(content),
+            "ECOA Section": self.find_ecoa(content),
+            "Ohio Notice": self.find_ohio_notice(content),
+            "Your Options": self.find_your_options(content),
+            "Signatory": self.find_signatory(content),
+            "Top Address Lines": self.get_top_address_lines(content),
+            "Phone Numbers": self.get_phone_numbers(content) or ["not found"],
+            "URLs": self.extract_urls(content) or ["not found"],
+        }
+
+    def run(self, file_paths_txt: List[str], output_txt_path: str | None = None) -> Dict[str, Dict[str, str | List[str]]]:
+        """
+        Process many text files. Optionally write a .txt report.
+        Returns a dict: {file_path: {field: value}}.
+        """
+        results: Dict[str, Dict[str, str | List[str]]] = {}
+        lines: List[str] = []
+
+        for fp in file_paths_txt:
+            try:
+                with open(fp, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                r = results[fp] = self.analyze_text(content)
+
+                # pretty-print to report
+                lines.append(f"FILE: {fp}")
+                for k, v in r.items():
+                    if isinstance(v, list):
+                        lines.append(f"{k}: {', '.join(v)}")
+                    else:
+                        lines.append(f"{k}: {v}")
+                lines.append("-" * 96)
+            except Exception as e:
+                results[fp] = {"ERROR": str(e)}
+                lines.append(f"FILE: {fp}\nERROR: {e}\n{'-'*96}")
+
+        if output_txt_path:
+            os.makedirs(os.path.dirname(os.path.abspath(output_txt_path)), exist_ok=True)
+            with open(output_txt_path, "w", encoding="utf-8") as out:
+                out.write("\n".join(lines))
+
+        return results
+
+
+# ----------------------------- example usage -----------------------------
+if __name__ == "__main__":
+    file_paths_txt = [
+        # r"C:\path\to\letter1.txt",
+        # r"C:\path\to\letter2.txt",
+    ]
+    out_path = ""  # e.g., r"C:\tmp\adequacy_report.txt" (leave "" to skip writing)
+
+    checker = AdequacyCheck(max_l_dist=1)
+    report = checker.run(file_paths_txt, output_txt_path=out_path or None)
+
+    # Console summary
+    for fp, fields in report.items():
+        print("\n", fp)
+        for k, v in fields.items():
+            print(f"  - {k}: {v}")
