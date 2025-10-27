@@ -1,216 +1,57 @@
- from docx import Document
-from docx.text.paragraph import Paragraph
-from docx.oxml import OxmlElement
-from docx.shared import Pt
-from docx.enum.text import WD_COLOR_INDEX
-import re, json, ast
-import pandas as pd
-
-# ---------- helpers ----------
-def _norm(s):
-    return re.sub(r"\s+", " ", (s or "")).strip().lower()
-
-def _format_run(run, bold=False, highlight=None):
-    run.bold = bool(bold)
-    run.font.name = "Times New Roman"
-    run.font.size = Pt(11)
-    # highlight (e.g., WD_COLOR_INDEX.YELLOW)
-    if highlight is not None:
-        run.font.highlight_color = highlight
-
-def _insert_before(p: Paragraph, text="", bold=False, highlight=None):
-    """Insert a paragraph BEFORE p, write text (Times New Roman 11), bold if requested."""
-    new_p = OxmlElement("w:p")
-    p._p.addprevious(new_p)
-    q = Paragraph(new_p, p._parent)
-    if text:
-        r = q.add_run(text)
-        _format_run(r, bold=bold, highlight=highlight)
-    return q
-
-def _insert_after(p: Paragraph, text="", bold=False, highlight=None):
-    """Insert a paragraph AFTER p, write text (Times New Roman 11), bold if requested."""
-    new_p = OxmlElement("w:p")
-    p._p.addnext(new_p)
-    q = Paragraph(new_p, p._parent)
-    if text:
-        r = q.add_run(text)
-        _format_run(r, bold=bold, highlight=highlight)
-    return q
-
-def _delete_range(paragraphs, i_from, i_to):
-    if i_from is None or i_to is None or i_from > i_to:
-        return
-    for k in range(i_to, i_from - 1, -1):
-        elm = paragraphs[k]._element
-        elm.getparent().remove(elm)
-
-def _safe_dict(x):
-    if isinstance(x, dict):
-        return x
-    if isinstance(x, str):
-        s = x.strip()
-        if not s:
-            return {}
-        try:
-            return json.loads(s)
-        except Exception:
-            try:
-                return ast.literal_eval(s)
-            except Exception:
-                return {}
-    return {}
-
-def _snum(text):  # returns like "S2" if present, else ""
-    m = re.search(r"\bS\s*(\d+)\b", text or "", flags=re.IGNORECASE)
-    return f"S{m.group(1)}" if m else ""
-
-def _looks_like_test(p):
-    return bool(re.search(r"\btest\b", _norm(p.text)))
-
-# ---------- main ----------
-def insert_rfr_and_mrmg_with_tags(
-    doc_path: str,
-    df: pd.DataFrame,
-    output_path: str,
-    tag_col: str = "text",                  # e.g., "Test S1"
-    rfr_col: str = "rfr_value",             # dict: {<challenge text>: <model team response>}
-    mrmg_col: str = "MRMG Assessment ",     # your sheet appears to have a trailing space
-    mtr_heading_base: str = "Modelling Team Response",
-    highlight_assessment: bool = True,      # highlight MRMG Assessment body?
-    assessment_highlight_color=WD_COLOR_INDEX.YELLOW,  # default color
-):
-    """
-    For each df row (per Test S# tag):
-      Insert:
-        Challenge S#                <-- dict key
-        Modelling Team Response S#  <-- dict value
-        MRMG Assessment S#          <-- df[mrmg_col]
-      Place before 'MRMG Evaluation ...' if present; else after 'Modelling/Modeling Team Response ...'; else end.
-      Clear older Challenge/Response/Assessment for that S# in that slot first.
-
-    All inserted text is Times New Roman, size 11.
-    Headings are bold (same font/size).
-    """
-    doc = Document(doc_path)
-
-    for _, row in df.iterrows():
-        tag = str(row.get(tag_col, "") or "").strip()
-        rfr = _safe_dict(row.get(rfr_col, {}))
-        mrmg = str(row.get(mrmg_col, "") or "").strip()
-        if not tag:
-            continue
-
-        sn = _snum(tag)  # "S1", "S2", ...
-
-        # 1) locate tag paragraph (exact, else by S-number)
-        paras = doc.paragraphs
-        tag_norm = _norm(tag)
-        start_idx = next((i for i, p in enumerate(paras) if tag_norm in _norm(p.text)), None)
-        if start_idx is None and sn:
-            start_idx = next((i for i, p in enumerate(paras) if sn.lower() in _norm(p.text)), None)
-        if start_idx is None:
-            continue
-
-        # 2) section end = next "Test ..." or doc end
-        next_test = None
-        for j in range(start_idx + 1, len(paras)):
-            if _looks_like_test(paras[j]):
-                next_test = j
-                break
-        section_end = next_test if next_test is not None else len(paras)
-
-        # 3) find MTR and MRMG Evaluation (no strict S# requirement for matching)
-        mtr_idx, eval_idx = None, None
-        for j in range(start_idx + 1, section_end):
-            t = _norm(paras[j].text)
-            if mtr_idx is None and ("modelling team response" in t or "modeling team response" in t):
-                mtr_idx = j
-            if eval_idx is None and "mrmg evaluation" in t:
-                eval_idx = j
-            if mtr_idx is not None and eval_idx is not None:
-                break
-
-        # 4) choose anchor to insert BEFORE
-        if eval_idx is not None:
-            anchor_before = paras[eval_idx]
-        elif mtr_idx is not None:
-            anchor_before = _insert_after(paras[mtr_idx])  # a blank after the MTR heading
-        else:
-            base = paras[section_end - 1] if section_end > start_idx + 1 else paras[start_idx]
-            anchor_before = _insert_after(base)
-
-        # 5) clear old Challenge/Response/Assessment S# between MTR/start and Eval/section_end
-        scan_from = mtr_idx if mtr_idx is not None else start_idx
-        scan_to = (eval_idx - 1) if eval_idx is not None else (section_end - 1)
-        kill = []
-        i = scan_from + 1
-        while i <= scan_to and i < len(doc.paragraphs):
-            t = _norm(doc.paragraphs[i].text)
-            if (
-                t.startswith(f"challenge {sn.lower()}") or
-                t.startswith(f"{_norm(mtr_heading_base)} {sn.lower()}") or
-                t.startswith(f"modeling team response {sn.lower()}") or
-                t.startswith(f"mrmg assessment {sn.lower()}")
-            ):
-                start_del = i
-                end_del = min(i + 1, len(doc.paragraphs) - 1)  # heading + next body line
-                kill.append((start_del, end_del))
-                i = end_del + 1
-                continue
-            i += 1
-        for a, b in reversed(kill):
-            _delete_range(doc.paragraphs, a, b)
-
-        # refresh references after deletion
-        paras = doc.paragraphs
-        try:
-            _ = anchor_before._p
-        except Exception:
-            anchor_before = paras[min(eval_idx, len(paras) - 1)] if eval_idx is not None else paras[-1]
-
-        # 6) insert RFR pairs: Challenge S# + Modelling Team Response S#
-        if rfr:
-            for ch_text, resp_text in rfr.items():
-                ch_head = f"Challenge {sn}" if sn else "Challenge"
-                mtr_head = f"{mtr_heading_base} {sn}" if sn else mtr_heading_base
-
-                # Challenge heading + body
-                _insert_before(anchor_before, ch_head, bold=True)
-                _insert_before(anchor_before, str(ch_text or "").strip(), bold=False)
-
-                # Modelling Team Response heading + body
-                _insert_before(anchor_before, mtr_head, bold=True)
-                _insert_before(anchor_before, str(resp_text or "").strip(), bold=False)
-
-                _insert_before(anchor_before, "", bold=False)  # spacer after each pair
-
-        # 7) insert MRMG Assessment S# (highlight the body if requested)
-        if mrmg:
-            a_head = f"MRMG Assessment {sn}" if sn else "MRMG Assessment"
-            _insert_before(anchor_before, a_head, bold=True)  # heading (not highlighted)
-            _insert_before(
-                anchor_before,
-                mrmg,
-                highlight=(assessment_highlight_color if highlight_assessment else None),
-            )
-            _insert_before(anchor_before, "", bold=False)  # spacer
-
-    doc.save(output_path)
+Here’s a clean one-page sprint-review summary built from your three Jira tasks shown in the screenshot 👇
 
 
-# ---------- example usage ----------
-if __name__ == "__main__":
-    # Adjust file paths and column names to match your environment
-    df_tem = pd.read_excel(r"Technology_L.xlsx")
-    insert_rfr_and_mrmg_with_tags(
-        doc_path="test_1.docx",
-        df=df_tem,                       # columns: text, rfr_value (dict/str), MRMG Assessment  (note the space)
-        output_path="output2.docx",
-        tag_col="text",
-        rfr_col="rfr_value",
-        mrmg_col="MRMG Assessment ",     # keep the trailing space if your sheet has it
-        mtr_heading_base="Modelling Team Response",
-        highlight_assessment=True,       # set False if you ever want to disable highlighting
-        assessment_highlight_color=WD_COLOR_INDEX.YELLOW,
-    )
+---
+
+Sprint Review – E_Tech_SCOE_ML Project
+
+Owner: Varun Vaishy
+
+Sprint Theme: E2 Deployment Enablement (Chunking | Embedding | Ingestion)
+
+
+---
+
+1. Kafka Credential Configuration
+
+Configured secure Kafka credentials across chunking, embedding, and ingestion micro-services.
+
+Enabled seamless end-to-end (E2) communication between producer–consumer components.
+
+Verified topic creation, authentication, and message-flow consistency for deployment.
+
+
+
+---
+
+2. Pipeline Integration & Deployment Flow
+
+Integrated all services within the CI/CD code pipeline for automated build and deployment.
+
+Added environment-specific configuration for staging and production (E2).
+
+Ensured successful artifact publishing and environment variable propagation across the workflow.
+
+
+
+---
+
+3. Testing & Bug Fixing for Deployment Readiness
+
+Performed regression testing to validate service-to-service messaging and ingestion accuracy.
+
+Fixed deployment-blocking issues (environment path mismatches, message deserialization).
+
+Verified complete E2 pipeline run—system marked ready for E2 deployment.
+
+
+
+---
+
+✅ Outcome: All three pipeline services (chunking, embedding, ingestion) successfully configured, integrated, and validated—system is stable and deployment-ready for E2 environment.
+
+
+---
+
+Would you like me to make this into a formatted Word (DOCX) or PDF one-pager for upload to your sprint review deck?
+
