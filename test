@@ -1,57 +1,6 @@
-Here’s a clean one-page sprint-review summary built from your three Jira tasks shown in the screenshot 👇
+Description:
+This sprint aims to achieve full E2 deployment, establish E3 readiness, and conduct complete end-to-end testing across all major services — chunking, embedding, and ingestion. The focus is on validating stable deployments, ensuring configuration consistency, and verifying message flow across Kafka topics and CI/CD pipelines. The goal is to make the system production-ready for E3 by addressing all deployment dependencies, environment variables, and automation gaps.
 
-
----
-
-Sprint Review – E_Tech_SCOE_ML Project
-
-Owner: Varun Vaishy
-
-Sprint Theme: E2 Deployment Enablement (Chunking | Embedding | Ingestion)
-
-
----
-
-1. Kafka Credential Configuration
-
-Configured secure Kafka credentials across chunking, embedding, and ingestion micro-services.
-
-Enabled seamless end-to-end (E2) communication between producer–consumer components.
-
-Verified topic creation, authentication, and message-flow consistency for deployment.
-
-
-
----
-
-2. Pipeline Integration & Deployment Flow
-
-Integrated all services within the CI/CD code pipeline for automated build and deployment.
-
-Added environment-specific configuration for staging and production (E2).
-
-Ensured successful artifact publishing and environment variable propagation across the workflow.
-
-
-
----
-
-3. Testing & Bug Fixing for Deployment Readiness
-
-Performed regression testing to validate service-to-service messaging and ingestion accuracy.
-
-Fixed deployment-blocking issues (environment path mismatches, message deserialization).
-
-Verified complete E2 pipeline run—system marked ready for E2 deployment.
-
-
-
----
-
-✅ Outcome: All three pipeline services (chunking, embedding, ingestion) successfully configured, integrated, and validated—system is stable and deployment-ready for E2 environment.
-
-
----
-
-Would you like me to make this into a formatted Word (DOCX) or PDF one-pager for upload to your sprint review deck?
+Acceptance Criteria:
+E2 environment is successfully deployed and verified for all services, with all Kafka credentials, ACLs, and environment configurations validated. E3 configurations are prepared, tested, and documented for smooth migration. End-to-end data flow testing confirms reliable communication between services with zero data loss or deployment failure. All regression, integration, and performance tests pass without critical defects, and deployment reports are shared with validation logs confirming E3 readiness.
 
