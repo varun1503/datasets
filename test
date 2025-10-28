@@ -27,9 +27,7 @@ def _format_run(run, bold=False):
     run.font.name = "Times New Roman"
     run.font.size = Pt(11)
     run.bold = bool(bold)
-    # override any themed color coming from the style
     run.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
-    # (python-docx ignores theme_color=None sometimes, rgb wins)
 
 def _force_paragraph_black(p: Paragraph, bold=True):
     """Ensure all runs are black (and bold if requested)."""
@@ -65,6 +63,17 @@ def _is_heading(p: Paragraph) -> bool:
     except Exception:
         return False
 
+def _force_toc_styles_black_bold(doc, levels=(1, 2, 3)):
+    """Make TOC N styles (TOC 1, TOC 2, ...) black and bold so updated TOC matches."""
+    for lvl in levels:
+        style_name = f"TOC {lvl}"
+        try:
+            s = doc.styles[style_name]
+            s.font.bold = True
+            s.font.color.rgb = RGBColor(0, 0, 0)
+        except Exception:
+            pass
+
 # ---------- main ----------
 def replace_finding_details_section(
     doc_path: str,
@@ -80,7 +89,7 @@ def replace_finding_details_section(
     """
     Replace the 'Finding Details' block with generated items, while:
       - Restoring the 'Finding Details' heading (style/numbering) so TOC picks it up
-      - Forcing heading text to BLACK (overrides blue themed style)
+      - Forcing heading text and TOC styles to BLACK + BOLD
       - PRESERVING 'Limitations and Controls' if it lies inside the window
       - KEEPING 'Validation Assessment Details' and everything after it
     """
@@ -94,7 +103,6 @@ def replace_finding_details_section(
             start_idx = i
             break
     if start_idx is None:
-        # fallback to any heading that contains 'finding'
         for i, p in enumerate(paragraphs):
             if _is_heading(p) and "finding" in _norm(p.text):
                 start_idx = i
@@ -102,7 +110,7 @@ def replace_finding_details_section(
     if start_idx is None:
         raise ValueError("Could not find 'Finding Details' section start.")
 
-    # Capture original heading text/style to reinsert later (for TOC + numbering)
+    # Capture original heading text/style
     orig_heading_text = paragraphs[start_idx].text or "Finding Details"
     try:
         orig_heading_style = paragraphs[start_idx].style.name
@@ -118,24 +126,21 @@ def replace_finding_details_section(
 
     # end of deletion window (inclusive)
     if explicit_end_idx is not None:
-        end_idx = explicit_end_idx - 1  # stop before the end heading
+        end_idx = explicit_end_idx - 1
     else:
-        # else stop before next heading after start; or to doc end
         nh = None
         for j in range(start_idx + 1, len(paragraphs)):
             if _is_heading(paragraphs[j]):
                 nh = j
                 break
         end_idx = (nh - 1) if nh is not None else (len(paragraphs) - 1)
-
     end_idx = max(end_idx, start_idx)
 
-    # 3) Detect 'Limitations and Controls' section inside [start_idx, end_idx]
+    # 3) Detect 'Limitations and Controls' section
     keep_start = keep_end = None
     for k in range(start_idx, end_idx + 1):
         if _matches_heading_text(paragraphs[k], keep_section_text):
             keep_start = k
-            # this keep-section ends just before the next heading (or at end_idx)
             keep_end = end_idx
             for t in range(k + 1, end_idx + 1):
                 if _is_heading(paragraphs[t]):
@@ -143,7 +148,7 @@ def replace_finding_details_section(
                     break
             break
 
-    # 4) Build deletion index set (exclude keep range if present)
+    # 4) Build deletion list
     to_delete = []
     if keep_start is None:
         to_delete = list(range(start_idx, end_idx + 1))
@@ -153,7 +158,7 @@ def replace_finding_details_section(
         if keep_end < end_idx:
             to_delete.extend(range(keep_end + 1, end_idx + 1))
 
-    # 5) Choose anchor: paragraph BEFORE first deleted span (or create one at top)
+    # 5) Anchor
     if start_idx > 0:
         anchor = paragraphs[start_idx - 1]
     else:
@@ -162,23 +167,21 @@ def replace_finding_details_section(
         first._p.addprevious(new_p)
         anchor = Paragraph(new_p, first._parent)
 
-    # 6) Delete from bottom to top
+    # 6) Delete
     for idx in sorted(to_delete, reverse=True):
         elm = paragraphs[idx]._element
         elm.getparent().remove(elm)
-    paragraphs = doc.paragraphs  # refresh after deletions
+    paragraphs = doc.paragraphs
 
-    # 7) Re-insert the 'Finding Details' heading we removed and anchor to it (TOC-safe, BLACK)
+    # 7) Re-insert the heading (TOC-safe + black + bold)
     heading_p = _insert_paragraph_after(anchor, orig_heading_text, bold=True)
     try:
         if orig_heading_style and orig_heading_style.lower().startswith("heading"):
-            heading_p.style = doc.styles[orig_heading_style]   # original level/numbering
+            heading_p.style = doc.styles[orig_heading_style]
         else:
-            heading_p.style = doc.styles[toc_fallback_style]   # ensure TOC inclusion
+            heading_p.style = doc.styles[toc_fallback_style]
     except Exception:
         heading_p.style = doc.styles.get(toc_fallback_style, heading_p.style)
-
-    # enforce black + bold regardless of style theme color
     _force_paragraph_black(heading_p, bold=True)
     anchor = heading_p
 
@@ -190,27 +193,24 @@ def replace_finding_details_section(
         mrmg_text = str(row.get(mrmg_col, "") or "").strip()
 
         items = list(rfr_dict.items()) or [("", "")]
-
         for q, resp in items:
-            # Finding
             p = _insert_paragraph_after(anchor, f"Finding M{m_counter}", bold=True)
             p = _insert_paragraph_after(p, finding_text)
 
-            # Challenge
             p = _insert_paragraph_after(p, f"Challenge M{m_counter}", bold=True)
             p = _insert_paragraph_after(p, str(q).strip())
 
-            # Modeling Team Response
             p = _insert_paragraph_after(p, f"Modeling Team Response M{m_counter}", bold=True)
             p = _insert_paragraph_after(p, str(resp).strip())
 
-            # MRMG Assessment
             p = _insert_paragraph_after(p, f"MRMG Assessment M{m_counter}", bold=True)
             p = _insert_paragraph_after(p, mrmg_text)
 
-            # spacer + advance
             p = _insert_paragraph_after(p, "")
             anchor = p
             m_counter += 1
+
+    # 9) Make TOC styles black + bold (so updated TOC matches)
+    _force_toc_styles_black_bold(doc, levels=(1, 2, 3))
 
     doc.save(output_path)
