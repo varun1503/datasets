@@ -1,6 +1,164 @@
-Description:
-This sprint aims to achieve full E2 deployment, establish E3 readiness, and conduct complete end-to-end testing across all major services — chunking, embedding, and ingestion. The focus is on validating stable deployments, ensuring configuration consistency, and verifying message flow across Kafka topics and CI/CD pipelines. The goal is to make the system production-ready for E3 by addressing all deployment dependencies, environment variables, and automation gaps.
+from docx import Document
+from docx.text.paragraph import Paragraph
+from docx.oxml import OxmlElement
+from docx.shared import Pt
+import json, ast, re
+import pandas as pd
 
-Acceptance Criteria:
-E2 environment is successfully deployed and verified for all services, with all Kafka credentials, ACLs, and environment configurations validated. E3 configurations are prepared, tested, and documented for smooth migration. End-to-end data flow testing confirms reliable communication between services with zero data loss or deployment failure. All regression, integration, and performance tests pass without critical defects, and deployment reports are shared with validation logs confirming E3 readiness.
+# ---------- helpers ----------
+def _to_dict_safe(x):
+    if isinstance(x, dict):
+        return x
+    if isinstance(x, str):
+        s = x.strip()
+        if not s:
+            return {}
+        try:
+            return json.loads(s)
+        except Exception:
+            try:
+                return ast.literal_eval(s)
+            except Exception:
+                return {}
+    return {}
 
+def _format_run(run, bold=False):
+    run.font.name = "Times New Roman"
+    run.font.size = Pt(11)
+    run.bold = bool(bold)
+
+def _insert_paragraph_after(paragraph: Paragraph, text: str = "", bold=False) -> Paragraph:
+    new_p = OxmlElement("w:p")
+    paragraph._p.addnext(new_p)
+    new_para = Paragraph(new_p, paragraph._parent)
+    if text:
+        run = new_para.add_run(text)
+        _format_run(run, bold=bold)
+    return new_para
+
+def _norm(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "")).strip().lower()
+
+def _is_heading(p: Paragraph) -> bool:
+    try:
+        name = (p.style.name or "").lower()
+        return name.startswith("heading")
+    except Exception:
+        return False
+
+def _matches(p: Paragraph, text: str) -> bool:
+    return _norm(text) in _norm(p.text)
+
+# ---------- main ----------
+def replace_finding_details_section(
+    doc_path: str,
+    df: pd.DataFrame,
+    output_path: str,
+    finding_col: str = "Finding Details",
+    rfr_col: str = "rfr_value",
+    mrmg_col: str = "MRMG_Assessment",
+    end_heading_text: str = "Validation Assessment Details",
+):
+    """
+    Replace the 'Finding Details' section with generated blocks.
+
+    Deletion range:
+      - Starts at the 'Finding Details' heading (by text OR heading style match)
+      - Ends at the *next* top-level heading after start, OR the explicit
+        'Validation Assessment Details' heading if found.
+      - If no next heading exists, deletion goes to the end of the document.
+
+    All inserted text: Times New Roman, size 11; section headings bold.
+    """
+    doc = Document(doc_path)
+    paragraphs = doc.paragraphs
+
+    # 1) Find 'Finding Details' start index (prefer exact heading line if possible)
+    start_idx = None
+    for i, p in enumerate(paragraphs):
+        if _matches(p, "finding details"):
+            start_idx = i
+            break
+    if start_idx is None:
+        # Fallback: look for a heading that contains 'finding'
+        for i, p in enumerate(paragraphs):
+            if _is_heading(p) and "finding" in _norm(p.text):
+                start_idx = i
+                break
+    if start_idx is None:
+        raise ValueError("Could not find 'Finding Details' section start.")
+
+    # 2) Find explicit end heading if present (inclusive end bound index)
+    explicit_end_idx = None
+    for j in range(start_idx + 1, len(paragraphs)):
+        if _matches(paragraphs[j], end_heading_text):
+            explicit_end_idx = j
+            break
+
+    # 3) If no explicit end, use the next heading after start (exclusive) -> end = prev paragraph
+    if explicit_end_idx is not None:
+        end_idx = explicit_end_idx  # inclusive
+    else:
+        next_heading_after_start = None
+        for j in range(start_idx + 1, len(paragraphs)):
+            if _is_heading(paragraphs[j]):
+                next_heading_after_start = j
+                break
+        if next_heading_after_start is not None:
+            end_idx = next_heading_after_start - 1  # delete up to just before the next heading
+        else:
+            end_idx = len(paragraphs) - 1  # delete to end safely
+
+    # Safety guard: if end_idx fell before start_idx for any reason, clamp
+    end_idx = max(end_idx, start_idx)
+
+    # 4) Choose a stable anchor = paragraph BEFORE the removed block (or create one at top)
+    if start_idx > 0:
+        anchor = paragraphs[start_idx - 1]
+    else:
+        # Create a synthetic first paragraph to anchor insertions
+        first = paragraphs[0]
+        new_p = OxmlElement("w:p")
+        first._p.addprevious(new_p)
+        anchor = Paragraph(new_p, first._parent)
+
+    # 5) Delete the range [start_idx, end_idx] inclusive, from bottom to top
+    #    IMPORTANT: refresh 'paragraphs' as we delete by referencing original indices
+    for k in range(end_idx, start_idx - 1, -1):
+        elm = paragraphs[k]._element
+        elm.getparent().remove(elm)
+    # Refresh paragraphs after deletion
+    paragraphs = doc.paragraphs
+
+    # 6) Insert new content
+    m_counter = 1
+    for _, row in df.iterrows():
+        finding_text = str(row.get(finding_col, "") or "").strip()
+        rfr_dict = _to_dict_safe(row.get(rfr_col, {}))
+        mrmg_text = str(row.get(mrmg_col, "") or "").strip()
+
+        items = list(rfr_dict.items()) or [("", "")]
+
+        for q, resp in items:
+            # Finding
+            p = _insert_paragraph_after(anchor, f"Finding M{m_counter}", bold=True)
+            p = _insert_paragraph_after(p, finding_text, bold=False)
+
+            # Challenge
+            p = _insert_paragraph_after(p, f"Challenge M{m_counter}", bold=True)
+            p = _insert_paragraph_after(p, str(q).strip(), bold=False)
+
+            # Modeling Team Response
+            p = _insert_paragraph_after(p, f"Modeling Team Response M{m_counter}", bold=True)
+            p = _insert_paragraph_after(p, str(resp).strip(), bold=False)
+
+            # MRMG Assessment
+            p = _insert_paragraph_after(p, f"MRMG Assessment M{m_counter}", bold=True)
+            p = _insert_paragraph_after(p, mrmg_text, bold=False)
+
+            # Spacer and advance anchor
+            p = _insert_paragraph_after(p, "")
+            anchor = p
+            m_counter += 1
+
+    doc.save(output_path)
