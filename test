@@ -23,11 +23,13 @@ def _to_dict_safe(x):
     return {}
 
 def _format_run(run, bold=False):
+    """Times New Roman 11, optional bold."""
     run.font.name = "Times New Roman"
     run.font.size = Pt(11)
     run.bold = bool(bold)
 
 def _insert_paragraph_after(paragraph: Paragraph, text: str = "", bold=False) -> Paragraph:
+    """Insert paragraph after `paragraph`, apply basic formatting if text provided."""
     new_p = OxmlElement("w:p")
     paragraph._p.addnext(new_p)
     new_para = Paragraph(new_p, paragraph._parent)
@@ -40,7 +42,7 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip().lower()
 
 def _strip_numbering(s: str) -> str:
-    # handles "1.", "1.1.", "1.1.1   "
+    # remove "1.", "1.1.", "2.3.4" etc at the start
     return re.sub(r'^\s*\d+(?:\.\d+)*\s*', '', s or '')
 
 def _matches_heading_text(p: Paragraph, text: str) -> bool:
@@ -65,10 +67,10 @@ def replace_finding_details_section(
 ):
     """
     Replace the 'Finding Details' block with generated items, while:
-      - KEEPING the 'Validation Assessment Details' heading (and what follows)
-      - PRESERVING the 'Limitations and Controls' section if it lies between.
+      - Restoring the 'Finding Details' heading (same style/numbering)
+      - PRESERVING the 'Limitations and Controls' section if it lies between
+      - KEEPING the 'Validation Assessment Details' heading and everything after it
     """
-
     doc = Document(doc_path)
     paragraphs = doc.paragraphs
 
@@ -79,7 +81,20 @@ def replace_finding_details_section(
             start_idx = i
             break
     if start_idx is None:
+        # fallback to any heading that contains 'finding'
+        for i, p in enumerate(paragraphs):
+            if _is_heading(p) and "finding" in _norm(p.text):
+                start_idx = i
+                break
+    if start_idx is None:
         raise ValueError("Could not find 'Finding Details' section start.")
+
+    # Capture original heading text/style to reinsert later
+    orig_heading_text = paragraphs[start_idx].text or "Finding Details"
+    try:
+        orig_heading_style = paragraphs[start_idx].style.name
+    except Exception:
+        orig_heading_style = None
 
     # 2) Find explicit end heading (we preserve it)
     explicit_end_idx = None
@@ -107,7 +122,7 @@ def replace_finding_details_section(
     for k in range(start_idx, end_idx + 1):
         if _matches_heading_text(paragraphs[k], keep_section_text):
             keep_start = k
-            # find the end of this keep-section: up to (but not including) the next heading
+            # this keep-section ends just before the next heading (or at end_idx)
             keep_end = end_idx
             for t in range(k + 1, end_idx + 1):
                 if _is_heading(paragraphs[t]):
@@ -120,29 +135,36 @@ def replace_finding_details_section(
     if keep_start is None:
         to_delete = list(range(start_idx, end_idx + 1))
     else:
-        # delete [start_idx .. keep_start-1] and [keep_end+1 .. end_idx]
         if keep_start > start_idx:
             to_delete.extend(range(start_idx, keep_start))
         if keep_end < end_idx:
             to_delete.extend(range(keep_end + 1, end_idx + 1))
 
-    # If nothing to delete, just insert after the paragraph before start_idx
+    # 5) Choose anchor: paragraph BEFORE first deleted span (or create one at top)
     if start_idx > 0:
         anchor = paragraphs[start_idx - 1]
     else:
-        # create an anchor at top
         first = paragraphs[0]
         new_p = OxmlElement("w:p")
         first._p.addprevious(new_p)
         anchor = Paragraph(new_p, first._parent)
 
-    # 5) Delete from bottom to top
+    # 6) Delete from bottom to top
     for idx in sorted(to_delete, reverse=True):
         elm = paragraphs[idx]._element
         elm.getparent().remove(elm)
-    paragraphs = doc.paragraphs  # refresh
+    paragraphs = doc.paragraphs  # refresh after deletions
 
-    # 6) Insert generated content
+    # 7) Re-insert the 'Finding Details' heading we removed and anchor to it
+    heading_p = _insert_paragraph_after(anchor, orig_heading_text, bold=True)
+    try:
+        if orig_heading_style and orig_heading_style.lower().startswith("heading"):
+            heading_p.style = doc.styles[orig_heading_style]  # keeps numbering/level
+    except Exception:
+        pass
+    anchor = heading_p
+
+    # 8) Insert generated content
     m_counter = 1
     for _, row in df.iterrows():
         finding_text = str(row.get(finding_col, "") or "").strip()
@@ -152,19 +174,24 @@ def replace_finding_details_section(
         items = list(rfr_dict.items()) or [("", "")]
 
         for q, resp in items:
+            # Finding
             p = _insert_paragraph_after(anchor, f"Finding M{m_counter}", bold=True)
             p = _insert_paragraph_after(p, finding_text)
 
+            # Challenge
             p = _insert_paragraph_after(p, f"Challenge M{m_counter}", bold=True)
             p = _insert_paragraph_after(p, str(q).strip())
 
+            # Modeling Team Response
             p = _insert_paragraph_after(p, f"Modeling Team Response M{m_counter}", bold=True)
             p = _insert_paragraph_after(p, str(resp).strip())
 
+            # MRMG Assessment
             p = _insert_paragraph_after(p, f"MRMG Assessment M{m_counter}", bold=True)
             p = _insert_paragraph_after(p, mrmg_text)
 
-            p = _insert_paragraph_after(p, "")  # spacer
+            # spacer + advance
+            p = _insert_paragraph_after(p, "")
             anchor = p
             m_counter += 1
 
