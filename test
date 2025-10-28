@@ -1,216 +1,23 @@
-from docx import Document
-from docx.text.paragraph import Paragraph
-from docx.oxml import OxmlElement
-from docx.shared import Pt, RGBColor
-import json, ast, re
-import pandas as pd
+import json
 
-# ---------- helpers ----------
-def _to_dict_safe(x):
-    if isinstance(x, dict):
-        return x
-    if isinstance(x, str):
-        s = x.strip()
-        if not s:
-            return {}
-        try:
-            return json.loads(s)
-        except Exception:
-            try:
-                return ast.literal_eval(s)
-            except Exception:
-                return {}
-    return {}
+# Read from text file
+with open("secret.text", "r") as f:
+    lines = f.readlines()
 
-def _format_run(run, bold=False):
-    """Times New Roman 11, bold (opt), force BLACK color."""
-    run.font.name = "Times New Roman"
-    run.font.size = Pt(11)
-    run.bold = bool(bold)
-    run.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
-
-def _force_paragraph_black(p: Paragraph, bold=True):
-    """Ensure all runs are black (and bold if requested)."""
-    if not p.runs:
-        r = p.add_run("")
-        _format_run(r, bold=bold)
-    for r in p.runs:
-        _format_run(r, bold=bold)
-
-def _insert_paragraph_after(paragraph: Paragraph, text: str = "", bold=False) -> Paragraph:
-    """Insert paragraph after `paragraph`, apply basic formatting if text provided."""
-    new_p = OxmlElement("w:p")
-    paragraph._p.addnext(new_p)
-    new_para = Paragraph(new_p, paragraph._parent)
-    if text:
-        run = new_para.add_run(text)
-        _format_run(run, bold=bold)
-    return new_para
-
-def _norm(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "")).strip().lower()
-
-def _strip_numbering(s: str) -> str:
-    # remove "1.", "1.1.", "2.3.4" etc at the start
-    return re.sub(r'^\s*\d+(?:\.\d+)*\s*', '', s or '')
-
-def _matches_heading_text(p: Paragraph, text: str) -> bool:
-    return _norm(_strip_numbering(p.text)) == _norm(text)
-
-def _is_heading(p: Paragraph) -> bool:
-    try:
-        return (p.style and p.style.name.lower().startswith("heading"))
-    except Exception:
-        return False
-
-def _force_toc_styles_black_bold(doc, levels=(1, 2, 3)):
-    """Make TOC N styles (TOC 1, TOC 2, ...) black and bold so updated TOC matches."""
-    for lvl in levels:
-        style_name = f"TOC {lvl}"
-        try:
-            s = doc.styles[style_name]
-            s.font.bold = True
-            s.font.color.rgb = RGBColor(0, 0, 0)
-        except Exception:
-            pass
-
-# ---------- main ----------
-def replace_finding_details_section(
-    doc_path: str,
-    df: pd.DataFrame,
-    output_path: str,
-    finding_col: str = "Finding Details",
-    rfr_col: str = "rfr_value",
-    mrmg_col: str = "MRMG_Assessment",
-    end_heading_text: str = "Validation Assessment Details",
-    keep_section_text: str = "Limitations and Controls",
-    toc_fallback_style: str = "Heading 2",   # used if original heading style missing
-):
-    """
-    Replace the 'Finding Details' block with generated items, while:
-      - Restoring the 'Finding Details' heading (style/numbering) so TOC picks it up
-      - Forcing heading text and TOC styles to BLACK + BOLD
-      - PRESERVING 'Limitations and Controls' if it lies inside the window
-      - KEEPING 'Validation Assessment Details' and everything after it
-    """
-    doc = Document(doc_path)
-    paragraphs = doc.paragraphs
-
-    # 1) Find 'Finding Details' start
-    start_idx = None
-    for i, p in enumerate(paragraphs):
-        if "finding details" in _norm(p.text):
-            start_idx = i
-            break
-    if start_idx is None:
-        for i, p in enumerate(paragraphs):
-            if _is_heading(p) and "finding" in _norm(p.text):
-                start_idx = i
-                break
-    if start_idx is None:
-        raise ValueError("Could not find 'Finding Details' section start.")
-
-    # Capture original heading text/style
-    orig_heading_text = paragraphs[start_idx].text or "Finding Details"
-    try:
-        orig_heading_style = paragraphs[start_idx].style.name
-    except Exception:
-        orig_heading_style = None
-
-    # 2) Find explicit end heading (we preserve it)
-    explicit_end_idx = None
-    for j in range(start_idx + 1, len(paragraphs)):
-        if _matches_heading_text(paragraphs[j], end_heading_text):
-            explicit_end_idx = j
-            break
-
-    # end of deletion window (inclusive)
-    if explicit_end_idx is not None:
-        end_idx = explicit_end_idx - 1
+data = {}
+for line in lines:
+    line = line.strip()
+    if not line or line.startswith("#"):  # skip blanks and comments
+        continue
+    if "=" in line:
+        key, value = line.split("=", 1)
+        data[key.strip()] = value.strip()
     else:
-        nh = None
-        for j in range(start_idx + 1, len(paragraphs)):
-            if _is_heading(paragraphs[j]):
-                nh = j
-                break
-        end_idx = (nh - 1) if nh is not None else (len(paragraphs) - 1)
-    end_idx = max(end_idx, start_idx)
+        # if line has no '=' treat as raw value
+        data["value"] = line
 
-    # 3) Detect 'Limitations and Controls' section
-    keep_start = keep_end = None
-    for k in range(start_idx, end_idx + 1):
-        if _matches_heading_text(paragraphs[k], keep_section_text):
-            keep_start = k
-            keep_end = end_idx
-            for t in range(k + 1, end_idx + 1):
-                if _is_heading(paragraphs[t]):
-                    keep_end = t - 1
-                    break
-            break
+# Save to JSON
+with open("secret.json", "w") as f:
+    json.dump(data, f, indent=2)
 
-    # 4) Build deletion list
-    to_delete = []
-    if keep_start is None:
-        to_delete = list(range(start_idx, end_idx + 1))
-    else:
-        if keep_start > start_idx:
-            to_delete.extend(range(start_idx, keep_start))
-        if keep_end < end_idx:
-            to_delete.extend(range(keep_end + 1, end_idx + 1))
-
-    # 5) Anchor
-    if start_idx > 0:
-        anchor = paragraphs[start_idx - 1]
-    else:
-        first = paragraphs[0]
-        new_p = OxmlElement("w:p")
-        first._p.addprevious(new_p)
-        anchor = Paragraph(new_p, first._parent)
-
-    # 6) Delete
-    for idx in sorted(to_delete, reverse=True):
-        elm = paragraphs[idx]._element
-        elm.getparent().remove(elm)
-    paragraphs = doc.paragraphs
-
-    # 7) Re-insert the heading (TOC-safe + black + bold)
-    heading_p = _insert_paragraph_after(anchor, orig_heading_text, bold=True)
-    try:
-        if orig_heading_style and orig_heading_style.lower().startswith("heading"):
-            heading_p.style = doc.styles[orig_heading_style]
-        else:
-            heading_p.style = doc.styles[toc_fallback_style]
-    except Exception:
-        heading_p.style = doc.styles.get(toc_fallback_style, heading_p.style)
-    _force_paragraph_black(heading_p, bold=True)
-    anchor = heading_p
-
-    # 8) Insert generated content
-    m_counter = 1
-    for _, row in df.iterrows():
-        finding_text = str(row.get(finding_col, "") or "").strip()
-        rfr_dict = _to_dict_safe(row.get(rfr_col, {}))
-        mrmg_text = str(row.get(mrmg_col, "") or "").strip()
-
-        items = list(rfr_dict.items()) or [("", "")]
-        for q, resp in items:
-            p = _insert_paragraph_after(anchor, f"Finding M{m_counter}", bold=True)
-            p = _insert_paragraph_after(p, finding_text)
-
-            p = _insert_paragraph_after(p, f"Challenge M{m_counter}", bold=True)
-            p = _insert_paragraph_after(p, str(q).strip())
-
-            p = _insert_paragraph_after(p, f"Modeling Team Response M{m_counter}", bold=True)
-            p = _insert_paragraph_after(p, str(resp).strip())
-
-            p = _insert_paragraph_after(p, f"MRMG Assessment M{m_counter}", bold=True)
-            p = _insert_paragraph_after(p, mrmg_text)
-
-            p = _insert_paragraph_after(p, "")
-            anchor = p
-            m_counter += 1
-
-    # 9) Make TOC styles black + bold (so updated TOC matches)
-    _force_toc_styles_black_bold(doc, levels=(1, 2, 3))
-
-    doc.save(output_path)
+print("✅ Converted to secret.json")
