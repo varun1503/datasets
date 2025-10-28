@@ -39,15 +39,18 @@ def _insert_paragraph_after(paragraph: Paragraph, text: str = "", bold=False) ->
 def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip().lower()
 
+def _strip_numbering(s: str) -> str:
+    # handles "1.", "1.1.", "1.1.1   "
+    return re.sub(r'^\s*\d+(?:\.\d+)*\s*', '', s or '')
+
+def _matches_heading_text(p: Paragraph, text: str) -> bool:
+    return _norm(_strip_numbering(p.text)) == _norm(text)
+
 def _is_heading(p: Paragraph) -> bool:
     try:
-        name = (p.style.name or "").lower()
-        return name.startswith("heading")
+        return (p.style and p.style.name.lower().startswith("heading"))
     except Exception:
         return False
-
-def _matches(p: Paragraph, text: str) -> bool:
-    return _norm(text) in _norm(p.text)
 
 # ---------- main ----------
 def replace_finding_details_section(
@@ -58,79 +61,88 @@ def replace_finding_details_section(
     rfr_col: str = "rfr_value",
     mrmg_col: str = "MRMG_Assessment",
     end_heading_text: str = "Validation Assessment Details",
+    keep_section_text: str = "Limitations and Controls",
 ):
     """
-    Replace the 'Finding Details' section with generated blocks.
-
-    Deletion range:
-      - Starts at the 'Finding Details' heading (by text OR heading style match)
-      - Ends at the *next* top-level heading after start, OR the explicit
-        'Validation Assessment Details' heading if found.
-      - If no next heading exists, deletion goes to the end of the document.
-
-    All inserted text: Times New Roman, size 11; section headings bold.
+    Replace the 'Finding Details' block with generated items, while:
+      - KEEPING the 'Validation Assessment Details' heading (and what follows)
+      - PRESERVING the 'Limitations and Controls' section if it lies between.
     """
+
     doc = Document(doc_path)
     paragraphs = doc.paragraphs
 
-    # 1) Find 'Finding Details' start index (prefer exact heading line if possible)
+    # 1) Find 'Finding Details' start
     start_idx = None
     for i, p in enumerate(paragraphs):
-        if _matches(p, "finding details"):
+        if "finding details" in _norm(p.text):
             start_idx = i
             break
     if start_idx is None:
-        # Fallback: look for a heading that contains 'finding'
-        for i, p in enumerate(paragraphs):
-            if _is_heading(p) and "finding" in _norm(p.text):
-                start_idx = i
-                break
-    if start_idx is None:
         raise ValueError("Could not find 'Finding Details' section start.")
 
-    # 2) Find explicit end heading if present (inclusive end bound index)
+    # 2) Find explicit end heading (we preserve it)
     explicit_end_idx = None
     for j in range(start_idx + 1, len(paragraphs)):
-        if _matches(paragraphs[j], end_heading_text):
+        if _matches_heading_text(paragraphs[j], end_heading_text):
             explicit_end_idx = j
             break
 
-    # 3) If no explicit end, use the next heading after start (exclusive) -> end = prev paragraph
+    # end of deletion window (inclusive)
     if explicit_end_idx is not None:
-        end_idx = explicit_end_idx  # inclusive
+        end_idx = explicit_end_idx - 1  # stop before the end heading
     else:
-        next_heading_after_start = None
+        # else stop before next heading after start; or to doc end
+        nh = None
         for j in range(start_idx + 1, len(paragraphs)):
             if _is_heading(paragraphs[j]):
-                next_heading_after_start = j
+                nh = j
                 break
-        if next_heading_after_start is not None:
-            end_idx = next_heading_after_start - 1  # delete up to just before the next heading
-        else:
-            end_idx = len(paragraphs) - 1  # delete to end safely
+        end_idx = (nh - 1) if nh is not None else (len(paragraphs) - 1)
 
-    # Safety guard: if end_idx fell before start_idx for any reason, clamp
     end_idx = max(end_idx, start_idx)
 
-    # 4) Choose a stable anchor = paragraph BEFORE the removed block (or create one at top)
+    # 3) Detect 'Limitations and Controls' section inside [start_idx, end_idx]
+    keep_start = keep_end = None
+    for k in range(start_idx, end_idx + 1):
+        if _matches_heading_text(paragraphs[k], keep_section_text):
+            keep_start = k
+            # find the end of this keep-section: up to (but not including) the next heading
+            keep_end = end_idx
+            for t in range(k + 1, end_idx + 1):
+                if _is_heading(paragraphs[t]):
+                    keep_end = t - 1
+                    break
+            break
+
+    # 4) Build deletion index set (exclude keep range if present)
+    to_delete = []
+    if keep_start is None:
+        to_delete = list(range(start_idx, end_idx + 1))
+    else:
+        # delete [start_idx .. keep_start-1] and [keep_end+1 .. end_idx]
+        if keep_start > start_idx:
+            to_delete.extend(range(start_idx, keep_start))
+        if keep_end < end_idx:
+            to_delete.extend(range(keep_end + 1, end_idx + 1))
+
+    # If nothing to delete, just insert after the paragraph before start_idx
     if start_idx > 0:
         anchor = paragraphs[start_idx - 1]
     else:
-        # Create a synthetic first paragraph to anchor insertions
+        # create an anchor at top
         first = paragraphs[0]
         new_p = OxmlElement("w:p")
         first._p.addprevious(new_p)
         anchor = Paragraph(new_p, first._parent)
 
-    # 5) Delete the range [start_idx, end_idx] inclusive, from bottom to top
-    #    IMPORTANT: refresh 'paragraphs' as we delete by referencing original indices
-    for k in range(end_idx, start_idx - 1, -1):
-        elm = paragraphs[k]._element
+    # 5) Delete from bottom to top
+    for idx in sorted(to_delete, reverse=True):
+        elm = paragraphs[idx]._element
         elm.getparent().remove(elm)
-    # Refresh paragraphs after deletion
-    paragraphs = doc.paragraphs
+    paragraphs = doc.paragraphs  # refresh
 
-    # 6) Insert new content
+    # 6) Insert generated content
     m_counter = 1
     for _, row in df.iterrows():
         finding_text = str(row.get(finding_col, "") or "").strip()
@@ -140,24 +152,19 @@ def replace_finding_details_section(
         items = list(rfr_dict.items()) or [("", "")]
 
         for q, resp in items:
-            # Finding
             p = _insert_paragraph_after(anchor, f"Finding M{m_counter}", bold=True)
-            p = _insert_paragraph_after(p, finding_text, bold=False)
+            p = _insert_paragraph_after(p, finding_text)
 
-            # Challenge
             p = _insert_paragraph_after(p, f"Challenge M{m_counter}", bold=True)
-            p = _insert_paragraph_after(p, str(q).strip(), bold=False)
+            p = _insert_paragraph_after(p, str(q).strip())
 
-            # Modeling Team Response
             p = _insert_paragraph_after(p, f"Modeling Team Response M{m_counter}", bold=True)
-            p = _insert_paragraph_after(p, str(resp).strip(), bold=False)
+            p = _insert_paragraph_after(p, str(resp).strip())
 
-            # MRMG Assessment
             p = _insert_paragraph_after(p, f"MRMG Assessment M{m_counter}", bold=True)
-            p = _insert_paragraph_after(p, mrmg_text, bold=False)
+            p = _insert_paragraph_after(p, mrmg_text)
 
-            # Spacer and advance anchor
-            p = _insert_paragraph_after(p, "")
+            p = _insert_paragraph_after(p, "")  # spacer
             anchor = p
             m_counter += 1
 
