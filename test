@@ -1,7 +1,7 @@
 from docx import Document
 from docx.text.paragraph import Paragraph
 from docx.oxml import OxmlElement
-from docx.shared import Pt
+from docx.shared import Pt, RGBColor
 import json, ast, re
 import pandas as pd
 
@@ -23,10 +23,21 @@ def _to_dict_safe(x):
     return {}
 
 def _format_run(run, bold=False):
-    """Times New Roman 11, optional bold."""
+    """Times New Roman 11, bold (opt), force BLACK color."""
     run.font.name = "Times New Roman"
     run.font.size = Pt(11)
     run.bold = bool(bold)
+    # override any themed color coming from the style
+    run.font.color.rgb = RGBColor(0x00, 0x00, 0x00)
+    # (python-docx ignores theme_color=None sometimes, rgb wins)
+
+def _force_paragraph_black(p: Paragraph, bold=True):
+    """Ensure all runs are black (and bold if requested)."""
+    if not p.runs:
+        r = p.add_run("")
+        _format_run(r, bold=bold)
+    for r in p.runs:
+        _format_run(r, bold=bold)
 
 def _insert_paragraph_after(paragraph: Paragraph, text: str = "", bold=False) -> Paragraph:
     """Insert paragraph after `paragraph`, apply basic formatting if text provided."""
@@ -64,13 +75,14 @@ def replace_finding_details_section(
     mrmg_col: str = "MRMG_Assessment",
     end_heading_text: str = "Validation Assessment Details",
     keep_section_text: str = "Limitations and Controls",
-    toc_fallback_style: str = "Heading 2",   # used if original heading style is missing
+    toc_fallback_style: str = "Heading 2",   # used if original heading style missing
 ):
     """
     Replace the 'Finding Details' block with generated items, while:
       - Restoring the 'Finding Details' heading (style/numbering) so TOC picks it up
-      - PRESERVING the 'Limitations and Controls' section if it lies between
-      - KEEPING the 'Validation Assessment Details' heading and everything after it
+      - Forcing heading text to BLACK (overrides blue themed style)
+      - PRESERVING 'Limitations and Controls' if it lies inside the window
+      - KEEPING 'Validation Assessment Details' and everything after it
     """
     doc = Document(doc_path)
     paragraphs = doc.paragraphs
@@ -90,7 +102,7 @@ def replace_finding_details_section(
     if start_idx is None:
         raise ValueError("Could not find 'Finding Details' section start.")
 
-    # Capture original heading text/style to reinsert later (for TOC)
+    # Capture original heading text/style to reinsert later (for TOC + numbering)
     orig_heading_text = paragraphs[start_idx].text or "Finding Details"
     try:
         orig_heading_style = paragraphs[start_idx].style.name
@@ -156,15 +168,18 @@ def replace_finding_details_section(
         elm.getparent().remove(elm)
     paragraphs = doc.paragraphs  # refresh after deletions
 
-    # 7) Re-insert the 'Finding Details' heading we removed and anchor to it (TOC-safe)
+    # 7) Re-insert the 'Finding Details' heading we removed and anchor to it (TOC-safe, BLACK)
     heading_p = _insert_paragraph_after(anchor, orig_heading_text, bold=True)
     try:
         if orig_heading_style and orig_heading_style.lower().startswith("heading"):
-            heading_p.style = doc.styles[orig_heading_style]   # keeps original level/numbering
+            heading_p.style = doc.styles[orig_heading_style]   # original level/numbering
         else:
             heading_p.style = doc.styles[toc_fallback_style]   # ensure TOC inclusion
     except Exception:
         heading_p.style = doc.styles.get(toc_fallback_style, heading_p.style)
+
+    # enforce black + bold regardless of style theme color
+    _force_paragraph_black(heading_p, bold=True)
     anchor = heading_p
 
     # 8) Insert generated content
