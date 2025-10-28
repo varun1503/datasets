@@ -64,10 +64,11 @@ def replace_finding_details_section(
     mrmg_col: str = "MRMG_Assessment",
     end_heading_text: str = "Validation Assessment Details",
     keep_section_text: str = "Limitations and Controls",
+    toc_fallback_style: str = "Heading 2",   # used if original heading style is missing
 ):
     """
     Replace the 'Finding Details' block with generated items, while:
-      - Restoring the 'Finding Details' heading (same style/numbering)
+      - Restoring the 'Finding Details' heading (style/numbering) so TOC picks it up
       - PRESERVING the 'Limitations and Controls' section if it lies between
       - KEEPING the 'Validation Assessment Details' heading and everything after it
     """
@@ -89,7 +90,7 @@ def replace_finding_details_section(
     if start_idx is None:
         raise ValueError("Could not find 'Finding Details' section start.")
 
-    # Capture original heading text/style to reinsert later
+    # Capture original heading text/style to reinsert later (for TOC)
     orig_heading_text = paragraphs[start_idx].text or "Finding Details"
     try:
         orig_heading_style = paragraphs[start_idx].style.name
@@ -155,13 +156,15 @@ def replace_finding_details_section(
         elm.getparent().remove(elm)
     paragraphs = doc.paragraphs  # refresh after deletions
 
-    # 7) Re-insert the 'Finding Details' heading we removed and anchor to it
+    # 7) Re-insert the 'Finding Details' heading we removed and anchor to it (TOC-safe)
     heading_p = _insert_paragraph_after(anchor, orig_heading_text, bold=True)
     try:
         if orig_heading_style and orig_heading_style.lower().startswith("heading"):
-            heading_p.style = doc.styles[orig_heading_style]  # keeps numbering/level
+            heading_p.style = doc.styles[orig_heading_style]   # keeps original level/numbering
+        else:
+            heading_p.style = doc.styles[toc_fallback_style]   # ensure TOC inclusion
     except Exception:
-        pass
+        heading_p.style = doc.styles.get(toc_fallback_style, heading_p.style)
     anchor = heading_p
 
     # 8) Insert generated content
