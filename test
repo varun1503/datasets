@@ -1,23 +1,20 @@
-import json
+import mimetypes
 
-# Read from text file
-with open("secret.text", "r") as f:
-    lines = f.readlines()
+def image_insight_prompt(self, image_path, base64_encoded_image):
+    # detect MIME type (e.g. image/png, image/jpeg)
+    mime_type, _ = mimetypes.guess_type(image_path)
+    mime_type = mime_type or "image/png"  # fallback
 
-data = {}
-for line in lines:
-    line = line.strip()
-    if not line or line.startswith("#"):  # skip blanks and comments
-        continue
-    if "=" in line:
-        key, value = line.split("=", 1)
-        data[key.strip()] = value.strip()
-    else:
-        # if line has no '=' treat as raw value
-        data["value"] = line
-
-# Save to JSON
-with open("secret.json", "w") as f:
-    json.dump(data, f, indent=2)
-
-print("✅ Converted to secret.json")
+    prompt_template = HumanMessagePromptTemplate.from_template(template=[
+        {
+            "type": "text",
+            "text": "You are a model risk validation expert. You will be given an image to analyze."
+        },
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:{mime_type};base64,{base64_encoded_image}"
+            }
+        },
+    ])
+    return prompt_template
