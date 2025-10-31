@@ -1,20 +1,19 @@
-import mimetypes
+MRMG
 
-def image_insight_prompt(self, image_path, base64_encoded_image):
-    # detect MIME type (e.g. image/png, image/jpeg)
-    mime_type, _ = mimetypes.guess_type(image_path)
-    mime_type = mime_type or "image/png"  # fallback
+Deployed in E2 environment with all services Chunking, Embedding, and Ingestion.
 
-    prompt_template = HumanMessagePromptTemplate.from_template(template=[
-        {
-            "type": "text",
-            "text": "You are a model risk validation expert. You will be given an image to analyze."
-        },
-        {
-            "type": "image_url",
-            "image_url": {
-                "url": f"data:{mime_type};base64,{base64_encoded_image}"
-            }
-        },
-    ])
-    return prompt_template
+Enhanced chunking service, fixed all bugs and corner cases.
+
+Validation report created for MRMG covering all implemented requirements.
+
+Developed Merger module with respective functional classes.
+
+Added Accuracy and Adequacy classes.
+
+Automated report generation process.
+
+AA Project
+
+Created merger and validation logic for Accuracy and Adequacy.
+
+Implemented respective classes and generated final validation reports
