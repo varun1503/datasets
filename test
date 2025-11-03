@@ -126,18 +126,6 @@ class BasicChecks:
         s = hits[0].start
         return self.slice_next_sentences(content, s, 8)
 
-    def best_sentence_for_keywords(self, content: str, keywords: List[str], min_score: int = 60) -> Dict[str, str]:
-        sentences = self.sentence_split(content)
-        results: Dict[str, str] = {}
-        for kw in keywords:
-            best = ("", -1)
-            for s in sentences:
-                sc = fuzz.partial_ratio(kw.lower(), s.lower())
-                if sc > best[1]:
-                    best = (s.strip(), sc)
-            results[kw] = f"{best[0]} (score={best[1]})" if best[1] >= min_score else "not found"
-        return results
-
     # ---------- Analyze ----------
     def analyze_file(self, file_path: str, dcsn_rsn_cd: str = "") -> Dict[str, str]:
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -151,7 +139,6 @@ class BasicChecks:
         date2 = self.find_second_date_if_bureau(content)
         fico_score = self.find_fico_score(content) if self.should_check_fico(content, dcsn_rsn_cd) else "skipped"
         factors = self.find_factors(content)
-        best_map = self.best_sentence_for_keywords(content, ["adequacy", "accuracy", "accurate"], 60)
 
         return {
             "Action Sentence": f"{action_hit[0]} (ratio={action_hit[1]})" if action_hit else "not found",
@@ -162,20 +149,12 @@ class BasicChecks:
             "2nd Date (if bureau)": date2,
             "FICO Score": fico_score,
             "FICO Factors": factors,
-            "Best: adequacy": best_map["adequacy"],
-            "Best: accuracy": best_map["accuracy"],
-            "Best: accurate": best_map["accurate"],
         }
 
     def _format_report(self, file_path: str, info: Dict[str, str]) -> str:
         lines = [f"FILE: {file_path}"]
         for k, v in info.items():
-            if not k.startswith("Best"):
-                lines.append(f"{k}: {v}")
-        lines.append("")
-        lines.append("=== BEST MATCH SENTENCES ===")
-        for k in ["Best: adequacy", "Best: accuracy", "Best: accurate"]:
-            lines.append(f"{k.replace('Best: ', '').capitalize()}: {info[k]}")
+            lines.append(f"{k}: {v}")
         return "\n".join(lines)
 
     @staticmethod
@@ -190,7 +169,7 @@ class BasicChecks:
                 return new_path
             i += 1
 
-    # ---------- Batch run ----------
+    # ---------- Batch Run ----------
     def run(self, input_folder: str, output_folder: str, dcsn_rsn_cd: str = "") -> None:
         os.makedirs(output_folder, exist_ok=True)
         files = self.list_file_paths(input_folder)
