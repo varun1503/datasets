@@ -57,26 +57,63 @@ def _snum(text):  # returns like "S2" if present, else ""
 def _looks_like_test(p):
     return bool(re.search(r"\btest\b", _norm(p.text)))
 
-def _is_heading_text(tnorm: str):
-    return (
-        tnorm.startswith("challenge")
-        or tnorm.startswith("modelling team response")
-        or tnorm.startswith("modeling team response")
-        or tnorm.startswith("mrmg assessment")
-        or tnorm.startswith("mrmg evaluation")
-        or tnorm.startswith("test ")
-        or tnorm == "test"
-    )
+# --- stronger heading detection ---
+_HEADING_KEYWORDS = [
+    "challenge",
+    "modelling team response",
+    "modeling team response",
+    "mrmg assessment",
+    "mrmg evaluation",
+    "finding details",
+    "findings details",
+    "limitations and control",
+    "limitation and control",
+    "validation assessment details",
+    "table of contents",
+    "test",
+    "section",
+    "appendix",
+    "references",
+]
+
+def _is_heading_text_norm(tnorm: str) -> bool:
+    if not tnorm:
+        return False
+    # keyword-led headings
+    if any(tnorm.startswith(k) for k in _HEADING_KEYWORDS):
+        return True
+    # ALL CAPS short lines (common heading pattern)
+    if tnorm.replace(" ", "").isalpha():
+        # original text (non-lowered) might be all caps; heuristic:
+        tokens = tnorm.split()
+        if 0 < len(tokens) <= 12 and tnorm == tnorm.upper():
+            return True
+    # Lines ending with ":" and short
+    if tnorm.endswith(":") and len(tnorm) <= 80:
+        return True
+    return False
+
+def _is_heading_para(p: Paragraph) -> bool:
+    tnorm = _norm(p.text)
+    # 1) Style-based: any Word style containing "Heading"
+    try:
+        if p.style and "heading" in (p.style.name or "").strip().lower():
+            return True
+    except Exception:
+        pass
+    # 2) Keyword / shape-based
+    if _is_heading_text_norm(tnorm):
+        return True
+    # 3) Bold-short heuristic: mostly heading lines are bold & short
+    if len(p.text.strip()) > 0 and len(p.text.strip()) <= 120:
+        for r in p.runs:
+            if r.bold:
+                return True
+    return False
 
 def _find_idx_in_range(paras, start, end, predicate):
-    for i in range(start, end):
+    for i in range(start, min(end, len(paras))):
         if predicate(paras[i]):
-            return i
-    return None
-
-def _find_next_heading(paras, start, end):
-    for i in range(start, end):
-        if _is_heading_text(_norm(paras[i].text)):
             return i
     return None
 
@@ -93,14 +130,11 @@ def insert_rfr_and_mrmg_with_tags(
     assessment_highlight_color=WD_COLOR_INDEX.YELLOW,
 ):
     """
-    For each df row (per Test S# tag):
-      - If an 'MRMG Assessment [S#]' heading exists, REPLACE its body with df[mrmg_col].
-        (Keeps the original heading paragraph, only updates the body under it.)
-      - Do NOT insert between the 'Modelling/Modeling Team Response' heading and its body.
-      - If 'MRMG Assessment' heading is missing, fall back to inserting it after the end of the MTR body
-        (or near the end of the Test section) without breaking headings and bodies.
+    On finding 'MRMG Assessment [S#]' heading:
+      → DELETE EVERYTHING until the next heading (2–3+ paragraphs, blanks, etc.)
+      → Insert one clean body paragraph from df[mrmg_col].
 
-      RFR pairs (Challenge/Response) logic is unchanged but avoids breaking MTR heading-body adjacency.
+    Also preserves adjacency of 'Modelling/Modeling Team Response' heading and its body.
     """
     doc = Document(doc_path)
 
@@ -114,7 +148,7 @@ def insert_rfr_and_mrmg_with_tags(
         sn = _snum(tag)  # "S1", "S2", ...
         paras = doc.paragraphs
 
-        # 1) locate section start by matching exact tag text OR S-number
+        # 1) locate section start by exact tag or S#
         tag_norm = _norm(tag)
         start_idx = next((i for i, p in enumerate(paras) if tag_norm in _norm(p.text)), None)
         if start_idx is None and sn:
@@ -130,45 +164,42 @@ def insert_rfr_and_mrmg_with_tags(
                 break
         section_end = next_test if next_test is not None else len(paras)
 
-        # 3) find MTR heading idx (without forcing S# match)
-        mtr_idx = _find_idx_in_range(
-            paras,
-            start_idx + 1,
-            section_end,
-            lambda p: ("modelling team response" in _norm(p.text)) or ("modeling team response" in _norm(p.text)),
-        )
+        # 3) find MTR heading (any spelling)
+        def _is_mtr(p):
+            t = _norm(p.text)
+            return ("modelling team response" in t) or ("modeling team response" in t)
 
-        # 4) find MRMG Assessment heading idx (prefer the one that contains this S#, else any in range)
+        mtr_idx = _find_idx_in_range(paras, start_idx + 1, section_end, _is_mtr)
+
+        # 4) find MRMG Assessment heading for this S# (prefer exact S#, else any in section)
         def _is_assessment_for_sn(p):
             t = _norm(p.text)
             if not t.startswith("mrmg assessment"):
                 return False
-            # If S# exists, prefer exact match; else accept any MRMG Assessment
             return (sn.lower() in t) if sn else True
 
         mrmg_head_idx = _find_idx_in_range(paras, start_idx + 1, section_end, _is_assessment_for_sn)
         if mrmg_head_idx is None:
-            # fallback: any MRMG Assessment in this section
-            mrmg_head_idx = _find_idx_in_range(
-                paras, start_idx + 1, section_end, lambda p: _norm(p.text).startswith("mrmg assessment")
-            )
+            mrmg_head_idx = _find_idx_in_range(paras, start_idx + 1, section_end,
+                                               lambda p: _norm(p.text).startswith("mrmg assessment"))
 
-        # 5) If we have an MRMG Assessment heading, REPLACE its body (do not touch heading)
+        # 5) REPLACE MRMG Assessment body: remove ALL until next heading
         if mrmg_head_idx is not None:
-            # body starts at the first non-empty paragraph right after heading
+            # body starts after heading
             body_start = mrmg_head_idx + 1
-            # find end of this body: before the next heading within section
-            next_head = _find_next_heading(paras, body_start, section_end)
+
+            # find next heading within section (style-, bold-, or keyword-based)
+            next_head = _find_idx_in_range(paras, body_start, section_end, _is_heading_para)
+
+            # If no heading found, consume to end of section
             body_end = (next_head - 1) if next_head is not None else (section_end - 1)
 
-            # Remove current body (if any)
-            # Also skip leading empties; we will insert one clean body paragraph
-            # Guard indices
+            # Delete everything in [body_start, body_end], including blanks
             if body_start <= body_end:
                 _delete_range(paras, body_start, body_end)
-                paras = doc.paragraphs  # refresh
+                paras = doc.paragraphs  # refresh after deletion
 
-            # Insert new single body paragraph AFTER the heading
+            # Insert new body AFTER heading
             insert_after = doc.paragraphs[mrmg_head_idx]
             new_body_p = _insert_after_para(
                 insert_after,
@@ -176,56 +207,46 @@ def insert_rfr_and_mrmg_with_tags(
                 bold=False,
                 highlight=(assessment_highlight_color if highlight_assessment else None),
             )
-            # Optional: add a spacer line after the body to keep visual separation
-            _insert_after_para(new_body_p, "")
+            _insert_after_para(new_body_p, "")  # spacer
+            continue  # for this row we’re done
 
+        # 6) If no MRMG Assessment heading: preserve MTR adjacency, then add heading + body
+        # Find end of MTR body (walk until next detected heading)
+        anchor_after = None
+        if mtr_idx is not None:
+            i = mtr_idx + 1
+            while i < section_end and not _is_heading_para(paras[i]):
+                i += 1
+            anchor_after = paras[i - 1] if i > (mtr_idx + 1) else paras[mtr_idx]
         else:
-            # 6) If no MRMG Assessment heading exists:
-            #    Insert RFR if provided, and then create a new MRMG Assessment heading + body
-            #    BUT never between MTR heading and its body. So we find the end of MTR body.
+            anchor_after = paras[section_end - 1] if section_end - 1 >= start_idx else paras[start_idx]
 
-            # locate MTR body end (contiguous non-heading lines after MTR until next heading/eval/test)
-            anchor_after = None
-            if mtr_idx is not None:
-                # Body starts after MTR heading
-                body_i = mtr_idx + 1
-                # If the very next paragraph looks like a heading, MTR had no body yet.
-                # Otherwise, walk until next heading within the section.
-                while body_i < section_end and not _is_heading_text(_norm(paras[body_i].text)):
-                    body_i += 1
-                # anchor_after is the last body paragraph (or the heading itself if no body)
-                anchor_after = paras[body_i - 1] if body_i > (mtr_idx + 1) else paras[mtr_idx]
-            else:
-                # No MTR found; anchor near the end of the section
-                anchor_after = paras[section_end - 1] if section_end - 1 >= start_idx else paras[start_idx]
+        # Optional: insert RFR pairs AFTER anchor (never between MTR heading & body)
+        if rfr:
+            cur = anchor_after
+            for ch_text, resp_text in rfr.items():
+                ch_head = f"Challenge {sn}" if sn else "Challenge"
+                mtr_head = f"{mtr_heading_base} {sn}" if sn else mtr_heading_base
 
-            # If RFR exists, insert it AFTER the determined anchor (preserving MTR heading+body adjacency)
-            if rfr:
-                cur_anchor = anchor_after
-                for ch_text, resp_text in rfr.items():
-                    ch_head = f"Challenge {sn}" if sn else "Challenge"
-                    mtr_head = f"{mtr_heading_base} {sn}" if sn else mtr_heading_base
+                cur = _insert_after_para(cur, ch_head, bold=True)
+                cur = _insert_after_para(cur, str(ch_text or "").strip(), bold=False)
 
-                    cur_anchor = _insert_after_para(cur_anchor, ch_head, bold=True)
-                    cur_anchor = _insert_after_para(cur_anchor, str(ch_text or "").strip(), bold=False)
+                cur = _insert_after_para(cur, mtr_head, bold=True)
+                cur = _insert_after_para(cur, str(resp_text or "").strip(), bold=False)
 
-                    cur_anchor = _insert_after_para(cur_anchor, mtr_head, bold=True)
-                    cur_anchor = _insert_after_para(cur_anchor, str(resp_text or "").strip(), bold=False)
+                cur = _insert_after_para(cur, "")
+            anchor_after = cur
 
-                    cur_anchor = _insert_after_para(cur_anchor, "")  # spacer
-
-                anchor_after = cur_anchor  # continue building from the last inserted item
-
-            # Now create MRMG Assessment heading + body AFTER the safe anchor
-            if mrmg_new:
-                a_head = f"MRMG Assessment {sn}" if sn else "MRMG Assessment"
-                h = _insert_after_para(anchor_after, a_head, bold=True)
-                b = _insert_after_para(
-                    h,
-                    mrmg_new,
-                    bold=False,
-                    highlight=(assessment_highlight_color if highlight_assessment else None),
-                )
-                _insert_after_para(b, "")  # spacer
+        # Now add MRMG Assessment heading + body
+        if mrmg_new:
+            a_head = f"MRMG Assessment {sn}" if sn else "MRMG Assessment"
+            h = _insert_after_para(anchor_after, a_head, bold=True)
+            b = _insert_after_para(
+                h,
+                mrmg_new,
+                bold=False,
+                highlight=(assessment_highlight_color if highlight_assessment else None),
+            )
+            _insert_after_para(b, "")
 
     doc.save(output_path)
