@@ -7,7 +7,6 @@ import re, json, ast
 import pandas as pd
 
 
-# ---------- helpers ----------
 def _norm(s):
     return re.sub(r"\s+", " ", (s or "")).strip().lower()
 
@@ -64,7 +63,6 @@ def _set_paragraph_text(p: Paragraph, text: str, bold=False):
     _format_run(r, bold=bold, highlight=None)
 
 
-# ---------- main ----------
 def insert_rfr_and_mrmg_with_tags(
     doc_path: str,
     df: pd.DataFrame,
@@ -77,10 +75,6 @@ def insert_rfr_and_mrmg_with_tags(
     assessment_highlight_color=WD_COLOR_INDEX.YELLOW,
     DEBUG=False,
 ):
-    """
-    Replace the full MRMG Assessment S# content with the provided text.
-    Deletes everything below MRMG Assessment until the next 'Test ...' heading.
-    """
     doc = Document(doc_path)
 
     for _, row in df.iterrows():
@@ -93,7 +87,6 @@ def insert_rfr_and_mrmg_with_tags(
         sn = _snum(tag)
         paras = doc.paragraphs
 
-        # 1. Locate Test section start
         tag_norm = _norm(tag)
         start_idx = next((i for i, p in enumerate(paras) if tag_norm in _norm(p.text)), None)
         if start_idx is None and sn:
@@ -102,7 +95,6 @@ def insert_rfr_and_mrmg_with_tags(
             if DEBUG: print(f"[WARN] Could not find section for tag='{tag}'")
             continue
 
-        # 2. Section end = next "Test ..." or document end
         next_test = None
         for j in range(start_idx + 1, len(paras)):
             if _looks_like_test(paras[j]):
@@ -110,7 +102,6 @@ def insert_rfr_and_mrmg_with_tags(
                 break
         section_end = next_test if next_test is not None else len(paras)
 
-        # 3. Find MRMG Assessment heading (with or without S#)
         def _is_assessment_for_sn(p):
             t = _norm(p.text)
             if not t.startswith("mrmg assessment"):
@@ -122,37 +113,31 @@ def insert_rfr_and_mrmg_with_tags(
             None,
         )
         if mrmg_head_idx is None:
-            # fallback generic
             mrmg_head_idx = next(
                 (i for i in range(start_idx + 1, section_end)
                  if _norm(paras[i].text).startswith("mrmg assessment")),
                 None,
             )
 
-        # 4. Replace MRMG Assessment body
         if mrmg_head_idx is not None:
-            # Clean heading text (remove colon or inline body)
             head_text = paras[mrmg_head_idx].text.strip()
             m = re.match(r"^(mrmg assessment(?:\s+s?\d+)?)(:.*)?$", head_text, flags=re.IGNORECASE)
             if m:
                 pure_heading = m.group(1)
                 _set_paragraph_text(paras[mrmg_head_idx], pure_heading, bold=True)
 
-            # Delete EVERYTHING after heading until next Test
             body_start = mrmg_head_idx + 1
-            next_test_after = None
+            body_end = len(paras) - 1
             for j in range(body_start, len(paras)):
                 if _looks_like_test(paras[j]):
-                    next_test_after = j
+                    body_end = j - 1
                     break
-            body_end = (next_test_after - 1) if next_test_after is not None else (len(paras) - 1)
 
             if body_start <= body_end:
                 if DEBUG: print(f"[INFO] Deleting {body_start}–{body_end} after MRMG {sn}")
                 _delete_range(paras, body_start, body_end)
                 paras = doc.paragraphs
 
-            # Insert the new MRMG text
             insert_after = paras[mrmg_head_idx]
             new_body_p = _insert_after_para(
                 insert_after,
@@ -160,11 +145,9 @@ def insert_rfr_and_mrmg_with_tags(
                 bold=False,
                 highlight=(assessment_highlight_color if highlight_assessment else None),
             )
-            _insert_after_para(new_body_p, "")  # spacer
+            _insert_after_para(new_body_p, "")
             continue
 
-        # 5. If no MRMG heading exists, append one after MTR
-        # Find MTR heading
         def _is_mtr(p):
             t = _norm(p.text)
             return "modelling team response" in t or "modeling team response" in t
@@ -175,7 +158,6 @@ def insert_rfr_and_mrmg_with_tags(
         )
         if mtr_idx is not None:
             anchor = paras[mtr_idx]
-            # find end of its body
             j = mtr_idx + 1
             while j < section_end and not _looks_like_test(paras[j]) and not _norm(paras[j].text).startswith("mrmg assessment"):
                 j += 1
@@ -183,7 +165,6 @@ def insert_rfr_and_mrmg_with_tags(
         else:
             anchor = paras[section_end - 1]
 
-        # Insert new MRMG heading + body
         a_head = f"MRMG Assessment {sn}" if sn else "MRMG Assessment"
         h = _insert_after_para(anchor, a_head, bold=True)
         b = _insert_after_para(
