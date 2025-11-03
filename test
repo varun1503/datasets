@@ -5,6 +5,8 @@ from docx.shared import Pt
 from docx.enum.text import WD_COLOR_INDEX
 import re, json, ast
 import pandas as pd
+from docx.oxml.ns import qn
+from docx.oxml.table import CT_Tbl
 
 
 def _norm(s):
@@ -25,13 +27,6 @@ def _insert_after_para(p: Paragraph, text="", bold=False, highlight=None):
         r = q.add_run(text)
         _format_run(r, bold=bold, highlight=highlight)
     return q
-
-def _delete_range(paragraphs, i_from, i_to):
-    if i_from is None or i_to is None or i_from > i_to:
-        return
-    for k in range(i_to, i_from - 1, -1):
-        elm = paragraphs[k]._element
-        elm.getparent().remove(elm)
 
 def _safe_dict(x):
     if isinstance(x, dict):
@@ -60,11 +55,26 @@ def _set_paragraph_text(p: Paragraph, text: str, bold=False):
     _format_run(r, bold=bold, highlight=None)
 
 def _is_heading_style(p: Paragraph):
-    """Detects Word 'Heading' styles like Heading 1 / Heading 2 etc."""
     try:
         return p.style and p.style.name and "heading" in p.style.name.lower()
     except Exception:
         return False
+
+def _delete_content_after_paragraph(paragraph, stop_on_heading=True):
+    """
+    Delete all content after the given paragraph — including tables — until the next heading (if stop_on_heading=True)
+    """
+    current = paragraph._p
+    while True:
+        next_elem = current.getnext()
+        if next_elem is None:
+            break
+        # If stopping on next heading, break early
+        if stop_on_heading and next_elem.tag == qn("w:p"):
+            next_para = Paragraph(next_elem, paragraph._parent)
+            if _is_heading_style(next_para):
+                break
+        current.getparent().remove(next_elem)
 
 def insert_rfr_and_mrmg_with_tags(
     doc_path: str,
@@ -112,26 +122,19 @@ def insert_rfr_and_mrmg_with_tags(
         if m:
             _set_paragraph_text(paras[mrmg_idx], m.group(1), bold=True)
 
-        # 4. Delete ALL content after MRMG heading until next Heading-style para or EOF
-        delete_from = mrmg_idx + 1
-        delete_to = len(paras) - 1
-        for j in range(delete_from, len(paras)):
-            if _is_heading_style(paras[j]):
-                delete_to = j - 1
-                break
-        if delete_from <= delete_to:
-            if DEBUG:
-                print(f"[INFO] Deleting paras {delete_from} to {delete_to}")
-            _delete_range(paras, delete_from, delete_to)
-            paras = doc.paragraphs  # refresh
+        # 4. Delete everything after MRMG heading (including tables) until next Word heading
+        if DEBUG:
+            print(f"[INFO] Removing content after MRMG heading at paragraph {mrmg_idx}")
+        _delete_content_after_paragraph(paras[mrmg_idx], stop_on_heading=True)
+        paras = doc.paragraphs  # refresh
 
-        # 5. Insert clean MRMG body after heading
+        # 5. Insert updated MRMG body
         new_body = _insert_after_para(
             paras[mrmg_idx],
             text=mrmg_new,
             bold=False,
             highlight=(assessment_highlight_color if highlight_assessment else None),
         )
-        _insert_after_para(new_body, "")  # add spacer
+        _insert_after_para(new_body, "")  # spacer
 
     doc.save(output_path)
