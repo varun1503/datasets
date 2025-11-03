@@ -1,22 +1,25 @@
 def _delete_content_after_paragraph(paragraph):
     """
-    Delete all content (including tables) after the given paragraph
-    until a logical heading is reached (like Test, MRMG, Finding, etc.)
+    Delete all content (paragraphs, tables, images) after the given paragraph,
+    until either:
+      - a styled Heading (Heading 1/2/3...), or
+      - a paragraph starting with known heading keywords
     """
     HEADING_KEYWORDS = [
-        "test", "mrmg assessment", "mrmg evaluation", "findings", "finding", "limitation", "table", "section", "appendix"
+        "test", "mrmg assessment", "mrmg evaluation", "finding", "findings", 
+        "limitation", "limitations", "appendix", "validation", "section", "table of contents"
     ]
+    
     current = paragraph._p
     while True:
         next_elem = current.getnext()
         if next_elem is None:
             break
 
-        # If it's a paragraph
         if next_elem.tag == qn("w:p"):
             para = Paragraph(next_elem, paragraph._parent)
-            text = _norm(para.text)
-            if any(text.startswith(h) for h in HEADING_KEYWORDS):
-                break
-        # If it's a table or image or content — remove
+            t = _norm(para.text)
+            if _is_heading_style(para) or any(t.startswith(h) for h in HEADING_KEYWORDS):
+                break  # stop deleting
+        # remove current element (could be p, tbl, drawing, etc.)
         current.getparent().remove(next_elem)
