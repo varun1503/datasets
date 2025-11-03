@@ -1,140 +1,28 @@
-from docx import Document
-from docx.text.paragraph import Paragraph
-from docx.oxml import OxmlElement
-from docx.shared import Pt
-from docx.enum.text import WD_COLOR_INDEX
-import re, json, ast
-import pandas as pd
-from docx.oxml.ns import qn
-from docx.oxml.table import CT_Tbl
+import codecs
 
+def preprocess_mrmg_text(text: str) -> str:
+    """
+    Clean MRMG Assessment text before inserting:
+    - Decodes unicode escape sequences like '\\u2019'
+    - Replaces escaped \n with real newlines
+    - Strips extra whitespace
+    - Normalizes bullets or special formatting
+    """
+    if not isinstance(text, str):
+        return ""
 
-def _norm(s):
-    return re.sub(r"\s+", " ", (s or "")).strip().lower()
-
-def _format_run(run, bold=False, highlight=None):
-    run.bold = bool(bold)
-    run.font.name = "Times New Roman"
-    run.font.size = Pt(11)
-    if highlight is not None:
-        run.font.highlight_color = highlight
-
-def _insert_after_para(p: Paragraph, text="", bold=False, highlight=None):
-    new_p = OxmlElement("w:p")
-    p._p.addnext(new_p)
-    q = Paragraph(new_p, p._parent)
-    if text:
-        r = q.add_run(text)
-        _format_run(r, bold=bold, highlight=highlight)
-    return q
-
-def _safe_dict(x):
-    if isinstance(x, dict):
-        return x
-    if isinstance(x, str):
-        s = x.strip()
-        if not s:
-            return {}
-        try:
-            return json.loads(s)
-        except Exception:
-            try:
-                return ast.literal_eval(s)
-            except Exception:
-                return {}
-    return {}
-
-def _snum(text):
-    m = re.search(r"\bS\s*(\d+)\b", text or "", flags=re.IGNORECASE)
-    return f"S{m.group(1)}" if m else ""
-
-def _set_paragraph_text(p: Paragraph, text: str, bold=False):
-    for r in p.runs:
-        r.text = ""
-    r = p.add_run(text)
-    _format_run(r, bold=bold, highlight=None)
-
-def _is_heading_style(p: Paragraph):
+    # Decode unicode escape sequences (e.g., \u2019 → ’)
     try:
-        return p.style and p.style.name and "heading" in p.style.name.lower()
+        text = codecs.decode(text.encode("utf-8"), "unicode_escape")
     except Exception:
-        return False
+        pass  # if decoding fails, skip
 
-def _delete_content_after_paragraph(paragraph, stop_on_heading=True):
-    """
-    Delete all content after the given paragraph — including tables — until the next heading (if stop_on_heading=True)
-    """
-    current = paragraph._p
-    while True:
-        next_elem = current.getnext()
-        if next_elem is None:
-            break
-        # If stopping on next heading, break early
-        if stop_on_heading and next_elem.tag == qn("w:p"):
-            next_para = Paragraph(next_elem, paragraph._parent)
-            if _is_heading_style(next_para):
-                break
-        current.getparent().remove(next_elem)
+    # Replace literal '\n' strings with real newlines
+    text = text.replace("\\n", "\n")
 
-def insert_rfr_and_mrmg_with_tags(
-    doc_path: str,
-    df: pd.DataFrame,
-    output_path: str,
-    tag_col: str = "text",
-    rfr_col: str = "rfr_value",
-    mrmg_col: str = "MRMG Assessment ",
-    highlight_assessment: bool = True,
-    assessment_highlight_color=WD_COLOR_INDEX.YELLOW,
-    DEBUG=False,
-):
-    doc = Document(doc_path)
+    # Normalize space
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n\s+", "\n", text)
+    text = text.strip()
 
-    for _, row in df.iterrows():
-        tag = str(row.get(tag_col, "") or "").strip()
-        mrmg_new = str(row.get(mrmg_col, "") or "").strip()
-        if not tag:
-            continue
-
-        sn = _snum(tag)
-        paras = doc.paragraphs
-
-        # 1. Locate the paragraph that contains the tag (Test S6 etc.)
-        start_idx = next((i for i, p in enumerate(paras) if tag.lower() in _norm(p.text)), None)
-        if start_idx is None and sn:
-            start_idx = next((i for i, p in enumerate(paras) if sn.lower() in _norm(p.text)), None)
-        if start_idx is None:
-            if DEBUG:
-                print(f"[WARN] Skipping row with tag '{tag}': no match in doc")
-            continue
-
-        # 2. Find MRMG Assessment S# heading
-        def _is_mrmg_heading(p):
-            return _norm(p.text).startswith("mrmg assessment") and sn.lower() in _norm(p.text)
-
-        mrmg_idx = next((i for i in range(start_idx, len(paras)) if _is_mrmg_heading(paras[i])), None)
-        if mrmg_idx is None:
-            if DEBUG:
-                print(f"[WARN] No MRMG heading for {sn}")
-            continue
-
-        # 3. Normalize heading text (remove colon / inline text)
-        m = re.match(r"^(mrmg assessment(?:\s*s?\d+)?)(:.*)?$", paras[mrmg_idx].text.strip(), flags=re.IGNORECASE)
-        if m:
-            _set_paragraph_text(paras[mrmg_idx], m.group(1), bold=True)
-
-        # 4. Delete everything after MRMG heading (including tables) until next Word heading
-        if DEBUG:
-            print(f"[INFO] Removing content after MRMG heading at paragraph {mrmg_idx}")
-        _delete_content_after_paragraph(paras[mrmg_idx], stop_on_heading=True)
-        paras = doc.paragraphs  # refresh
-
-        # 5. Insert updated MRMG body
-        new_body = _insert_after_para(
-            paras[mrmg_idx],
-            text=mrmg_new,
-            bold=False,
-            highlight=(assessment_highlight_color if highlight_assessment else None),
-        )
-        _insert_after_para(new_body, "")  # spacer
-
-    doc.save(output_path)
+    return text
