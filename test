@@ -1,204 +1,197 @@
-# accuracy_check.py (run function same as adequacy)
-# pip install fuzzysearch
-from __future__ import annotations
-import sys, os, re
-from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Iterable
-from fuzzysearch import find_near_matches
-
-sys.path.append(r"C:\Users\vvaishy\OneDrive - American Express\projects\Adverse-action-letter\Adverse-action-letter-review")
-try:
-    from utils.foldertolist import list_file_paths
-except Exception:
-    def list_file_paths(folder_path: str) -> List[str]:
-        acc = []
-        for root, _, files in os.walk(folder_path):
-            for f in files:
-                if f.lower().endswith('.txt'):
-                    acc.append(os.path.abspath(os.path.join(root, f)))
-        return acc
+from docx import Document
+from docx.text.paragraph import Paragraph
+from docx.oxml import OxmlElement
+from docx.shared import Pt
+from docx.enum.text import WD_COLOR_INDEX
+import re, json, ast
+import pandas as pd
 
 
-@dataclass
-class AccuracyCheck:
-    max_l_dist: int = 1
-    credit_bureau_list: List[str] = field(default_factory=lambda: [
-        "Experian",
-        "D&B corporation",
-        "TransUnion Consumer Relations",
-        "LexisNexis Risk Solutions Bureau LLC",
-    ])
-    across_page_filler: str = "Continued  on  reverse  side"
-    lead_sentence_1: str = "Here's the reason we made the decision"
-    lead_sentence_2: str = "Reason(s) for Our Decision"
-    keyword_hits: List[str] = field(default_factory=lambda: ["adequacy", "accurate"])
+# ---------- helpers ----------
+def _norm(s):
+    return re.sub(r"\s+", " ", (s or "")).strip().lower()
 
-    # ----------------- helpers -----------------
+def _format_run(run, bold=False, highlight=None):
+    run.bold = bool(bold)
+    run.font.name = "Times New Roman"
+    run.font.size = Pt(11)
+    if highlight is not None:
+        run.font.highlight_color = highlight
 
-    @staticmethod
-    def _slice_next_sentences(content: str, start_idx: int, n_sentences: int) -> str:
-        if start_idx < 0 or start_idx >= len(content):
-            return ""
-        tail = re.sub(r"[ \t]+", " ", content[start_idx:])
-        parts = re.split(r"(?<=[\.!?])\s+", tail)
-        return " ".join(parts[:max(1, n_sentences)]).strip()
+def _insert_after_para(p: Paragraph, text="", bold=False, highlight=None):
+    new_p = OxmlElement("w:p")
+    p._p.addnext(new_p)
+    q = Paragraph(new_p, p._parent)
+    if text:
+        r = q.add_run(text)
+        _format_run(r, bold=bold, highlight=highlight)
+    return q
 
-    def _get_credit_bureaus(self, content: str) -> List[str]:
-        return [cb for cb in self.credit_bureau_list if cb in content]
+def _delete_range(paragraphs, i_from, i_to):
+    if i_from is None or i_to is None or i_from > i_to:
+        return
+    for k in range(i_to, i_from - 1, -1):
+        elm = paragraphs[k]._element
+        elm.getparent().remove(elm)
 
-    @staticmethod
-    def _get_dates(content: str) -> List[str]:
-        pattern = (
-            r"(?:January|February|March|April|May|June|July|August|September|October|November|December)"
-            r"\s+(?:[1-9]|[12]\d|3[01]),?\s+\d{4}"
-        )
-        return re.findall(pattern, content)
-
-    @staticmethod
-    def _sentences_with_keywords(content: str, keywords: Iterable[str]) -> List[str]:
-        sentences = re.split(r"(?<=[\.!?])\s+", content)
-        hits: List[str] = []
-        for s in sentences:
-            s_clean = s.strip()
-            if not s_clean:
-                continue
-            for kw in keywords:
-                if re.search(rf"\b{re.escape(kw)}\b", s_clean, flags=re.IGNORECASE):
-                    hits.append(s_clean)
-                    break
-        seen, out = set(), []
-        for h in hits:
-            if h not in seen:
-                seen.add(h)
-                out.append(h)
-        return out
-
-    # ----------------- extractors -----------------
-
-    def find_fico_score(self, content: str) -> str:
-        hits = find_near_matches("FICO score was", content, max_l_dist=self.max_l_dist)
-        if not hits:
-            return "not found"
-        s = hits[0].start
-        block = self._slice_next_sentences(content, s, 3)
-        first_sentence = block.split(".")[0]
-        return first_sentence.strip() if first_sentence else block
-
-    def find_factors(self, content: str) -> str:
-        phrases = [
-            "The following are the key factors that contributed to your FICO score",
-            "the key factors that contributed to your FICO score",
-        ]
-        for phr in phrases:
-            hits = find_near_matches(phr, content, max_l_dist=self.max_l_dist)
-            if hits:
-                s = hits[0].start
-                return self._slice_next_sentences(content, s, 7)
-        return "not found"
-
-    def find_creditor(self, content: str) -> str:
-        hits = find_near_matches("The creditor is", content, max_l_dist=self.max_l_dist)
-        if not hits:
-            return "not found"
-        s = hits[0].start
-        return self._slice_next_sentences(content, s, 2)
-
-    def find_your_right(self, content: str) -> str:
-        bureaus = self._get_credit_bureaus(content)
-        if not bureaus:
-            return "not found (no credit bureau detected in document)"
-        hits = find_near_matches(
-            "Your Right to Get Your Credit Report", content, max_l_dist=self.max_l_dist
-        )
-        if not hits:
-            return "not found"
-        s = hits[0].start
-        block = self._slice_next_sentences(content, s, 10)
-        if self.across_page_filler in block:
-            block = self._slice_next_sentences(content, s, 17)
-        return block
-
-    def find_credit_bureaus(self, content: str) -> List[str]:
-        return self._get_credit_bureaus(content)
-
-    def find_5th_subfactor(self, content: str) -> str:
-        hits = find_near_matches(
-            "inquiries on your report in the last 12 months",
-            content,
-            max_l_dist=self.max_l_dist,
-        )
-        if not hits:
-            return "not found"
-        s = hits[0].start
-        return self._slice_next_sentences(content, s, 2)
-
-    def find_decline_reason(self, content: str) -> str:
-        hits1 = find_near_matches(self.lead_sentence_1, content, max_l_dist=self.max_l_dist)
-        hits2 = find_near_matches(self.lead_sentence_2, content, max_l_dist=self.max_l_dist)
-        if not hits1 and not hits2:
-            return "not found"
-        s = (hits1 or hits2)[0].start
-        return self._slice_next_sentences(content, s, 15)
-
-    def find_first_date(self, content: str) -> str:
-        dates = self._get_dates(content)
-        return dates[0] if dates else "not found"
-
-    # ----------------- orchestrator -----------------
-
-    def analyze_text(self, content: str) -> Dict[str, str]:
-        return {
-            "First Date": self.find_first_date(content),
-            "FICO Score": self.find_fico_score(content),
-            "FICO Factors": self.find_factors(content),
-            "Creditor": self.find_creditor(content),
-            "Your Right Section": self.find_your_right(content),
-            "Credit Bureaus Found": ", ".join(self.find_credit_bureaus(content)) or "none",
-            "5th Subfactor (Inquiries 12mo)": self.find_5th_subfactor(content),
-            "Decline Reason": self.find_decline_reason(content),
-        }
-
-    def run(self, input_folder: str, output_folder: str) -> Dict[str, Dict[str, str]]:
-        os.makedirs(output_folder, exist_ok=True)
-        files = list_file_paths(input_folder)
-        results: Dict[str, Dict[str, str]] = {}
-
-        for path in files:
+def _safe_dict(x):
+    if isinstance(x, dict):
+        return x
+    if isinstance(x, str):
+        s = x.strip()
+        if not s:
+            return {}
+        try:
+            return json.loads(s)
+        except Exception:
             try:
-                with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read()
-            except Exception as e:
-                results[path] = {"ERROR": str(e)}
-                continue
+                return ast.literal_eval(s)
+            except Exception:
+                return {}
+    return {}
 
-            info = self.analyze_text(content)
+def _snum(text):
+    m = re.search(r"\bS\s*(\d+)\b", text or "", flags=re.IGNORECASE)
+    return f"S{m.group(1)}" if m else ""
 
-            kw_sentences = self._sentences_with_keywords(content, self.keyword_hits)
-            if kw_sentences:
-                if len(kw_sentences) > 25:
-                    kw_sentences = kw_sentences[:25] + ['… (truncated)']
-                info['Keyword Hits (adequacy/accurate)'] = "\n".join(f"- {s}" for s in kw_sentences)
-            else:
-                info['Keyword Hits (adequacy/accurate)'] = 'none'
+def _looks_like_test(p):
+    return bool(re.search(r"\btest\b", _norm(p.text)))
 
-            base = os.path.basename(path)
-            name, _ = os.path.splitext(base)
-            out_path = os.path.join(output_folder, f"{name}.accuracy.txt")
-
-            with open(out_path, 'w', encoding='utf-8') as out:
-                for k, v in info.items():
-                    out.write(f"{k}: {v}\n")
-                out.write('-'*96 + '\n')
-
-            results[path] = info
-
-        return results
+def _set_paragraph_text(p: Paragraph, text: str, bold=False):
+    for r in p.runs:
+        r.text = ""
+    r = p.add_run(text)
+    _format_run(r, bold=bold, highlight=None)
 
 
-Done — the script now matches the adequacy-style run() function signature:
+# ---------- main ----------
+def insert_rfr_and_mrmg_with_tags(
+    doc_path: str,
+    df: pd.DataFrame,
+    output_path: str,
+    tag_col: str = "text",
+    rfr_col: str = "rfr_value",
+    mrmg_col: str = "MRMG Assessment ",
+    mtr_heading_base: str = "Modelling Team Response",
+    highlight_assessment: bool = True,
+    assessment_highlight_color=WD_COLOR_INDEX.YELLOW,
+    DEBUG=False,
+):
+    """
+    Replace the full MRMG Assessment S# content with the provided text.
+    Deletes everything below MRMG Assessment until the next 'Test ...' heading.
+    """
+    doc = Document(doc_path)
 
-checker = AccuracyCheck()
-checker.run(input_folder=r"C:\letters", output_folder=r"C:\reports")
+    for _, row in df.iterrows():
+        tag = str(row.get(tag_col, "") or "").strip()
+        rfr = _safe_dict(row.get(rfr_col, {}))
+        mrmg_new = str(row.get(mrmg_col, "") or "").strip()
+        if not tag:
+            continue
 
-✅ It automatically reads all .txt files in the input folder, analyzes them,
-and writes each <name>.accuracy.txt file to the output folder.
+        sn = _snum(tag)
+        paras = doc.paragraphs
+
+        # 1. Locate Test section start
+        tag_norm = _norm(tag)
+        start_idx = next((i for i, p in enumerate(paras) if tag_norm in _norm(p.text)), None)
+        if start_idx is None and sn:
+            start_idx = next((i for i, p in enumerate(paras) if sn.lower() in _norm(p.text)), None)
+        if start_idx is None:
+            if DEBUG: print(f"[WARN] Could not find section for tag='{tag}'")
+            continue
+
+        # 2. Section end = next "Test ..." or document end
+        next_test = None
+        for j in range(start_idx + 1, len(paras)):
+            if _looks_like_test(paras[j]):
+                next_test = j
+                break
+        section_end = next_test if next_test is not None else len(paras)
+
+        # 3. Find MRMG Assessment heading (with or without S#)
+        def _is_assessment_for_sn(p):
+            t = _norm(p.text)
+            if not t.startswith("mrmg assessment"):
+                return False
+            return (sn.lower() in t) if sn else True
+
+        mrmg_head_idx = next(
+            (i for i in range(start_idx + 1, section_end) if _is_assessment_for_sn(paras[i])),
+            None,
+        )
+        if mrmg_head_idx is None:
+            # fallback generic
+            mrmg_head_idx = next(
+                (i for i in range(start_idx + 1, section_end)
+                 if _norm(paras[i].text).startswith("mrmg assessment")),
+                None,
+            )
+
+        # 4. Replace MRMG Assessment body
+        if mrmg_head_idx is not None:
+            # Clean heading text (remove colon or inline body)
+            head_text = paras[mrmg_head_idx].text.strip()
+            m = re.match(r"^(mrmg assessment(?:\s+s?\d+)?)(:.*)?$", head_text, flags=re.IGNORECASE)
+            if m:
+                pure_heading = m.group(1)
+                _set_paragraph_text(paras[mrmg_head_idx], pure_heading, bold=True)
+
+            # Delete EVERYTHING after heading until next Test
+            body_start = mrmg_head_idx + 1
+            next_test_after = None
+            for j in range(body_start, len(paras)):
+                if _looks_like_test(paras[j]):
+                    next_test_after = j
+                    break
+            body_end = (next_test_after - 1) if next_test_after is not None else (len(paras) - 1)
+
+            if body_start <= body_end:
+                if DEBUG: print(f"[INFO] Deleting {body_start}–{body_end} after MRMG {sn}")
+                _delete_range(paras, body_start, body_end)
+                paras = doc.paragraphs
+
+            # Insert the new MRMG text
+            insert_after = paras[mrmg_head_idx]
+            new_body_p = _insert_after_para(
+                insert_after,
+                text=mrmg_new,
+                bold=False,
+                highlight=(assessment_highlight_color if highlight_assessment else None),
+            )
+            _insert_after_para(new_body_p, "")  # spacer
+            continue
+
+        # 5. If no MRMG heading exists, append one after MTR
+        # Find MTR heading
+        def _is_mtr(p):
+            t = _norm(p.text)
+            return "modelling team response" in t or "modeling team response" in t
+
+        mtr_idx = next(
+            (i for i in range(start_idx + 1, section_end) if _is_mtr(paras[i])),
+            None,
+        )
+        if mtr_idx is not None:
+            anchor = paras[mtr_idx]
+            # find end of its body
+            j = mtr_idx + 1
+            while j < section_end and not _looks_like_test(paras[j]) and not _norm(paras[j].text).startswith("mrmg assessment"):
+                j += 1
+            anchor = paras[j - 1]
+        else:
+            anchor = paras[section_end - 1]
+
+        # Insert new MRMG heading + body
+        a_head = f"MRMG Assessment {sn}" if sn else "MRMG Assessment"
+        h = _insert_after_para(anchor, a_head, bold=True)
+        b = _insert_after_para(
+            h,
+            mrmg_new,
+            bold=False,
+            highlight=(assessment_highlight_color if highlight_assessment else None),
+        )
+        _insert_after_para(b, "")
+
+    doc.save(output_path)
