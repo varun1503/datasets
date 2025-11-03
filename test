@@ -1,238 +1,244 @@
-accuracy_check.py (class only, no argparse, no run_accuracy)
+from docx import Document
+from docx.text.paragraph import Paragraph
+from docx.oxml import OxmlElement
+from docx.shared import Pt
+from docx.enum.text import WD_COLOR_INDEX
+import re, json, ast
+import pandas as pd
 
-pip install fuzzysearch
+# ---------- helpers ----------
+def _norm(s):
+    return re.sub(r"\s+", " ", (s or "")).strip().lower()
 
-from future import annotations import sys, os, re from dataclasses import dataclass, field from typing import List, Optional, Dict, Iterable from fuzzysearch import find_near_matches
+def _format_run(run, bold=False, highlight=None):
+    run.bold = bool(bold)
+    run.font.name = "Times New Roman"
+    run.font.size = Pt(11)
+    if highlight is not None:
+        run.font.highlight_color = highlight
 
-(Optional) Keep your original path tweak; harmless if path doesn't exist
+def _insert_after_para(p: Paragraph, text="", bold=False, highlight=None):
+    """Insert a paragraph AFTER p with Times New Roman 11."""
+    new_p = OxmlElement("w:p")
+    p._p.addnext(new_p)
+    q = Paragraph(new_p, p._parent)
+    if text is not None:
+        r = q.add_run(text)
+        _format_run(r, bold=bold, highlight=highlight)
+    return q
 
-sys.path.append(r"C:\Users\vvaishy\OneDrive - American Express\projects\Adverse-action-letter\Adverse-action-letter-review") try: from utils.foldertolist import list_file_paths as lst_paths except Exception: lst_paths = None  # fallback if the helper isn't present
+def _delete_range(paragraphs, i_from, i_to):
+    if i_from is None or i_to is None or i_from > i_to:
+        return
+    for k in range(i_to, i_from - 1, -1):
+        elm = paragraphs[k]._element
+        elm.getparent().remove(elm)
 
-@dataclass class AccuracyCheck: """ Enhanced version that mirrors per-file reporting and keyword-at-end behavior.
-
-Import and create an instance of `AccuracyCheck`, then call `.run()` directly.
-"""
-
-max_l_dist: int = 1
-credit_bureau_list: List[str] = field(default_factory=lambda: [
-    "Experian",
-    "D&B corporation",
-    "TransUnion Consumer Relations",
-    "LexisNexis Risk Solutions Bureau LLC",
-])
-across_page_filler: str = "Continued  on  reverse  side"
-lead_sentence_1: str = "Here's the reason we made the decision"
-lead_sentence_2: str = "Reason(s) for Our Decision"
-
-# Keywords we want to surface at the end of report
-keyword_hits: List[str] = field(default_factory=lambda: [
-    "adequacy",
-    "accurate",
-])
-
-# ----------------------------- helpers -----------------------------
-
-@staticmethod
-def _slice_next_sentences(content: str, start_idx: int, n_sentences: int) -> str:
-    if start_idx < 0 or start_idx >= len(content):
-        return ""
-    tail = re.sub(r"[ \t]+", " ", content[start_idx:])
-    parts = re.split(r"(?<=[\.!?])\s+", tail)
-    return " ".join(parts[:max(1, n_sentences)]).strip()
-
-def _get_credit_bureaus(self, content: str) -> List[str]:
-    return [cb for cb in self.credit_bureau_list if cb in content]
-
-@staticmethod
-def _get_dates(content: str) -> List[str]:
-    pattern = (
-        r"(?:January|February|March|April|May|June|July|August|September|October|November|December)"
-        r"\s+(?:[1-9]|[12]\d|3[01]),?\s+\d{4}"
-    )
-    return re.findall(pattern, content)
-
-@staticmethod
-def _sentences_with_keywords(content: str, keywords: Iterable[str]) -> List[str]:
-    sentences = re.split(r"(?<=[\.!?])\s+", content)
-    hits: List[str] = []
-    for s in sentences:
-        s_clean = s.strip()
-        if not s_clean:
-            continue
-        for kw in keywords:
-            if re.search(rf"\b{re.escape(kw)}\b", s_clean, flags=re.IGNORECASE):
-                hits.append(s_clean)
-                break
-    # de-duplicate preserving order
-    seen, out = set(), []
-    for h in hits:
-        if h not in seen:
-            seen.add(h)
-            out.append(h)
-    return out
-
-# ----------------------------- extractors -----------------------------
-
-def find_fico_score(self, content: str) -> str:
-    hits = find_near_matches("FICO score was", content, max_l_dist=self.max_l_dist)
-    if not hits:
-        return "not found"
-    s = hits[0].start
-    block = self._slice_next_sentences(content, s, 3)
-    first_sentence = block.split(".")[0]
-    return first_sentence.strip() if first_sentence else block
-
-def find_factors(self, content: str) -> str:
-    phrases = [
-        "The following are the key factors that contributed to your FICO score",
-        "the key factors that contributed to your FICO score",
-    ]
-    for phr in phrases:
-        hits = find_near_matches(phr, content, max_l_dist=self.max_l_dist)
-        if hits:
-            s = hits[0].start
-            return self._slice_next_sentences(content, s, 7)
-    return "not found"
-
-def find_creditor(self, content: str) -> str:
-    hits = find_near_matches("The creditor is", content, max_l_dist=self.max_l_dist)
-    if not hits:
-        return "not found"
-    s = hits[0].start
-    return self._slice_next_sentences(content, s, 2)
-
-def find_your_right(self, content: str) -> str:
-    bureaus = self._get_credit_bureaus(content)
-    if not bureaus:
-        return "not found (no credit bureau detected in document)"
-    hits = find_near_matches(
-        "Your Right to Get Your Credit Report", content, max_l_dist=self.max_l_dist
-    )
-    if not hits:
-        return "not found"
-    s = hits[0].start
-    block = self._slice_next_sentences(content, s, 10)
-    if self.across_page_filler in block:
-        block = self._slice_next_sentences(content, s, 17)
-    return block
-
-def find_credit_bureaus(self, content: str) -> List[str]:
-    return self._get_credit_bureaus(content)
-
-def find_5th_subfactor(self, content: str) -> str:
-    hits = find_near_matches(
-        "inquiries on your report in the last 12 months",
-        content,
-        max_l_dist=self.max_l_dist,
-    )
-    if not hits:
-        return "not found"
-    s = hits[0].start
-    return self._slice_next_sentences(content, s, 2)
-
-def find_decline_reason(self, content: str) -> str:
-    hits1 = find_near_matches(self.lead_sentence_1, content, max_l_dist=self.max_l_dist)
-    hits2 = find_near_matches(self.lead_sentence_2, content, max_l_dist=self.max_l_dist)
-    if not hits1 and not hits2:
-        return "not found"
-    s = (hits1 or hits2)[0].start
-    return self._slice_next_sentences(content, s, 15)
-
-def find_first_date(self, content: str) -> str:
-    dates = self._get_dates(content)
-    return dates[0] if dates else "not found"
-
-# ----------------------------- orchestrator -----------------------------
-
-def analyze_text(self, content: str) -> Dict[str, str]:
-    return {
-        "First Date": self.find_first_date(content),
-        "FICO Score": self.find_fico_score(content),
-        "FICO Factors": self.find_factors(content),
-        "Creditor": self.find_creditor(content),
-        "Your Right Section": self.find_your_right(content),
-        "Credit Bureaus Found": ", ".join(self.find_credit_bureaus(content)) or "none",
-        "5th Subfactor (Inquiries 12mo)": self.find_5th_subfactor(content),
-        "Decline Reason": self.find_decline_reason(content),
-    }
-
-def _write_report(self, input_path: str, info: Dict[str, str], output_dir: Optional[str]) -> str:
-    base = os.path.basename(input_path)
-    name, _ = os.path.splitext(base)
-    out_dir = output_dir if output_dir else os.path.dirname(os.path.abspath(input_path))
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, f"{name}.accuracy.txt")
-
-    lines: List[str] = [f"FILE: {input_path}"]
-    for k in [
-        "First Date",
-        "FICO Score",
-        "FICO Factors",
-        "Creditor",
-        "Your Right Section",
-        "Credit Bureaus Found",
-        "5th Subfactor (Inquiries 12mo)",
-        "Decline Reason",
-    ]:
-        lines.append(f"{k}: {info.get(k, 'n/a')}")
-
-    # Append keyword hits LAST ("below that")
-    lines.append("-" * 96)
-    lines.append("Keyword Hits (adequacy/accurate):")
-    lines.append(info.get("Keyword Hits (adequacy/accurate)", "none"))
-    lines.append("-" * 96)
-
-    with open(out_path, "w", encoding="utf-8") as out:
-        out.write("\n".join(lines))
-    return out_path
-
-def run(
-    self,
-    file_paths_txt: List[str],
-    output_dir: Optional[str] = None,
-    write_combined: bool = False,
-    combined_report_path: Optional[str] = None,
-) -> Dict[str, Dict[str, str]]:
-    results: Dict[str, Dict[str, str]] = {}
-    combined_lines: List[str] = []
-
-    if write_combined and not combined_report_path:
-        raise ValueError("combined_report_path is required when write_combined=True")
-
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-
-    for path in file_paths_txt:
+def _safe_dict(x):
+    if isinstance(x, dict):
+        return x
+    if isinstance(x, str):
+        s = x.strip()
+        if not s:
+            return {}
         try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
-        except Exception as e:
-            err = {"ERROR": f"reading file failed: {e}"}
-            results[path] = err
-            if write_combined:
-                combined_lines.append(f"FILE: {path}\nERROR: {e}\n{'-'*96}")
+            return json.loads(s)
+        except Exception:
+            try:
+                return ast.literal_eval(s)
+            except Exception:
+                return {}
+    return {}
+
+def _snum(text):  # returns like "S2" if present, else ""
+    m = re.search(r"\bS\s*(\d+)\b", text or "", flags=re.IGNORECASE)
+    return f"S{m.group(1)}" if m else ""
+
+def _looks_like_test(p):
+    return bool(re.search(r"\btest\b", _norm(p.text)))
+
+def _set_paragraph_text(p: Paragraph, text: str, bold=False):
+    # Clear and write fresh text with desired formatting
+    for r in p.runs:
+        r.text = ""
+    r = p.add_run(text)
+    _format_run(r, bold=bold, highlight=None)
+
+# ---------- robust heading detection ----------
+# Canonical heading regexes (strict, section-safe)
+_HEADING_PATTERNS = [
+    r"^test(\s+s?\d+)?\b",                                   # Test / Test S1
+    r"^challenge(\s+s?\d+)?\b",                              # Challenge / Challenge S1
+    r"^modell?ing team response(\s+s?\d+)?\b",               # Modelling/Modeling Team Response
+    r"^mrmg assessment(\s+s?\d+)?\b",                        # MRMG Assessment
+    r"^mrmg evaluation(\s+s?\d+)?\b",                        # MRMG Evaluation
+    r"^(finding[s]? details|validation assessment details)\b",
+    r"^limitations? and control[s]?\b",
+    r"^appendix\b",
+    r"^references?\b",
+    r"^table of contents\b",
+    r"^section\b",
+]
+_HEADING_RE = re.compile("|".join(f"(?:{p})" for p in _HEADING_PATTERNS), re.IGNORECASE)
+
+def _is_heading_para(p: Paragraph) -> bool:
+    t = p.text.strip()
+    if not t:
+        return False
+    # Style "Heading X"
+    try:
+        if p.style and "heading" in (p.style.name or "").strip().lower():
+            return True
+    except Exception:
+        pass
+    # Regex patterns
+    if _HEADING_RE.search(t):
+        return True
+    # Short bold line heuristic (fallback)
+    if len(t) <= 120 and any(r.bold for r in p.runs if r.text.strip()):
+        return True
+    return False
+
+def _find_idx_in_range(paras, start, end, predicate):
+    for i in range(start, min(end, len(paras))):
+        if predicate(paras[i]):
+            return i
+    return None
+
+# ---------- main ----------
+def insert_rfr_and_mrmg_with_tags(
+    doc_path: str,
+    df: pd.DataFrame,
+    output_path: str,
+    tag_col: str = "text",                  # e.g., "Test S1"
+    rfr_col: str = "rfr_value",             # dict: {<challenge text>: <model team response>}
+    mrmg_col: str = "MRMG Assessment ",     # as in your sheet (trailing space)
+    mtr_heading_base: str = "Modelling Team Response",
+    highlight_assessment: bool = True,
+    assessment_highlight_color=WD_COLOR_INDEX.YELLOW,
+    DEBUG=False,  # set True to print what’s being replaced
+):
+    """
+    Replaces the entire MRMG Assessment body (all paragraphs until the next heading)
+    inside each Test S# section, without ever inserting between MTR heading and its body.
+    Also normalizes 'MRMG Assessment S#:' inline cases by keeping only the heading text
+    in the heading paragraph.
+    """
+    doc = Document(doc_path)
+
+    for _, row in df.iterrows():
+        tag = str(row.get(tag_col, "") or "").strip()
+        rfr = _safe_dict(row.get(rfr_col, {}))
+        mrmg_new = str(row.get(mrmg_col, "") or "").strip()
+        if not tag:
             continue
 
-        info = self.analyze_text(content)
+        sn = _snum(tag)  # "S1", "S2", ...
+        paras = doc.paragraphs
 
-        kw_sentences = self._sentences_with_keywords(content, self.keyword_hits)
-        if kw_sentences:
-            if len(kw_sentences) > 25:
-                kw_sentences = kw_sentences[:25] + ["… (truncated)"]
-            info["Keyword Hits (adequacy/accurate)"] = "\n".join(f"- {s}" for s in kw_sentences)
+        # --- locate current Test section
+        tag_norm = _norm(tag)
+        start_idx = next((i for i, p in enumerate(paras) if tag_norm in _norm(p.text)), None)
+        if start_idx is None and sn:
+            start_idx = next((i for i, p in enumerate(paras) if sn.lower() in _norm(p.text)), None)
+        if start_idx is None:
+            if DEBUG: print(f"[WARN] Could not find section for tag='{tag}'")
+            continue
+
+        # end = next "Test ..." or doc end
+        next_test = None
+        for j in range(start_idx + 1, len(paras)):
+            if _looks_like_test(paras[j]):
+                next_test = j
+                break
+        section_end = next_test if next_test is not None else len(paras)
+
+        # --- find MTR heading (for safe anchoring)
+        def _is_mtr(p):
+            t = _norm(p.text)
+            return ("modelling team response" in t) or ("modeling team response" in t)
+        mtr_idx = _find_idx_in_range(paras, start_idx + 1, section_end, _is_mtr)
+
+        # --- find MRMG Assessment heading for this S# (prefer exact S#, else any within section)
+        def _is_assessment_for_sn(p):
+            t = _norm(p.text)
+            if not t.startswith("mrmg assessment"):
+                return False
+            return (sn.lower() in t) if sn else True
+
+        mrmg_head_idx = _find_idx_in_range(paras, start_idx + 1, section_end, _is_assessment_for_sn)
+        if mrmg_head_idx is None:
+            mrmg_head_idx = _find_idx_in_range(
+                paras, start_idx + 1, section_end, lambda p: _norm(p.text).startswith("mrmg assessment")
+            )
+
+        if mrmg_head_idx is not None:
+            # --- normalize heading paragraph (handle inline 'MRMG Assessment ...: inline text')
+            head_text = paras[mrmg_head_idx].text.strip()
+            # take only the heading phrase (before the first colon), keep S# if present
+            m = re.match(r"^(mrmg assessment(?:\s+s?\d+)?)(:.*)?$", head_text, flags=re.IGNORECASE)
+            if m:
+                pure_heading = m.group(1)
+                _set_paragraph_text(paras[mrmg_head_idx], pure_heading, bold=True)
+
+            # --- compute body range = [mrmg_head_idx+1 .. next_heading-1], capped by section_end
+            body_start = mrmg_head_idx + 1
+            # find next heading INSIDE the same section
+            next_head = _find_idx_in_range(paras, body_start, section_end, _is_heading_para)
+            body_end = (next_head - 1) if next_head is not None else (section_end - 1)
+
+            if body_start <= body_end:
+                if DEBUG: print(f"[INFO] Replacing MRMG body: {body_start}..{body_end}")
+                _delete_range(paras, body_start, body_end)
+                paras = doc.paragraphs  # refresh
+
+            # insert new single body AFTER heading
+            insert_after = paras[mrmg_head_idx]
+            new_body_p = _insert_after_para(
+                insert_after,
+                text=mrmg_new,
+                bold=False,
+                highlight=(assessment_highlight_color if highlight_assessment else None),
+            )
+            _insert_after_para(new_body_p, "")  # spacer
+            continue
+
+        # --- if no MRMG Assessment heading exists: add it, but never break MTR heading-body
+        # find end of MTR body (walk until next heading)
+        if mtr_idx is not None:
+            i = mtr_idx + 1
+            while i < section_end and not _is_heading_para(paras[i]):
+                i += 1
+            safe_anchor = paras[i - 1] if i > (mtr_idx + 1) else paras[mtr_idx]
         else:
-            info["Keyword Hits (adequacy/accurate)"] = "none"
+            safe_anchor = paras[section_end - 1] if section_end - 1 >= start_idx else paras[start_idx]
 
-        results[path] = info
-        report_path = self._write_report(path, info, output_dir)
+        # (Optional) Insert RFR pairs AFTER the safe anchor (never between MTR heading & body)
+        if rfr:
+            cur = safe_anchor
+            for ch_text, resp_text in rfr.items():
+                ch_head = f"Challenge {sn}" if sn else "Challenge"
+                mtr_head = f"{mtr_heading_base} {sn}" if sn else mtr_heading_base
 
-        if write_combined:
-            with open(report_path, "r", encoding="utf-8") as rp:
-                combined_lines.extend(rp.read().splitlines())
+                cur = _insert_after_para(cur, ch_head, bold=True)
+                cur = _insert_after_para(cur, str(ch_text or "").strip(), bold=False)
 
-    if write_combined and combined_lines:
-        os.makedirs(os.path.dirname(os.path.abspath(combined_report_path)), exist_ok=True)
-        with open(combined_report_path, "w", encoding="utf-8") as out:
-            out.write("\n".join(combined_lines))
+                cur = _insert_after_para(cur, mtr_head, bold=True)
+                cur = _insert_after_para(cur, str(resp_text or "").strip(), bold=False)
 
-    return results
+                cur = _insert_after_para(cur, "")  # spacer
+            safe_anchor = cur
+
+        # finally, create MRMG Assessment
+        if mrmg_new:
+            a_head = f"MRMG Assessment {sn}" if sn else "MRMG Assessment"
+            h = _insert_after_para(safe_anchor, a_head, bold=True)
+            b = _insert_after_para(
+                h,
+                mrmg_new,
+                bold=False,
+                highlight=(assessment_highlight_color if highlight_assessment else None),
+            )
+            _insert_after_para(b, "")  # spacer
+
+    doc.save(output_path)
