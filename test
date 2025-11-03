@@ -1,28 +1,6 @@
-import codecs
-
-def preprocess_mrmg_text(text: str) -> str:
-    """
-    Clean MRMG Assessment text before inserting:
-    - Decodes unicode escape sequences like '\\u2019'
-    - Replaces escaped \n with real newlines
-    - Strips extra whitespace
-    - Normalizes bullets or special formatting
-    """
-    if not isinstance(text, str):
-        return ""
-
-    # Decode unicode escape sequences (e.g., \u2019 → ’)
-    try:
-        text = codecs.decode(text.encode("utf-8"), "unicode_escape")
-    except Exception:
-        pass  # if decoding fails, skip
-
-    # Replace literal '\n' strings with real newlines
-    text = text.replace("\\n", "\n")
-
-    # Normalize space
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n\s+", "\n", text)
-    text = text.strip()
-
-    return text
+# Normalize either 'MRMG Assessment S6' or 'MRMG Evaluation S6' → 'MRMG Assessment S6'
+heading_text = paras[mrmg_idx].text.strip()
+m = re.match(r"^mrmg (assessment|evaluation)(\s*s?\d+)?", heading_text, flags=re.IGNORECASE)
+if m:
+    normalized = f"MRMG Assessment{m.group(2) or ''}".strip()
+    _set_paragraph_text(paras[mrmg_idx], normalized, bold=True)
