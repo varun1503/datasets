@@ -1,47 +1,39 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import List, Dict, Pattern, Tuple, Optional
-import os, re
-from fuzzywuzzy import fuzz
+from typing import List, Dict, Tuple, Pattern
+import os
+import re
 from fuzzysearch import find_near_matches
+import sys
+
+# Keep your project path + util
+sys.path.append(r"C:\Users\vvaishy\OneDrive - American Express\projects\Adverse-action-letter\Adverse-action-letter-review")
+from utils.foldertolist import list_file_paths
 
 
 @dataclass
-class BasicChecks:
-    # Tunables
+class AdequacyCheck:
+    """
+    Extract common fields from Adverse Action letter TEXT files.
+    Appends a section '=== Adequacy ===' to existing per-file reports if present,
+    otherwise creates a new report with FILE header + Adequacy section.
+    """
     max_l_dist: int = 1
-    decline_lead_1: str = "Here's the reason we made the decision"
-    decline_lead_2: str = "Reason(s) for Our Decision"
     ecoa_string: str = "The federal Equal Credit Opportunity Act"
-    continued_filler_next: str = "Continued  on  next  page"
+    continued_filler: str = "Continued  on  next  page"
 
-    credit_bureau_list: List[str] = field(default_factory=lambda: [
-        "Experian",
-        "D&B corporation",
-        "TransUnion Consumer Relations",
-        "LexisNexis Risk Solutions Bureau LLC"
-    ])
-
-    date_regex: Pattern[str] = re.compile(
-        r"(?:January|February|March|April|May|June|July|August|September|October|November|December)"
-        r"\s+(?:[1-9]|[12]\d|3[01]),?\s+\d{4}"
+    url_pattern: Pattern[str] = re.compile(
+        r'www\.[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*(?:/[a-zA-Z0-9\-_.~%]+)*'
+    )
+    phone_regex: Pattern[str] = re.compile(
+        r'(?:\d{3}|\d{3})[-. ]?\d{3}[-. ]?\d{4}'
     )
 
-    # ---------- Helpers ----------
-    @staticmethod
-    def sentence_split(text: str) -> List[str]:
-        out, cur = [], []
-        for ch in text:
-            cur.append(ch)
-            if ch in [".", ",", "!", "\n", "?"]:
-                out.append("".join(cur).strip())
-                cur = []
-        if cur:
-            out.append("".join(cur).strip())
-        return [s for s in out if s]
+    # ----------------------------- helpers -----------------------------
 
     @staticmethod
-    def slice_next_sentences(content: str, start_idx: int, n_sentences: int) -> str:
+    def _slice_next_sentences(content: str, start_idx: int, n_sentences: int) -> str:
+        """Return next N sentences from content starting at start_idx."""
         if start_idx < 0 or start_idx >= len(content):
             return ""
         tail = re.sub(r"[ \t]+", " ", content[start_idx:])
@@ -49,139 +41,196 @@ class BasicChecks:
         return " ".join(parts[:max(1, n_sentences)]).strip()
 
     @staticmethod
-    def list_file_paths(folder_path: str) -> List[str]:
-        acc = []
-        for root, _, files in os.walk(folder_path):
-            for f in files:
-                if f.lower().endswith(".txt"):
-                    acc.append(os.path.abspath(os.path.join(root, f)))
-        return acc
+    def _max_common_substring(s1: str, s2: str) -> Tuple[str, int]:
+        """Longest common contiguous substring length (DP), lowercase & no spaces."""
+        a = s1.lower().replace(" ", "")
+        b = s2.lower().replace(" ", "")
+        m, n = len(a), len(b)
+        dp = [[0]*(n+1) for _ in range(m+1)]
+        best = (0, 0)  # (length, end_pos_in_a)
+        for i in range(1, m+1):
+            for j in range(1, n+1):
+                if a[i-1] == b[j-1]:
+                    dp[i][j] = dp[i-1][j-1] + 1
+                    if dp[i][j] > best[0]:
+                        best = (dp[i][j], i)
+        length, end = best
+        return (a[end-length:end], length)
 
-    # ---------- Finders ----------
-    def find_action(self, content: str, threshold: int = 50) -> Optional[Tuple[str, int]]:
-        target = "unable cannot approve your at this time"
-        for sent in self.sentence_split(content):
-            score = fuzz.ratio(target, sent)
-            if score > threshold:
-                return sent.strip(), score
-        return None
+    # ----------------------------- extractors -----------------------------
 
-    def find_decline_reason(self, content: str) -> str:
-        r1 = find_near_matches(self.decline_lead_1, content, max_l_dist=self.max_l_dist)
-        r2 = find_near_matches(self.decline_lead_2, content, max_l_dist=self.max_l_dist)
-        if not r1 and not r2:
+    def extract_salutation_name(self, content: str) -> str:
+        """Capture name after 'Dear' or 'Hi ' until a ',' or ':'."""
+        m = re.search(r"(Dear|Hi\s)", content)
+        if not m:
             return "not found"
-        start = (r1 or r2)[0].start
-        return self.slice_next_sentences(content, start, 15)
+        s = m.end()
+        out = []
+        for ch in content[s:]:
+            if ch not in {",", ":"}:
+                out.append(ch)
+            else:
+                break
+        name = "".join(out).strip()
+        return name or "not found"
+
+    def extract_applied_product(self, content: str) -> str:
+        """Extract text between 'applying for ' and the next period."""
+        m = re.search(r"applying for (.+?)\.", content, flags=re.IGNORECASE | re.DOTALL)
+        return m.group(1).strip() if m else "not found"
 
     def find_ecoa(self, content: str) -> str:
         hits = find_near_matches(self.ecoa_string, content, max_l_dist=self.max_l_dist)
         if not hits:
             return "not found"
         s = hits[0].start
-        block = self.slice_next_sentences(content, s, 10)
-        if self.continued_filler_next in block:
-            block = self.slice_next_sentences(content, s, 17)
+        block = self._slice_next_sentences(content, s, 10)
+        if self.continued_filler in block:
+            block = self._slice_next_sentences(content, s, 17)
         return block
 
-    def find_federal_agency(self, content: str) -> str:
-        phrase = "The federal agency that administers compliance with this law concerning"
-        hits = find_near_matches(phrase, content, max_l_dist=self.max_l_dist)
+    def find_ohio_notice(self, content: str) -> str:
+        hits = find_near_matches("Notice to Ohio Residents", content, max_l_dist=1)
         if not hits:
             return "not found"
         s = hits[0].start
-        return self.slice_next_sentences(content, s, 3)
+        return self._slice_next_sentences(content, s, 1)
 
-    @staticmethod
-    def should_check_fico(text: str, dcsn_rsn_cd: str) -> bool:
-        return ("FICO score" in text) or (dcsn_rsn_cd.lower() == "d2f")
-
-    def get_credit_bureaus(self, content: str) -> List[str]:
-        return [item for item in self.credit_bureau_list if item in content]
-
-    def find_second_date_if_bureau(self, content: str) -> str:
-        if not self.get_credit_bureaus(content):
-            return "not found"
-        dates = re.findall(self.date_regex, content)
-        if len(dates) <= 1:
-            return "not found"
-        return dates[1]
-
-    def find_fico_score(self, content: str) -> str:
-        if not self.get_credit_bureaus(content):
-            return "not found (no bureau)"
-        hits = find_near_matches("FICO score was", content, max_l_dist=self.max_l_dist)
+    def find_your_options(self, content: str) -> str:
+        hits = find_near_matches("your options", content, max_l_dist=0)
         if not hits:
             return "not found"
         s = hits[0].start
-        return self.slice_next_sentences(content, s, 3)
+        return self._slice_next_sentences(content, s, 1)
 
-    def find_factors(self, content: str) -> str:
-        if not self.get_credit_bureaus(content):
-            return "not found (no bureau)"
-        phrase = "the key factors that contrubuted to your FICO score"
-        hits = find_near_matches(phrase, content, max_l_dist=self.max_l_dist)
+    def find_signatory(self, content: str) -> str:
+        hits = find_near_matches("Sincerely", content, max_l_dist=1)
         if not hits:
             return "not found"
         s = hits[0].start
-        return self.slice_next_sentences(content, s, 8)
+        return self._slice_next_sentences(content, s, 3)
 
-    # ---------- Analyze ----------
-    def analyze_file(self, file_path: str, dcsn_rsn_cd: str = "") -> Dict[str, str]:
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-            content = f.read()
+    def get_top_address_lines(self, content: str, n_lines: int = 7) -> str:
+        """Heuristic: the address is in the first few lines of the document."""
+        lines = content.splitlines()
+        block = lines[:max(1, n_lines)]
+        return "\n".join(block).strip() if block else "not found"
 
-        action_hit = self.find_action(content)
-        decline = self.find_decline_reason(content)
-        ecoa = self.find_ecoa(content)
-        agency = self.find_federal_agency(content)
-        bureaus = self.get_credit_bureaus(content)
-        date2 = self.find_second_date_if_bureau(content)
-        fico_score = self.find_fico_score(content) if self.should_check_fico(content, dcsn_rsn_cd) else "skipped"
-        factors = self.find_factors(content)
+    def get_phone_numbers(self, content: str) -> List[str]:
+        return re.findall(self.phone_regex, content)
 
+    def extract_urls(self, content: str) -> List[str]:
+        urls = re.findall(self.url_pattern, content) or []
+        if "americanexpress.com" in content and "americanexpress.com" not in urls:
+            urls.append("americanexpress.com")
+        return urls
+
+    # ----------------------------- orchestrator -----------------------------
+
+    def analyze_text(self, content: str) -> Dict[str, str | List[str]]:
+        """Run all extractors on a single text blob and return a dict of results."""
         return {
-            "Action Sentence": f"{action_hit[0]} (ratio={action_hit[1]})" if action_hit else "not found",
-            "Decline Reason": decline,
-            "ECOA Section": ecoa,
-            "Federal Agency": agency,
-            "Credit Bureaus": ", ".join(bureaus) if bureaus else "not found",
-            "2nd Date (if bureau)": date2,
-            "FICO Score": fico_score,
-            "FICO Factors": factors,
+            "Salutation Name": self.extract_salutation_name(content),
+            "Applied Product": self.extract_applied_product(content),
+            "ECOA Section": self.find_ecoa(content),
+            "Ohio Notice": self.find_ohio_notice(content),
+            "Your Options": self.find_your_options(content),
+            "Signatory": self.find_signatory(content),
+            "Top Address Lines": self.get_top_address_lines(content),
+            "Phone Numbers": self.get_phone_numbers(content) or ["not found"],
+            "URLs": self.extract_urls(content) or ["not found"],
         }
 
-    def _format_report(self, file_path: str, info: Dict[str, str]) -> str:
-        lines = [f"FILE: {file_path}"]
-        for k, v in info.items():
-            lines.append(f"{k}: {v}")
+    # ----------------------------- formatting & IO -----------------------------
+
+    @staticmethod
+    def _format_section(title: str, info: Dict[str, str | List[str]]) -> str:
+        """Format a titled section for appending into a report."""
+        lines = [f"=== {title} ==="]
+        order = [
+            "Salutation Name",
+            "Applied Product",
+            "ECOA Section",
+            "Ohio Notice",
+            "Your Options",
+            "Signatory",
+            "Top Address Lines",
+            "Phone Numbers",
+            "URLs",
+        ]
+        for k in order:
+            if k in info:
+                v = info[k]
+                if isinstance(v, list):
+                    lines.append(f"{k}: {', '.join(v)}")
+                else:
+                    lines.append(f"{k}: {v}")
         return "\n".join(lines)
 
     @staticmethod
-    def _unique_path(path: str) -> str:
-        if not os.path.exists(path):
-            return path
-        root, ext = os.path.splitext(path)
-        i = 1
-        while True:
-            new_path = f"{root}-{i}{ext}"
-            if not os.path.exists(new_path):
-                return new_path
-            i += 1
+    def _ensure_dir(path: str) -> None:
+        os.makedirs(path, exist_ok=True)
 
-    # ---------- Batch Run ----------
-    def run(self, input_folder: str, output_folder: str, dcsn_rsn_cd: str = "") -> None:
-        os.makedirs(output_folder, exist_ok=True)
-        files = self.list_file_paths(input_folder)
+    # ----------------------------- runner -----------------------------
+
+    def run_to_folder(
+        self,
+        input_folder: str,
+        output_folder: str,
+        section_title: str = "Adequacy"
+    ) -> Dict[str, Dict[str, str | List[str]]]:
+        """
+        For each .txt in input_folder, write/append a report in output_folder named:
+            <basename>.analysis.txt
+
+        - If the report already exists (e.g., from BasicChecks), append:
+              \n\n=== Adequacy ===\n...
+        - If it doesn't exist, create it with:
+              FILE: <input_path>
+              \n=== Adequacy ===\n...
+
+        Returns: {input_file_path: result_dict}
+        """
+        self._ensure_dir(output_folder)
+        files = list_file_paths(input_folder)  # your utility (recursive)
+
+        results: Dict[str, Dict[str, str | List[str]]] = {}
         for fp in files:
+            if not fp.lower().endswith(".txt"):
+                continue
+
             try:
-                info = self.analyze_file(fp, dcsn_rsn_cd)
-                report = self._format_report(fp, info)
-                out_path = os.path.join(output_folder, os.path.splitext(os.path.basename(fp))[0] + ".analysis.txt")
-                out_path = self._unique_path(out_path)
-                with open(out_path, "w", encoding="utf-8") as f:
-                    f.write(report)
-                print(f"✅ Saved report: {out_path}")
+                with open(fp, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+
+                info = self.analyze_text(content)
+                results[fp] = info
+
+                out_name = os.path.splitext(os.path.basename(fp))[0] + ".analysis.txt"
+                out_path = os.path.join(output_folder, out_name)
+
+                section = self._format_section(section_title, info)
+
+                if os.path.exists(out_path):
+                    # Append under Adequacy heading
+                    with open(out_path, "a", encoding="utf-8") as out:
+                        out.write("\n\n" + section)
+                else:
+                    # Create a new report with FILE header + Adequacy section
+                    with open(out_path, "w", encoding="utf-8") as out:
+                        out.write(f"FILE: {fp}\n")
+                        out.write(section)
+
+                print(f"✅ Wrote section '{section_title}' to: {out_path}")
+
             except Exception as e:
+                # Write an error file to keep parity
+                out_name = os.path.splitext(os.path.basename(fp))[0] + ".analysis.txt"
+                out_path = os.path.join(output_folder, out_name)
+                with open(out_path, "a", encoding="utf-8") as out:
+                    out.write(f"\n\n=== {section_title} ===\nERROR: {e}\n")
+                results[fp] = {"ERROR": str(e)}
                 print(f"❌ Error processing {fp}: {e}")
-        print(f"\nAll reports saved in: {output_folder}")
+
+        print(f"\nAll sections saved in: {output_folder}")
+        return results
