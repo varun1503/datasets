@@ -1,10 +1,7 @@
 from __future__ import annotations
-
 from dataclasses import dataclass, field
 from typing import List, Dict, Pattern, Tuple, Optional
-import os
-import re
-
+import os, re
 from fuzzywuzzy import fuzz
 from fuzzysearch import find_near_matches
 
@@ -25,16 +22,14 @@ class BasicChecks:
         "LexisNexis Risk Solutions Bureau LLC"
     ])
 
-    # Regexes
     date_regex: Pattern[str] = re.compile(
         r"(?:January|February|March|April|May|June|July|August|September|October|November|December)"
         r"\s+(?:[1-9]|[12]\d|3[01]),?\s+\d{4}"
     )
 
-    # ----------------------- helpers -----------------------
+    # ---------- Helpers ----------
     @staticmethod
     def sentence_split(text: str) -> List[str]:
-        """Simple sentence-ish splitter that preserves punctuation."""
         out, cur = [], []
         for ch in text:
             cur.append(ch)
@@ -43,12 +38,10 @@ class BasicChecks:
                 cur = []
         if cur:
             out.append("".join(cur).strip())
-        # filter empties
         return [s for s in out if s]
 
     @staticmethod
     def slice_next_sentences(content: str, start_idx: int, n_sentences: int) -> str:
-        """Return a block consisting of the next N sentences starting at start_idx."""
         if start_idx < 0 or start_idx >= len(content):
             return ""
         tail = re.sub(r"[ \t]+", " ", content[start_idx:])
@@ -57,19 +50,15 @@ class BasicChecks:
 
     @staticmethod
     def list_file_paths(folder_path: str) -> List[str]:
-        """Recursive file lister (all files, absolute paths)."""
         acc = []
         for root, _, files in os.walk(folder_path):
             for f in files:
-                acc.append(os.path.abspath(os.path.join(root, f)))
+                if f.lower().endswith(".txt"):
+                    acc.append(os.path.abspath(os.path.join(root, f)))
         return acc
 
-    # ----------------------- finders -----------------------
+    # ---------- Finders ----------
     def find_action(self, content: str, threshold: int = 50) -> Optional[Tuple[str, int]]:
-        """
-        Fuzzy scan for a sentence near: 'unable cannot approve your at this time'
-        Returns (matched_sentence, ratio) or None.
-        """
         target = "unable cannot approve your at this time"
         for sent in self.sentence_split(content):
             score = fuzz.ratio(target, sent)
@@ -78,15 +67,12 @@ class BasicChecks:
         return None
 
     def find_decline_reason(self, content: str) -> str:
-        """
-        Look for either lead sentence and return a multi-sentence snippet.
-        """
         r1 = find_near_matches(self.decline_lead_1, content, max_l_dist=self.max_l_dist)
         r2 = find_near_matches(self.decline_lead_2, content, max_l_dist=self.max_l_dist)
         if not r1 and not r2:
             return "not found"
         start = (r1 or r2)[0].start
-        return self.slice_next_sentences(content, start, 15)  # longer window
+        return self.slice_next_sentences(content, start, 15)
 
     def find_ecoa(self, content: str) -> str:
         hits = find_near_matches(self.ecoa_string, content, max_l_dist=self.max_l_dist)
@@ -108,21 +94,12 @@ class BasicChecks:
 
     @staticmethod
     def should_check_fico(text: str, dcsn_rsn_cd: str) -> bool:
-        """
-        Rule: check if 'FICO score' present OR decision code == 'd2f'.
-        """
         return ("FICO score" in text) or (dcsn_rsn_cd.lower() == "d2f")
 
     def get_credit_bureaus(self, content: str) -> List[str]:
         return [item for item in self.credit_bureau_list if item in content]
 
-    def find_credit_bureau(self, content: str) -> List[str]:
-        return self.get_credit_bureaus(content)
-
     def find_second_date_if_bureau(self, content: str) -> str:
-        """
-        If a bureau is present and we find 2+ dates, return the 2nd; else 'not found'.
-        """
         if not self.get_credit_bureaus(content):
             return "not found"
         dates = re.findall(self.date_regex, content)
@@ -131,9 +108,6 @@ class BasicChecks:
         return dates[1]
 
     def find_fico_score(self, content: str) -> str:
-        """
-        Gate on bureau presence and extract next ~3 sentences.
-        """
         if not self.get_credit_bureaus(content):
             return "not found (no bureau)"
         hits = find_near_matches("FICO score was", content, max_l_dist=self.max_l_dist)
@@ -143,9 +117,6 @@ class BasicChecks:
         return self.slice_next_sentences(content, s, 3)
 
     def find_factors(self, content: str) -> str:
-        """
-        Gate on bureau presence. Keep your original phrase as-is.
-        """
         if not self.get_credit_bureaus(content):
             return "not found (no bureau)"
         phrase = "the key factors that contrubuted to your FICO score"
@@ -155,17 +126,7 @@ class BasicChecks:
         s = hits[0].start
         return self.slice_next_sentences(content, s, 8)
 
-    # ----------------------- keyword 'best sentence' -----------------------
-    def best_sentence_for_keywords(
-        self,
-        content: str,
-        keywords: List[str],
-        min_score: int = 60
-    ) -> Dict[str, str]:
-        """
-        For each keyword, pick the sentence with the highest fuzzy PARTIAL_RATIO score.
-        If nothing reaches min_score, return 'not found'.
-        """
+    def best_sentence_for_keywords(self, content: str, keywords: List[str], min_score: int = 60) -> Dict[str, str]:
         sentences = self.sentence_split(content)
         results: Dict[str, str] = {}
         for kw in keywords:
@@ -177,7 +138,7 @@ class BasicChecks:
             results[kw] = f"{best[0]} (score={best[1]})" if best[1] >= min_score else "not found"
         return results
 
-    # ----------------------- per-file wrapper -----------------------
+    # ---------- Analyze ----------
     def analyze_file(self, file_path: str, dcsn_rsn_cd: str = "") -> Dict[str, str]:
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
             content = f.read()
@@ -186,19 +147,13 @@ class BasicChecks:
         decline = self.find_decline_reason(content)
         ecoa = self.find_ecoa(content)
         agency = self.find_federal_agency(content)
-        bureaus = self.find_credit_bureau(content)
+        bureaus = self.get_credit_bureaus(content)
         date2 = self.find_second_date_if_bureau(content)
         fico_score = self.find_fico_score(content) if self.should_check_fico(content, dcsn_rsn_cd) else "skipped"
         factors = self.find_factors(content)
+        best_map = self.best_sentence_for_keywords(content, ["adequacy", "accuracy", "accurate"], 60)
 
-        # Add “Adequacy” and “Accuracy/Accurate” best-sentence sections
-        best_map = self.best_sentence_for_keywords(
-            content,
-            keywords=["adequacy", "accuracy", "accurate"],
-            min_score=60
-        )
-
-        result = {
+        return {
             "Action Sentence": f"{action_hit[0]} (ratio={action_hit[1]})" if action_hit else "not found",
             "Decline Reason": decline,
             "ECOA Section": ecoa,
@@ -207,85 +162,47 @@ class BasicChecks:
             "2nd Date (if bureau)": date2,
             "FICO Score": fico_score,
             "FICO Factors": factors,
-            # Best sentences block
-            "Best: adequacy": best_map.get("adequacy", "not found"),
-            "Best: accuracy": best_map.get("accuracy", "not found"),
-            "Best: accurate": best_map.get("accurate", "not found"),
+            "Best: adequacy": best_map["adequacy"],
+            "Best: accuracy": best_map["accuracy"],
+            "Best: accurate": best_map["accurate"],
         }
-        return result
 
-    # ----------------------- batch runner -----------------------
-    def run(
-        self,
-        file_paths_txt: List[str],
-        output_txt_path: str | None = None,
-        dcsn_rsn_cd: str = ""
-    ) -> Dict[str, Dict[str, str]]:
-        """
-        Process many text files.
-        - Writes a COMBINED report if output_txt_path is provided.
-        - ALSO writes one per-file report placed next to each input file as <name>.analysis.txt
-        Returns: {file_path: {field: value}}
-        """
-        results: Dict[str, Dict[str, str]] = {}
-        combined_lines: List[str] = []
-
-        for fp in file_paths_txt:
-            try:
-                info = self.analyze_file(fp, dcsn_rsn_cd=dcsn_rsn_cd)
-                results[fp] = info
-
-                # --- write per-file report ---
-                per_file_report = self._format_report(fp, info)
-                per_file_out = f"{os.path.splitext(fp)[0]}.analysis.txt"
-                with open(per_file_out, "w", encoding="utf-8") as outf:
-                    outf.write(per_file_report)
-
-                # accumulate for combined (optional)
-                combined_lines.append(per_file_report)
-                combined_lines.append("-" * 96)
-
-            except Exception as e:
-                results[fp] = {"ERROR": str(e)}
-                err_block = f"FILE: {fp}\nERROR: {e}\n{'-'*96}"
-                combined_lines.append(err_block)
-                # also write an error report next to file
-                per_file_out = f"{os.path.splitext(fp)[0]}.analysis.txt"
-                with open(per_file_out, "w", encoding="utf-8") as outf:
-                    outf.write(err_block)
-
-        if output_txt_path:
-            os.makedirs(os.path.dirname(os.path.abspath(output_txt_path)), exist_ok=True)
-            with open(output_txt_path, "w", encoding="utf-8") as out:
-                out.write("\n".join(combined_lines))
-
-        return results
-
-    # ----------------------- formatting -----------------------
-    @staticmethod
-    def _format_report(file_path: str, info: Dict[str, str]) -> str:
+    def _format_report(self, file_path: str, info: Dict[str, str]) -> str:
         lines = [f"FILE: {file_path}"]
-        # core fields
-        core_order = [
-            "Action Sentence",
-            "Decline Reason",
-            "ECOA Section",
-            "Federal Agency",
-            "Credit Bureaus",
-            "2nd Date (if bureau)",
-            "FICO Score",
-            "FICO Factors",
-        ]
-        for k in core_order:
-            if k in info:
-                lines.append(f"{k}: {info[k]}")
-
-        # group the “Best …” sections together under their own headings
-        lines.append("")  # spacer
+        for k, v in info.items():
+            if not k.startswith("Best"):
+                lines.append(f"{k}: {v}")
+        lines.append("")
         lines.append("=== BEST MATCH SENTENCES ===")
         for k in ["Best: adequacy", "Best: accuracy", "Best: accurate"]:
-            if k in info:
-                pretty = k.replace("Best: ", "").capitalize()
-                lines.append(f"{pretty}: {info[k]}")
+            lines.append(f"{k.replace('Best: ', '').capitalize()}: {info[k]}")
+        return "\n".join(lines)
 
-        return "\n".join(lines).rstrip()  # tidy trailing newline
+    @staticmethod
+    def _unique_path(path: str) -> str:
+        if not os.path.exists(path):
+            return path
+        root, ext = os.path.splitext(path)
+        i = 1
+        while True:
+            new_path = f"{root}-{i}{ext}"
+            if not os.path.exists(new_path):
+                return new_path
+            i += 1
+
+    # ---------- Batch run ----------
+    def run(self, input_folder: str, output_folder: str, dcsn_rsn_cd: str = "") -> None:
+        os.makedirs(output_folder, exist_ok=True)
+        files = self.list_file_paths(input_folder)
+        for fp in files:
+            try:
+                info = self.analyze_file(fp, dcsn_rsn_cd)
+                report = self._format_report(fp, info)
+                out_path = os.path.join(output_folder, os.path.splitext(os.path.basename(fp))[0] + ".analysis.txt")
+                out_path = self._unique_path(out_path)
+                with open(out_path, "w", encoding="utf-8") as f:
+                    f.write(report)
+                print(f"✅ Saved report: {out_path}")
+            except Exception as e:
+                print(f"❌ Error processing {fp}: {e}")
+        print(f"\nAll reports saved in: {output_folder}")
