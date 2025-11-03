@@ -1,114 +1,234 @@
-from __future__ import annotations
-from dataclasses import dataclass, field
-from typing import List, Dict, Tuple, Pattern
-import os
-import re
-from fuzzysearch import find_near_matches
-import sys
+from docx import Document
+from docx.text.paragraph import Paragraph
+from docx.oxml import OxmlElement
+from docx.shared import Pt
+from docx.enum.text import WD_COLOR_INDEX
+import re, json, ast
+import pandas as pd
 
-# Keep your project path + util
-sys.path.append(r"C:\Users\vvaishy\OneDrive - American Express\projects\Adverse-action-letter\Adverse-action-letter-review")
-from utils.foldertolist import list_file_paths
+# ---------- helpers ----------
+def _norm(s):
+    return re.sub(r"\s+", " ", (s or "")).strip().lower()
 
+def _format_run(run, bold=False, highlight=None):
+    run.bold = bool(bold)
+    run.font.name = "Times New Roman"
+    run.font.size = Pt(11)
+    if highlight is not None:
+        run.font.highlight_color = highlight
 
-@dataclass
-class AdequacyCheck:
-    """
-    Extract common fields from Adverse Action letter TEXT files.
-    Appends a section '=== Adequacy ===' to existing per-file reports if present,
-    otherwise creates a new report with FILE header + Adequacy section.
-    """
-    max_l_dist: int = 1
-    ecoa_string: str = "The federal Equal Credit Opportunity Act"
-    continued_filler: str = "Continued  on  next  page"
+def _insert_after_para(p: Paragraph, text="", bold=False, highlight=None):
+    """Insert a paragraph AFTER p with Times New Roman 11."""
+    new_p = OxmlElement("w:p")
+    p._p.addnext(new_p)
+    q = Paragraph(new_p, p._parent)
+    if text:
+        r = q.add_run(text)
+        _format_run(r, bold=bold, highlight=highlight)
+    return q
 
-    url_pattern: Pattern[str] = re.compile(
-        r'www\.[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*(?:/[a-zA-Z0-9\-_.~%]+)*'
+def _delete_range(paragraphs, i_from, i_to):
+    if i_from is None or i_to is None or i_from > i_to:
+        return
+    for k in range(i_to, i_from - 1, -1):
+        elm = paragraphs[k]._element
+        elm.getparent().remove(elm)
+
+def _safe_dict(x):
+    if isinstance(x, dict):
+        return x
+    if isinstance(x, str):
+        s = x.strip()
+        if not s:
+            return {}
+        try:
+            return json.loads(s)
+        except Exception:
+            try:
+                return ast.literal_eval(s)
+            except Exception:
+                return {}
+    return {}
+
+def _snum(text):  # returns like "S2" if present, else ""
+    m = re.search(r"\bS\s*(\d+)\b", text or "", flags=re.IGNORECASE)
+    return f"S{m.group(1)}" if m else ""
+
+def _looks_like_test(p):
+    return bool(re.search(r"\btest\b", _norm(p.text)))
+
+def _is_heading_text(tnorm: str):
+    return (
+        tnorm.startswith("challenge")
+        or tnorm.startswith("modelling team response")
+        or tnorm.startswith("modeling team response")
+        or tnorm.startswith("mrmg assessment")
+        or tnorm.startswith("mrmg evaluation")
+        or tnorm.startswith("test ")
+        or tnorm == "test"
     )
-    phone_regex: Pattern[str] = re.compile(
-        r'(?:\d{3}|\d{3})[-. ]?\d{3}[-. ]?\d{4}'
-    )
 
-    # ----------------------------- helpers -----------------------------
+def _find_idx_in_range(paras, start, end, predicate):
+    for i in range(start, end):
+        if predicate(paras[i]):
+            return i
+    return None
 
-    @staticmethod
-    def _slice_next_sentences(content: str, start_idx: int, n_sentences: int) -> str:
-        """Return next N sentences from content starting at start_idx."""
-        if start_idx < 0 or start_idx >= len(content):
-            return ""
-        tail = re.sub(r"[ \t]+", " ", content[start_idx:])
-        parts = re.split(r"(?<=[\.!?])\s+", tail)
-        return " ".join(parts[:max(1, n_sentences)]).strip()
+def _find_next_heading(paras, start, end):
+    for i in range(start, end):
+        if _is_heading_text(_norm(paras[i].text)):
+            return i
+    return None
 
-    @staticmethod
-    def _max_common_substring(s1: str, s2: str) -> Tuple[str, int]:
-        """Longest common contiguous substring length (DP), lowercase & no spaces."""
-        a = s1.lower().replace(" ", "")
-        b = s2.lower().replace(" ", "")
-        m, n = len(a), len(b)
-        dp = [[0]*(n+1) for _ in range(m+1)]
-        best = (0, 0)  # (length, end_pos_in_a)
-        for i in range(1, m+1):
-            for j in range(1, n+1):
-                if a[i-1] == b[j-1]:
-                    dp[i][j] = dp[i-1][j-1] + 1
-                    if dp[i][j] > best[0]:
-                        best = (dp[i][j], i)
-        length, end = best
-        return (a[end-length:end], length)
+# ---------- main ----------
+def insert_rfr_and_mrmg_with_tags(
+    doc_path: str,
+    df: pd.DataFrame,
+    output_path: str,
+    tag_col: str = "text",                  # e.g., "Test S1"
+    rfr_col: str = "rfr_value",             # dict: {<challenge text>: <model team response>}
+    mrmg_col: str = "MRMG Assessment ",     # as in your sheet (trailing space)
+    mtr_heading_base: str = "Modelling Team Response",
+    highlight_assessment: bool = True,
+    assessment_highlight_color=WD_COLOR_INDEX.YELLOW,
+):
+    """
+    For each df row (per Test S# tag):
+      - If an 'MRMG Assessment [S#]' heading exists, REPLACE its body with df[mrmg_col].
+        (Keeps the original heading paragraph, only updates the body under it.)
+      - Do NOT insert between the 'Modelling/Modeling Team Response' heading and its body.
+      - If 'MRMG Assessment' heading is missing, fall back to inserting it after the end of the MTR body
+        (or near the end of the Test section) without breaking headings and bodies.
 
-    # ----------------------------- extractors -----------------------------
+      RFR pairs (Challenge/Response) logic is unchanged but avoids breaking MTR heading-body adjacency.
+    """
+    doc = Document(doc_path)
 
-    def extract_salutation_name(self, content: str) -> str:
-        """Capture name after 'Dear' or 'Hi ' until a ',' or ':'."""
-        m = re.search(r"(Dear|Hi\s)", content)
-        if not m:
-            return "not found"
-        s = m.end()
-        out = []
-        for ch in content[s:]:
-            if ch not in {",", ":"}:
-                out.append(ch)
-            else:
+    for _, row in df.iterrows():
+        tag = str(row.get(tag_col, "") or "").strip()
+        rfr = _safe_dict(row.get(rfr_col, {}))
+        mrmg_new = str(row.get(mrmg_col, "") or "").strip()
+        if not tag:
+            continue
+
+        sn = _snum(tag)  # "S1", "S2", ...
+        paras = doc.paragraphs
+
+        # 1) locate section start by matching exact tag text OR S-number
+        tag_norm = _norm(tag)
+        start_idx = next((i for i, p in enumerate(paras) if tag_norm in _norm(p.text)), None)
+        if start_idx is None and sn:
+            start_idx = next((i for i, p in enumerate(paras) if sn.lower() in _norm(p.text)), None)
+        if start_idx is None:
+            continue
+
+        # 2) section end = next "Test ..." or doc end
+        next_test = None
+        for j in range(start_idx + 1, len(paras)):
+            if _looks_like_test(paras[j]):
+                next_test = j
                 break
-        name = "".join(out).strip()
-        return name or "not found"
+        section_end = next_test if next_test is not None else len(paras)
 
-    def extract_applied_product(self, content: str) -> str:
-        """Extract text between 'applying for ' and the next period."""
-        m = re.search(r"applying for (.+?)\.", content, flags=re.IGNORECASE | re.DOTALL)
-        return m.group(1).strip() if m else "not found"
+        # 3) find MTR heading idx (without forcing S# match)
+        mtr_idx = _find_idx_in_range(
+            paras,
+            start_idx + 1,
+            section_end,
+            lambda p: ("modelling team response" in _norm(p.text)) or ("modeling team response" in _norm(p.text)),
+        )
 
-    def find_ecoa(self, content: str) -> str:
-        hits = find_near_matches(self.ecoa_string, content, max_l_dist=self.max_l_dist)
-        if not hits:
-            return "not found"
-        s = hits[0].start
-        block = self._slice_next_sentences(content, s, 10)
-        if self.continued_filler in block:
-            block = self._slice_next_sentences(content, s, 17)
-        return block
+        # 4) find MRMG Assessment heading idx (prefer the one that contains this S#, else any in range)
+        def _is_assessment_for_sn(p):
+            t = _norm(p.text)
+            if not t.startswith("mrmg assessment"):
+                return False
+            # If S# exists, prefer exact match; else accept any MRMG Assessment
+            return (sn.lower() in t) if sn else True
 
-    def find_ohio_notice(self, content: str) -> str:
-        hits = find_near_matches("Notice to Ohio Residents", content, max_l_dist=1)
-        if not hits:
-            return "not found"
-        s = hits[0].start
-        return self._slice_next_sentences(content, s, 1)
+        mrmg_head_idx = _find_idx_in_range(paras, start_idx + 1, section_end, _is_assessment_for_sn)
+        if mrmg_head_idx is None:
+            # fallback: any MRMG Assessment in this section
+            mrmg_head_idx = _find_idx_in_range(
+                paras, start_idx + 1, section_end, lambda p: _norm(p.text).startswith("mrmg assessment")
+            )
 
-    def find_your_options(self, content: str) -> str:
-        hits = find_near_matches("your options", content, max_l_dist=0)
-        if not hits:
-            return "not found"
-        s = hits[0].start
-        return self._slice_next_sentences(content, s, 1)
+        # 5) If we have an MRMG Assessment heading, REPLACE its body (do not touch heading)
+        if mrmg_head_idx is not None:
+            # body starts at the first non-empty paragraph right after heading
+            body_start = mrmg_head_idx + 1
+            # find end of this body: before the next heading within section
+            next_head = _find_next_heading(paras, body_start, section_end)
+            body_end = (next_head - 1) if next_head is not None else (section_end - 1)
 
-    def find_signatory(self, content: str) -> str:
-        hits = find_near_matches("Sincerely", content, max_l_dist=1)
-        if not hits:
-            return "not found"
-        s = hits[0].start
-        return self._slice_next_sentences(content, s, 3)
+            # Remove current body (if any)
+            # Also skip leading empties; we will insert one clean body paragraph
+            # Guard indices
+            if body_start <= body_end:
+                _delete_range(paras, body_start, body_end)
+                paras = doc.paragraphs  # refresh
+
+            # Insert new single body paragraph AFTER the heading
+            insert_after = doc.paragraphs[mrmg_head_idx]
+            new_body_p = _insert_after_para(
+                insert_after,
+                text=mrmg_new,
+                bold=False,
+                highlight=(assessment_highlight_color if highlight_assessment else None),
+            )
+            # Optional: add a spacer line after the body to keep visual separation
+            _insert_after_para(new_body_p, "")
+
+        else:
+            # 6) If no MRMG Assessment heading exists:
+            #    Insert RFR if provided, and then create a new MRMG Assessment heading + body
+            #    BUT never between MTR heading and its body. So we find the end of MTR body.
+
+            # locate MTR body end (contiguous non-heading lines after MTR until next heading/eval/test)
+            anchor_after = None
+            if mtr_idx is not None:
+                # Body starts after MTR heading
+                body_i = mtr_idx + 1
+                # If the very next paragraph looks like a heading, MTR had no body yet.
+                # Otherwise, walk until next heading within the section.
+                while body_i < section_end and not _is_heading_text(_norm(paras[body_i].text)):
+                    body_i += 1
+                # anchor_after is the last body paragraph (or the heading itself if no body)
+                anchor_after = paras[body_i - 1] if body_i > (mtr_idx + 1) else paras[mtr_idx]
+            else:
+                # No MTR found; anchor near the end of the section
+                anchor_after = paras[section_end - 1] if section_end - 1 >= start_idx else paras[start_idx]
+
+            # If RFR exists, insert it AFTER the determined anchor (preserving MTR heading+body adjacency)
+            if rfr:
+                cur_anchor = anchor_after
+                for ch_text, resp_text in rfr.items():
+                    ch_head = f"Challenge {sn}" if sn else "Challenge"
+                    mtr_head = f"{mtr_heading_base} {sn}" if sn else mtr_heading_base
+
+                    cur_anchor = _insert_after_para(cur_anchor, ch_head, bold=True)
+                    cur_anchor = _insert_after_para(cur_anchor, str(ch_text or "").strip(), bold=False)
+
+                    cur_anchor = _insert_after_para(cur_anchor, mtr_head, bold=True)
+                    cur_anchor = _insert_after_para(cur_anchor, str(resp_text or "").strip(), bold=False)
+
+                    cur_anchor = _insert_after_para(cur_anchor, "")  # spacer
+
+                anchor_after = cur_anchor  # continue building from the last inserted item
+
+            # Now create MRMG Assessment heading + body AFTER the safe anchor
+            if mrmg_new:
+                a_head = f"MRMG Assessment {sn}" if sn else "MRMG Assessment"
+                h = _insert_after_para(anchor_after, a_head, bold=True)
+                b = _insert_after_para(
+                    h,
+                    mrmg_new,
+                    bold=False,
+                    highlight=(assessment_highlight_color if highlight_assessment else None),
+                )
+                _insert_after_para(b, "")  # spacer
+
+    doc.save(output_path)        return self._slice_next_sentences(content, s, 3)
 
     def get_top_address_lines(self, content: str, n_lines: int = 7) -> str:
         """Heuristic: the address is in the first few lines of the document."""
