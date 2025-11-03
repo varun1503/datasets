@@ -1,19 +1,291 @@
-MRMG
+from __future__ import annotations
 
-Deployed in E2 environment with all services Chunking, Embedding, and Ingestion.
+from dataclasses import dataclass, field
+from typing import List, Dict, Pattern, Tuple, Optional
+import os
+import re
 
-Enhanced chunking service, fixed all bugs and corner cases.
+from fuzzywuzzy import fuzz
+from fuzzysearch import find_near_matches
 
-Validation report created for MRMG covering all implemented requirements.
 
-Developed Merger module with respective functional classes.
+@dataclass
+class BasicChecks:
+    # Tunables
+    max_l_dist: int = 1
+    decline_lead_1: str = "Here's the reason we made the decision"
+    decline_lead_2: str = "Reason(s) for Our Decision"
+    ecoa_string: str = "The federal Equal Credit Opportunity Act"
+    continued_filler_next: str = "Continued  on  next  page"
 
-Added Accuracy and Adequacy classes.
+    credit_bureau_list: List[str] = field(default_factory=lambda: [
+        "Experian",
+        "D&B corporation",
+        "TransUnion Consumer Relations",
+        "LexisNexis Risk Solutions Bureau LLC"
+    ])
 
-Automated report generation process.
+    # Regexes
+    date_regex: Pattern[str] = re.compile(
+        r"(?:January|February|March|April|May|June|July|August|September|October|November|December)"
+        r"\s+(?:[1-9]|[12]\d|3[01]),?\s+\d{4}"
+    )
 
-AA Project
+    # ----------------------- helpers -----------------------
+    @staticmethod
+    def sentence_split(text: str) -> List[str]:
+        """Simple sentence-ish splitter that preserves punctuation."""
+        out, cur = [], []
+        for ch in text:
+            cur.append(ch)
+            if ch in [".", ",", "!", "\n", "?"]:
+                out.append("".join(cur).strip())
+                cur = []
+        if cur:
+            out.append("".join(cur).strip())
+        # filter empties
+        return [s for s in out if s]
 
-Created merger and validation logic for Accuracy and Adequacy.
+    @staticmethod
+    def slice_next_sentences(content: str, start_idx: int, n_sentences: int) -> str:
+        """Return a block consisting of the next N sentences starting at start_idx."""
+        if start_idx < 0 or start_idx >= len(content):
+            return ""
+        tail = re.sub(r"[ \t]+", " ", content[start_idx:])
+        parts = re.split(r"(?<=[\.!?])\s+", tail)
+        return " ".join(parts[:max(1, n_sentences)]).strip()
 
-Implemented respective classes and generated final validation reports
+    @staticmethod
+    def list_file_paths(folder_path: str) -> List[str]:
+        """Recursive file lister (all files, absolute paths)."""
+        acc = []
+        for root, _, files in os.walk(folder_path):
+            for f in files:
+                acc.append(os.path.abspath(os.path.join(root, f)))
+        return acc
+
+    # ----------------------- finders -----------------------
+    def find_action(self, content: str, threshold: int = 50) -> Optional[Tuple[str, int]]:
+        """
+        Fuzzy scan for a sentence near: 'unable cannot approve your at this time'
+        Returns (matched_sentence, ratio) or None.
+        """
+        target = "unable cannot approve your at this time"
+        for sent in self.sentence_split(content):
+            score = fuzz.ratio(target, sent)
+            if score > threshold:
+                return sent.strip(), score
+        return None
+
+    def find_decline_reason(self, content: str) -> str:
+        """
+        Look for either lead sentence and return a multi-sentence snippet.
+        """
+        r1 = find_near_matches(self.decline_lead_1, content, max_l_dist=self.max_l_dist)
+        r2 = find_near_matches(self.decline_lead_2, content, max_l_dist=self.max_l_dist)
+        if not r1 and not r2:
+            return "not found"
+        start = (r1 or r2)[0].start
+        return self.slice_next_sentences(content, start, 15)  # longer window
+
+    def find_ecoa(self, content: str) -> str:
+        hits = find_near_matches(self.ecoa_string, content, max_l_dist=self.max_l_dist)
+        if not hits:
+            return "not found"
+        s = hits[0].start
+        block = self.slice_next_sentences(content, s, 10)
+        if self.continued_filler_next in block:
+            block = self.slice_next_sentences(content, s, 17)
+        return block
+
+    def find_federal_agency(self, content: str) -> str:
+        phrase = "The federal agency that administers compliance with this law concerning"
+        hits = find_near_matches(phrase, content, max_l_dist=self.max_l_dist)
+        if not hits:
+            return "not found"
+        s = hits[0].start
+        return self.slice_next_sentences(content, s, 3)
+
+    @staticmethod
+    def should_check_fico(text: str, dcsn_rsn_cd: str) -> bool:
+        """
+        Rule: check if 'FICO score' present OR decision code == 'd2f'.
+        """
+        return ("FICO score" in text) or (dcsn_rsn_cd.lower() == "d2f")
+
+    def get_credit_bureaus(self, content: str) -> List[str]:
+        return [item for item in self.credit_bureau_list if item in content]
+
+    def find_credit_bureau(self, content: str) -> List[str]:
+        return self.get_credit_bureaus(content)
+
+    def find_second_date_if_bureau(self, content: str) -> str:
+        """
+        If a bureau is present and we find 2+ dates, return the 2nd; else 'not found'.
+        """
+        if not self.get_credit_bureaus(content):
+            return "not found"
+        dates = re.findall(self.date_regex, content)
+        if len(dates) <= 1:
+            return "not found"
+        return dates[1]
+
+    def find_fico_score(self, content: str) -> str:
+        """
+        Gate on bureau presence and extract next ~3 sentences.
+        """
+        if not self.get_credit_bureaus(content):
+            return "not found (no bureau)"
+        hits = find_near_matches("FICO score was", content, max_l_dist=self.max_l_dist)
+        if not hits:
+            return "not found"
+        s = hits[0].start
+        return self.slice_next_sentences(content, s, 3)
+
+    def find_factors(self, content: str) -> str:
+        """
+        Gate on bureau presence. Keep your original phrase as-is.
+        """
+        if not self.get_credit_bureaus(content):
+            return "not found (no bureau)"
+        phrase = "the key factors that contrubuted to your FICO score"
+        hits = find_near_matches(phrase, content, max_l_dist=self.max_l_dist)
+        if not hits:
+            return "not found"
+        s = hits[0].start
+        return self.slice_next_sentences(content, s, 8)
+
+    # ----------------------- keyword 'best sentence' -----------------------
+    def best_sentence_for_keywords(
+        self,
+        content: str,
+        keywords: List[str],
+        min_score: int = 60
+    ) -> Dict[str, str]:
+        """
+        For each keyword, pick the sentence with the highest fuzzy PARTIAL_RATIO score.
+        If nothing reaches min_score, return 'not found'.
+        """
+        sentences = self.sentence_split(content)
+        results: Dict[str, str] = {}
+        for kw in keywords:
+            best = ("", -1)
+            for s in sentences:
+                sc = fuzz.partial_ratio(kw.lower(), s.lower())
+                if sc > best[1]:
+                    best = (s.strip(), sc)
+            results[kw] = f"{best[0]} (score={best[1]})" if best[1] >= min_score else "not found"
+        return results
+
+    # ----------------------- per-file wrapper -----------------------
+    def analyze_file(self, file_path: str, dcsn_rsn_cd: str = "") -> Dict[str, str]:
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+
+        action_hit = self.find_action(content)
+        decline = self.find_decline_reason(content)
+        ecoa = self.find_ecoa(content)
+        agency = self.find_federal_agency(content)
+        bureaus = self.find_credit_bureau(content)
+        date2 = self.find_second_date_if_bureau(content)
+        fico_score = self.find_fico_score(content) if self.should_check_fico(content, dcsn_rsn_cd) else "skipped"
+        factors = self.find_factors(content)
+
+        # Add “Adequacy” and “Accuracy/Accurate” best-sentence sections
+        best_map = self.best_sentence_for_keywords(
+            content,
+            keywords=["adequacy", "accuracy", "accurate"],
+            min_score=60
+        )
+
+        result = {
+            "Action Sentence": f"{action_hit[0]} (ratio={action_hit[1]})" if action_hit else "not found",
+            "Decline Reason": decline,
+            "ECOA Section": ecoa,
+            "Federal Agency": agency,
+            "Credit Bureaus": ", ".join(bureaus) if bureaus else "not found",
+            "2nd Date (if bureau)": date2,
+            "FICO Score": fico_score,
+            "FICO Factors": factors,
+            # Best sentences block
+            "Best: adequacy": best_map.get("adequacy", "not found"),
+            "Best: accuracy": best_map.get("accuracy", "not found"),
+            "Best: accurate": best_map.get("accurate", "not found"),
+        }
+        return result
+
+    # ----------------------- batch runner -----------------------
+    def run(
+        self,
+        file_paths_txt: List[str],
+        output_txt_path: str | None = None,
+        dcsn_rsn_cd: str = ""
+    ) -> Dict[str, Dict[str, str]]:
+        """
+        Process many text files.
+        - Writes a COMBINED report if output_txt_path is provided.
+        - ALSO writes one per-file report placed next to each input file as <name>.analysis.txt
+        Returns: {file_path: {field: value}}
+        """
+        results: Dict[str, Dict[str, str]] = {}
+        combined_lines: List[str] = []
+
+        for fp in file_paths_txt:
+            try:
+                info = self.analyze_file(fp, dcsn_rsn_cd=dcsn_rsn_cd)
+                results[fp] = info
+
+                # --- write per-file report ---
+                per_file_report = self._format_report(fp, info)
+                per_file_out = f"{os.path.splitext(fp)[0]}.analysis.txt"
+                with open(per_file_out, "w", encoding="utf-8") as outf:
+                    outf.write(per_file_report)
+
+                # accumulate for combined (optional)
+                combined_lines.append(per_file_report)
+                combined_lines.append("-" * 96)
+
+            except Exception as e:
+                results[fp] = {"ERROR": str(e)}
+                err_block = f"FILE: {fp}\nERROR: {e}\n{'-'*96}"
+                combined_lines.append(err_block)
+                # also write an error report next to file
+                per_file_out = f"{os.path.splitext(fp)[0]}.analysis.txt"
+                with open(per_file_out, "w", encoding="utf-8") as outf:
+                    outf.write(err_block)
+
+        if output_txt_path:
+            os.makedirs(os.path.dirname(os.path.abspath(output_txt_path)), exist_ok=True)
+            with open(output_txt_path, "w", encoding="utf-8") as out:
+                out.write("\n".join(combined_lines))
+
+        return results
+
+    # ----------------------- formatting -----------------------
+    @staticmethod
+    def _format_report(file_path: str, info: Dict[str, str]) -> str:
+        lines = [f"FILE: {file_path}"]
+        # core fields
+        core_order = [
+            "Action Sentence",
+            "Decline Reason",
+            "ECOA Section",
+            "Federal Agency",
+            "Credit Bureaus",
+            "2nd Date (if bureau)",
+            "FICO Score",
+            "FICO Factors",
+        ]
+        for k in core_order:
+            if k in info:
+                lines.append(f"{k}: {info[k]}")
+
+        # group the “Best …” sections together under their own headings
+        lines.append("")  # spacer
+        lines.append("=== BEST MATCH SENTENCES ===")
+        for k in ["Best: adequacy", "Best: accuracy", "Best: accurate"]:
+            if k in info:
+                pretty = k.replace("Best: ", "").capitalize()
+                lines.append(f"{pretty}: {info[k]}")
+
+        return "\n".join(lines).rstrip()  # tidy trailing newline
