@@ -1,34 +1,19 @@
-def _delete_content_after_paragraph(paragraph):
+def _delete_content_after_paragraph(paragraph, stop_on_heading=True):
     """
-    Hybrid delete:
-    - Deletes all content (paragraphs, tables, images) after `paragraph`
-    - Stops at next Word-style heading (Heading 1, 2, etc.) if found
-    - Else falls back to known keyword-based headings like 'Test S#', 'Findings', etc.
+    Delete all content after the given paragraph — including tables —
+    until the next heading (if stop_on_heading=True)
     """
-
-    # Fallback keywords if Word-style heading is not used
-    HEADING_KEYWORDS = [
-        "test", "mrmg assessment", "mrmg evaluation", "finding", "findings",
-        "limitation", "limitations", "validation", "section", "appendix", "table of contents"
-    ]
-
     current = paragraph._p
     while True:
         next_elem = current.getnext()
         if next_elem is None:
             break
 
-        if next_elem.tag == qn("w:p"):
-            para = Paragraph(next_elem, paragraph._parent)
-            t = _norm(para.text)
-
-            # Stop if paragraph has Heading 1/2/3 style
-            if _is_heading_style(para):
+        # Stop if next paragraph is a styled heading
+        if stop_on_heading and next_elem.tag == qn("w:p"):
+            next_para = Paragraph(next_elem, paragraph._parent)
+            if _is_heading_style(next_para):
                 break
 
-            # Or stop if known keyword-based heading starts
-            if any(t.startswith(h) for h in HEADING_KEYWORDS):
-                break
-
-        # Remove any element (paragraph/table/image/etc.)
+        # Remove any paragraph, table, or block-level content
         current.getparent().remove(next_elem)
