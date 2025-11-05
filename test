@@ -1,19 +1,161 @@
-def _delete_content_after_paragraph(paragraph, stop_on_heading=True):
-    """
-    Delete all content after the given paragraph — including tables —
-    until the next heading (if stop_on_heading=True)
-    """
-    current = paragraph._p
-    while True:
-        next_elem = current.getnext()
-        if next_elem is None:
-            break
+# main.py
+from pathlib import Path
+from typing import List, Optional, Dict
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, validator
 
-        # Stop if next paragraph is a styled heading
-        if stop_on_heading and next_elem.tag == qn("w:p"):
-            next_para = Paragraph(next_elem, paragraph._parent)
-            if _is_heading_style(next_para):
-                break
+# --- your existing modules ---
+from checks.accuracy import AccuracyCheck
+from checks.adequacy import AdequacyCheck
+from checks.basic_check import BasicChecks
 
-        # Remove any paragraph, table, or block-level content
-        current.getparent().remove(next_elem)
+app = FastAPI(title="Adverse Action Letter Review API", version="1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], allow_credentials=True,
+    allow_methods=["*"], allow_headers=["*"],
+)
+
+# ---------- Schemas ----------
+
+class BatchRequest(BaseModel):
+    input_dir: str = Field(..., description="Folder with input data/files")
+    output_dir: Optional[str] = Field(
+        None, description="Folder to write outputs; defaults to ./letters"
+    )
+    max_l_dist: int = Field(1, ge=0, le=5, description="Fuzzy match max Levenshtein distance")
+    dcsn_rsn_cd: Optional[str] = Field(
+        None, description="Only used by BasicChecks (e.g. 'd2f')"
+    )
+    create_output_dir: bool = Field(
+        True, description="Create output_dir if missing"
+    )
+
+    @validator("input_dir")
+    def _must_exist(cls, v: str) -> str:
+        p = Path(v).expanduser().resolve()
+        if not p.exists() or not p.is_dir():
+            raise ValueError(f"input_dir does not exist or is not a directory: {p}")
+        return str(p)
+
+    @validator("output_dir", always=True)
+    def _default_out(cls, v: Optional[str]) -> str:
+        # Default to ./letters (relative to current working directory)
+        return v or "letters"
+
+
+class BatchResult(BaseModel):
+    success: bool
+    output_dir: str
+    written_files: List[str] = []
+    message: str = ""
+    meta: Dict[str, str] = {}
+
+# ---------- helpers ----------
+
+def _ensure_dir(path_str: str, create: bool) -> Path:
+    p = Path(path_str).expanduser().resolve()
+    if not p.exists():
+        if create:
+            p.mkdir(parents=True, exist_ok=True)
+        else:
+            raise HTTPException(status_code=400, detail=f"output_dir not found: {p}")
+    if not p.is_dir():
+        raise HTTPException(status_code=400, detail=f"output_dir is not a directory: {p}")
+    return p
+
+def _delta_written(before: List[Path], after: List[Path]) -> List[str]:
+    before_set = {p.resolve() for p in before}
+    return sorted(str(p.resolve()) for p in after if p.resolve() not in before_set)
+
+def _list_all_files(folder: Path) -> List[Path]:
+    return [p for p in folder.rglob("*") if p.is_file()]
+
+# ---------- runners ----------
+
+def run_accuracy(req: BatchRequest) -> BatchResult:
+    in_dir = Path(req.input_dir).expanduser().resolve()
+    out_dir = _ensure_dir(req.output_dir, req.create_output_dir)
+    before = _list_all_files(out_dir)
+
+    checker = AccuracyCheck(max_l_dist=req.max_l_dist)
+    # Your existing signature: run(inputdata, output_folder=...)
+    checker.run(str(in_dir), output_folder=str(out_dir))
+
+    after = _list_all_files(out_dir)
+    written = _delta_written(before, after)
+    return BatchResult(
+        success=True,
+        output_dir=str(out_dir),
+        written_files=written,
+        message="Accuracy checks completed",
+        meta={"max_l_dist": str(req.max_l_dist)},
+    )
+
+def run_adequacy(req: BatchRequest) -> BatchResult:
+    in_dir = Path(req.input_dir).expanduser().resolve()
+    out_dir = _ensure_dir(req.output_dir, req.create_output_dir)
+    before = _list_all_files(out_dir)
+
+    checker = AdequacyCheck(max_l_dist=req.max_l_dist)
+    checker.run(str(in_dir), output_folder=str(out_dir))
+
+    after = _list_all_files(out_dir)
+    written = _delta_written(before, after)
+    return BatchResult(
+        success=True,
+        output_dir=str(out_dir),
+        written_files=written,
+        message="Adequacy checks completed",
+        meta={"max_l_dist": str(req.max_l_dist)},
+    )
+
+def run_basic(req: BatchRequest) -> BatchResult:
+    in_dir = Path(req.input_dir).expanduser().resolve()
+    out_dir = _ensure_dir(req.output_dir, req.create_output_dir)
+    before = _list_all_files(out_dir)
+
+    checker = BasicChecks(max_l_dist=req.max_l_dist)
+    # If your BasicChecks expects dcsn_rsn_cd, pass it only if present
+    kwargs = {"output_folder": str(out_dir)}
+    if req.dcsn_rsn_cd:
+        kwargs["dcsn_rsn_cd"] = req.dcsn_rsn_cd
+    checker.run(str(in_dir), **kwargs)
+
+    after = _list_all_files(out_dir)
+    written = _delta_written(before, after)
+    return BatchResult(
+        success=True,
+        output_dir=str(out_dir),
+        written_files=written,
+        message="Basic checks completed",
+        meta={
+            "max_l_dist": str(req.max_l_dist),
+            **({"dcsn_rsn_cd": req.dcsn_rsn_cd} if req.dcsn_rsn_cd else {}),
+        },
+    )
+
+# ---------- routes ----------
+
+@app.post("/run/accuracy", response_model=BatchResult)
+def api_run_accuracy(req: BatchRequest):
+    return run_accuracy(req)
+
+@app.post("/run/adequacy", response_model=BatchResult)
+def api_run_adequacy(req: BatchRequest):
+    return run_adequacy(req)
+
+@app.post("/run/basic", response_model=BatchResult)
+def api_run_basic(req: BatchRequest):
+    return run_basic(req)
+
+@app.post("/run/all", response_model=Dict[str, BatchResult])
+def api_run_all(req: BatchRequest):
+    """Runs accuracy, adequacy, and basic sequentially and returns each result."""
+    return {
+        "accuracy": run_accuracy(req),
+        "adequacy": run_adequacy(req),
+        "basic": run_basic(req),
+    }
