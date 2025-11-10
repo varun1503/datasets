@@ -1,161 +1,74 @@
-# main.py
-from pathlib import Path
-from typing import List, Optional, Dict
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, validator
-
-# --- your existing modules ---
-from checks.accuracy import AccuracyCheck
-from checks.adequacy import AdequacyCheck
-from checks.basic_check import BasicChecks
-
-app = FastAPI(title="Adverse Action Letter Review API", version="1.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True,
-    allow_methods=["*"], allow_headers=["*"],
-)
-
-# ---------- Schemas ----------
-
-class BatchRequest(BaseModel):
-    input_dir: str = Field(..., description="Folder with input data/files")
-    output_dir: Optional[str] = Field(
-        None, description="Folder to write outputs; defaults to ./letters"
-    )
-    max_l_dist: int = Field(1, ge=0, le=5, description="Fuzzy match max Levenshtein distance")
-    dcsn_rsn_cd: Optional[str] = Field(
-        None, description="Only used by BasicChecks (e.g. 'd2f')"
-    )
-    create_output_dir: bool = Field(
-        True, description="Create output_dir if missing"
-    )
-
-    @validator("input_dir")
-    def _must_exist(cls, v: str) -> str:
-        p = Path(v).expanduser().resolve()
-        if not p.exists() or not p.is_dir():
-            raise ValueError(f"input_dir does not exist or is not a directory: {p}")
-        return str(p)
-
-    @validator("output_dir", always=True)
-    def _default_out(cls, v: Optional[str]) -> str:
-        # Default to ./letters (relative to current working directory)
-        return v or "letters"
+Here’s the professional one-pager version without emojis:
 
 
-class BatchResult(BaseModel):
-    success: bool
-    output_dir: str
-    written_files: List[str] = []
-    message: str = ""
-    meta: Dict[str, str] = {}
+---
 
-# ---------- helpers ----------
+Sprint Review — MRMG Validation Pipeline (Varun Vaishy)
 
-def _ensure_dir(path_str: str, create: bool) -> Path:
-    p = Path(path_str).expanduser().resolve()
-    if not p.exists():
-        if create:
-            p.mkdir(parents=True, exist_ok=True)
-        else:
-            raise HTTPException(status_code=400, detail=f"output_dir not found: {p}")
-    if not p.is_dir():
-        raise HTTPException(status_code=400, detail=f"output_dir is not a directory: {p}")
-    return p
+1. E2 Deployment Complete for Ingestion Service
 
-def _delta_written(before: List[Path], after: List[Path]) -> List[str]:
-    before_set = {p.resolve() for p in before}
-    return sorted(str(p.resolve()) for p in after if p.resolve() not in before_set)
+Successfully deployed the ingestion microservice in the E2 environment.
 
-def _list_all_files(folder: Path) -> List[Path]:
-    return [p for p in folder.rglob("*") if p.is_file()]
+Verified all dependent configurations, Kafka topics, and API connectivity.
 
-# ---------- runners ----------
+Conducted smoke tests to ensure ingestion endpoints are operational.
 
-def run_accuracy(req: BatchRequest) -> BatchResult:
-    in_dir = Path(req.input_dir).expanduser().resolve()
-    out_dir = _ensure_dir(req.output_dir, req.create_output_dir)
-    before = _list_all_files(out_dir)
+Outcome: Service is stable and ready for downstream validation workflows.
 
-    checker = AccuracyCheck(max_l_dist=req.max_l_dist)
-    # Your existing signature: run(inputdata, output_folder=...)
-    checker.run(str(in_dir), output_folder=str(out_dir))
 
-    after = _list_all_files(out_dir)
-    written = _delta_written(before, after)
-    return BatchResult(
-        success=True,
-        output_dir=str(out_dir),
-        written_files=written,
-        message="Accuracy checks completed",
-        meta={"max_l_dist": str(req.max_l_dist)},
-    )
 
-def run_adequacy(req: BatchRequest) -> BatchResult:
-    in_dir = Path(req.input_dir).expanduser().resolve()
-    out_dir = _ensure_dir(req.output_dir, req.create_output_dir)
-    before = _list_all_files(out_dir)
+---
 
-    checker = AdequacyCheck(max_l_dist=req.max_l_dist)
-    checker.run(str(in_dir), output_folder=str(out_dir))
+2. Testing of Deployed Ingestion Service
 
-    after = _list_all_files(out_dir)
-    written = _delta_written(before, after)
-    return BatchResult(
-        success=True,
-        output_dir=str(out_dir),
-        written_files=written,
-        message="Adequacy checks completed",
-        meta={"max_l_dist": str(req.max_l_dist)},
-    )
+Performed functional and integration testing across ingestion endpoints.
 
-def run_basic(req: BatchRequest) -> BatchResult:
-    in_dir = Path(req.input_dir).expanduser().resolve()
-    out_dir = _ensure_dir(req.output_dir, req.create_output_dir)
-    before = _list_all_files(out_dir)
+Validated message flow through Kafka → embedding → ingestion topics.
 
-    checker = BasicChecks(max_l_dist=req.max_l_dist)
-    # If your BasicChecks expects dcsn_rsn_cd, pass it only if present
-    kwargs = {"output_folder": str(out_dir)}
-    if req.dcsn_rsn_cd:
-        kwargs["dcsn_rsn_cd"] = req.dcsn_rsn_cd
-    checker.run(str(in_dir), **kwargs)
+Confirmed DataStax vector table writes and ANN index updates.
 
-    after = _list_all_files(out_dir)
-    written = _delta_written(before, after)
-    return BatchResult(
-        success=True,
-        output_dir=str(out_dir),
-        written_files=written,
-        message="Basic checks completed",
-        meta={
-            "max_l_dist": str(req.max_l_dist),
-            **({"dcsn_rsn_cd": req.dcsn_rsn_cd} if req.dcsn_rsn_cd else {}),
-        },
-    )
+Outcome: End-to-end data flow verified; ingestion accuracy and latency within expected range.
 
-# ---------- routes ----------
 
-@app.post("/run/accuracy", response_model=BatchResult)
-def api_run_accuracy(req: BatchRequest):
-    return run_accuracy(req)
 
-@app.post("/run/adequacy", response_model=BatchResult)
-def api_run_adequacy(req: BatchRequest):
-    return run_adequacy(req)
+---
 
-@app.post("/run/basic", response_model=BatchResult)
-def api_run_basic(req: BatchRequest):
-    return run_basic(req)
+3. E3 Readiness – Validation Report Template Finalization and Testing
 
-@app.post("/run/all", response_model=Dict[str, BatchResult])
-def api_run_all(req: BatchRequest):
-    """Runs accuracy, adequacy, and basic sequentially and returns each result."""
-    return {
-        "accuracy": run_accuracy(req),
-        "adequacy": run_adequacy(req),
-        "basic": run_basic(req),
-    }
+Finalized the Validation Report Template structure for RFR/MRMG reports.
+
+Tested the report generation workflow in both E1 and E2 environments.
+
+Ensured proper table, heading, and metadata rendering for automated generation.
+
+Outcome: Template approved for E3 release and ready for CI/CD integration.
+
+
+
+---
+
+4. Kafka Service Configuration for E3 and Certificate Generation
+
+Initiated configuration of Kafka service for E3 deployment.
+
+Coordinated with the infrastructure team to generate TLS/SSL certificates for secure communication.
+
+Current State: In progress – awaiting certificate validation and broker connectivity testing.
+
+
+
+---
+
+Sprint Outcome Summary
+
+Three of four tasks completed (E2 deployment, ingestion testing, validation template readiness).
+
+One task in progress (Kafka service setup for E3).
+
+Overall progress: approximately 85% completion toward E3 readiness.
+
+
+
+---
+
+Would you like me to convert this into a Word or PowerPoint one-pager format for your sprint review presentation?
