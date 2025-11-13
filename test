@@ -1,74 +1,209 @@
-Here’s the professional one-pager version without emojis:
+from docx import Document
+from docx.text.paragraph import Paragraph
+from docx.oxml import OxmlElement
+from docx.shared import Pt
+from docx.enum.text import WD_COLOR_INDEX
+import re, json, ast, codecs
+import pandas as pd
+from docx.oxml.ns import qn
+from docx.oxml.table import CT_Tbl
 
 
----
+# ---------- PREPROCESSING ----------
+def preprocess_mrmg_text(text: str) -> str:
+    """
+    Clean MRMG Assessment text before inserting:
+    - Decodes unicode escape sequences like '\\u2019'
+    - Replaces escaped \n with real newlines
+    - Strips extra whitespace
+    - Normalizes bullets or special formatting
+    """
+    if not isinstance(text, str):
+        return ""
 
-Sprint Review — MRMG Validation Pipeline (Varun Vaishy)
+    try:
+        text = codecs.decode(text.encode("utf-8"), "unicode_escape")
+    except Exception:
+        pass
 
-1. E2 Deployment Complete for Ingestion Service
+    text = text.replace("\\n", "\n")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n\s+", "\n", text)
+    text = text.strip()
 
-Successfully deployed the ingestion microservice in the E2 environment.
-
-Verified all dependent configurations, Kafka topics, and API connectivity.
-
-Conducted smoke tests to ensure ingestion endpoints are operational.
-
-Outcome: Service is stable and ready for downstream validation workflows.
-
-
-
----
-
-2. Testing of Deployed Ingestion Service
-
-Performed functional and integration testing across ingestion endpoints.
-
-Validated message flow through Kafka → embedding → ingestion topics.
-
-Confirmed DataStax vector table writes and ANN index updates.
-
-Outcome: End-to-end data flow verified; ingestion accuracy and latency within expected range.
+    return text
 
 
-
----
-
-3. E3 Readiness – Validation Report Template Finalization and Testing
-
-Finalized the Validation Report Template structure for RFR/MRMG reports.
-
-Tested the report generation workflow in both E1 and E2 environments.
-
-Ensured proper table, heading, and metadata rendering for automated generation.
-
-Outcome: Template approved for E3 release and ready for CI/CD integration.
+def _norm(s):
+    return re.sub(r"\s+", " ", (s or "")).strip().lower()
 
 
-
----
-
-4. Kafka Service Configuration for E3 and Certificate Generation
-
-Initiated configuration of Kafka service for E3 deployment.
-
-Coordinated with the infrastructure team to generate TLS/SSL certificates for secure communication.
-
-Current State: In progress – awaiting certificate validation and broker connectivity testing.
+def _format_run(run, bold=False, highlight=None):
+    run.bold = bool(bold)
+    run.font.name = "Times New Roman"
+    run.font.size = Pt(11)
+    if highlight is not None:
+        run.font.highlight_color = highlight
 
 
-
----
-
-Sprint Outcome Summary
-
-Three of four tasks completed (E2 deployment, ingestion testing, validation template readiness).
-
-One task in progress (Kafka service setup for E3).
-
-Overall progress: approximately 85% completion toward E3 readiness.
+def _insert_after_para(p: Paragraph, text="", bold=False, highlight=None):
+    new_p = OxmlElement("w:p")
+    p._p.addnext(new_p)
+    q = Paragraph(new_p, p._parent)
+    if text:
+        r = q.add_run(text)
+        _format_run(r, bold=bold, highlight=highlight)
+    return q
 
 
+def _safe_dict(x):
+    if isinstance(x, dict):
+        return x
+    if isinstance(x, str):
+        s = x.strip()
+        if not s:
+            return {}
+        try:
+            return json.loads(s)
+        except Exception:
+            try:
+                return ast.literal_eval(s)
+            except Exception:
+                return {}
+    return {}
 
----
 
-Would you like me to convert this into a Word or PowerPoint one-pager format for your sprint review presentation?
+def _snum(text):
+    m = re.search(r"\bS\s*(\d+)\b", text or "", flags=re.IGNORECASE)
+    return f"S{m.group(1)}" if m else ""
+
+
+def _set_paragraph_text(p: Paragraph, text: str, bold=False):
+    for r in p.runs:
+        r.text = ""
+    r = p.add_run(text)
+    _format_run(r, bold=bold, highlight=None)
+
+
+def _is_heading_style(p: Paragraph):
+    try:
+        return p.style and p.style.name and "heading" in p.style.name.lower()
+    except Exception:
+        return False
+
+
+# ---------- FIXED SAFE DELETE ----------
+def _delete_content_after_paragraph(paragraph, stop_on_heading=True):
+    """
+    Safely delete all content after the given paragraph — including tables —
+    until the next heading (if stop_on_heading=True).
+    Prevents removal of the next heading even when XML structure shifts.
+    """
+    current = paragraph._p
+    delete_count = 0
+    max_delete_limit = 100  # safety guard
+
+    while True:
+        next_elem = current.getnext()
+        if next_elem is None:
+            break
+
+        # Stop if next is a styled heading
+        if stop_on_heading and next_elem.tag == qn("w:p"):
+            next_para = Paragraph(next_elem, paragraph._parent)
+            if _is_heading_style(next_para):
+                # Stop before removing heading
+                break
+
+        # Cache next sibling before deletion
+        nxt = next_elem.getnext()
+        current.getparent().remove(next_elem)
+        delete_count += 1
+
+        # Safety: stop if too many elements deleted (accidental overshoot)
+        if delete_count > max_delete_limit:
+            print("[WARN] Stop deletion: safety limit reached.")
+            break
+
+        if nxt is None:
+            break
+
+
+# ---------- MAIN FUNCTION ----------
+def insert_rfr_and_mrmg_with_tags(
+    doc_path: str,
+    df: pd.DataFrame,
+    output_path: str,
+    tag_col: str = "text",
+    rfr_col: str = "rfr_value",
+    mrmg_col: str = "MRMG Assessment",
+    highlight_assessment: bool = True,
+    assessment_highlight_color=WD_COLOR_INDEX.YELLOW,
+    DEBUG=False,
+):
+    doc = Document(doc_path)
+
+    for _, row in df.iterrows():
+        tag = str(row.get(tag_col, "") or "").strip()
+        raw_text = str(row.get(mrmg_col, "") or "").strip()
+        mrmg_new = preprocess_mrmg_text(raw_text)
+
+        if not tag:
+            continue
+
+        sn = _snum(tag)
+        paras = doc.paragraphs
+
+        # 1️⃣ Locate the paragraph that contains the tag (e.g., "Test S6")
+        start_idx = next((i for i, p in enumerate(paras) if tag.lower() in _norm(p.text)), None)
+        if start_idx is None and sn:
+            start_idx = next((i for i, p in enumerate(paras) if sn.lower() in _norm(p.text)), None)
+        if start_idx is None:
+            if DEBUG:
+                print(f"[WARN] Skipping row with tag '{tag}': no match in doc")
+            continue
+
+        # 2️⃣ Find MRMG Assessment heading after this tag
+        def _is_mrmg_heading(p):
+            return (
+                _norm(p.text).startswith("mrmg assessment") or
+                _norm(p.text).startswith("mrmg evaluation")
+            ) and sn.lower() in _norm(p.text)
+
+        mrmg_idx = next((i for i in range(start_idx, len(paras)) if _is_mrmg_heading(paras[i])), None)
+        if mrmg_idx is None:
+            if DEBUG:
+                print(f"[WARN] No MRMG heading found for {sn}")
+            continue
+
+        # 3️⃣ Normalize MRMG heading (remove trailing colon/text)
+        m = re.match(r"^(mrmg assessment(?:\s*s?\d+)?)(:.*)?$", paras[mrmg_idx].text.strip(), flags=re.IGNORECASE)
+        if m:
+            _set_paragraph_text(paras[mrmg_idx], m.group(1), bold=True)
+        else:
+            m = re.match(r"^(mrmg evaluation(?:\s*s?\d+)?)(:.*)?$", paras[mrmg_idx].text.strip(), flags=re.IGNORECASE)
+            if m:
+                _set_paragraph_text(paras[mrmg_idx], m.group(1), bold=True)
+
+        # 4️⃣ Delete all content after MRMG heading (until next heading)
+        if DEBUG:
+            print(f"[INFO] Cleaning content after MRMG heading {mrmg_idx}: {paras[mrmg_idx].text}")
+        _delete_content_after_paragraph(paras[mrmg_idx], stop_on_heading=True)
+
+        # Refresh paragraph list after deletion
+        paras = doc.paragraphs
+
+        # 5️⃣ Insert cleaned MRMG body text
+        if DEBUG:
+            print(f"[INFO] Inserting MRMG content for {sn}")
+        new_body = _insert_after_para(
+            paras[mrmg_idx],
+            text=mrmg_new,
+            bold=False,
+            highlight=(assessment_highlight_color if highlight_assessment else None),
+        )
+        _insert_after_para(new_body, "")  # spacer paragraph
+
+    doc.save(output_path)
+    if DEBUG:
+        print(f"[SUCCESS] Saved updated document → {output_path}")
