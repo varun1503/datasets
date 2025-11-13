@@ -16,7 +16,6 @@ def preprocess_mrmg_text(text: str) -> str:
     - Decodes unicode escape sequences like '\\u2019'
     - Replaces escaped \n with real newlines
     - Strips extra whitespace
-    - Normalizes bullets or special formatting
     """
     if not isinstance(text, str):
         return ""
@@ -30,7 +29,6 @@ def preprocess_mrmg_text(text: str) -> str:
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n\s+", "\n", text)
     text = text.strip()
-
     return text
 
 
@@ -79,6 +77,7 @@ def _snum(text):
 
 
 def _set_paragraph_text(p: Paragraph, text: str, bold=False):
+    # clear all existing runs and set fresh text with formatting
     for r in p.runs:
         r.text = ""
     r = p.add_run(text)
@@ -92,37 +91,92 @@ def _is_heading_style(p: Paragraph):
         return False
 
 
-# ---------- FIXED SAFE DELETE ----------
-def _delete_content_after_paragraph(paragraph, stop_on_heading=True):
+# ---------- UTIL: LOOKAHEAD INTO CONTAINERS ----------
+def _is_heading_elem(elem, part_parent) -> bool:
+    """
+    True if the given elem is a <w:p> paragraph with a heading style.
+    """
+    if elem.tag != qn("w:p"):
+        return False
+    try:
+        para = Paragraph(elem, part_parent)
+        return _is_heading_style(para)
+    except Exception:
+        return False
+
+
+def _element_contains_heading(elem, part_parent) -> bool:
+    """
+    True if elem itself is a heading paragraph or contains ANY heading paragraph
+    anywhere in its descendants (tables, sdt/content controls, grouped blocks).
+    """
+    # direct paragraph heading
+    if _is_heading_elem(elem, part_parent):
+        return True
+
+    # search recursively through descendants for <w:p> that is a heading
+    for child in elem.iter():
+        if child.tag == qn("w:p"):
+            try:
+                if _is_heading_style(Paragraph(child, part_parent)):
+                    return True
+            except Exception:
+                # ignore malformed nodes
+                pass
+    return False
+
+
+# ---------- FIXED SAFE DELETE (PEEK INTO TABLES/SDTs) ----------
+def _delete_content_after_paragraph(paragraph, stop_on_heading=True, DEBUG=False):
     """
     Safely delete all content after the given paragraph — including tables —
-    until the next heading (if stop_on_heading=True).
-    Prevents removal of the next heading even when XML structure shifts.
+    until the next heading. Crucially, this *peeks inside* tables/content controls
+    and stops if they contain a heading paragraph.
     """
     current = paragraph._p
     delete_count = 0
-    max_delete_limit = 100  # safety guard
+    max_delete_limit = 500  # generous but safe
 
     while True:
         next_elem = current.getnext()
         if next_elem is None:
+            if DEBUG:
+                print("[INFO] Reached end of body while deleting.")
             break
 
-        # Stop if next is a styled heading
-        if stop_on_heading and next_elem.tag == qn("w:p"):
-            next_para = Paragraph(next_elem, paragraph._parent)
-            if _is_heading_style(next_para):
-                # Stop before removing heading
+        if stop_on_heading:
+            # If the next element is (or contains) a heading, STOP before removing it
+            if _element_contains_heading(next_elem, paragraph._parent):
+                if DEBUG:
+                    # Try to print a hint of what we are stopping at
+                    try:
+                        # find first heading paragraph text inside
+                        stop_txt = None
+                        if next_elem.tag == qn("w:p"):
+                            stop_txt = Paragraph(next_elem, paragraph._parent).text
+                        else:
+                            for c in next_elem.iter():
+                                if c.tag == qn("w:p"):
+                                    cp = Paragraph(c, paragraph._parent)
+                                    if _is_heading_style(cp):
+                                        stop_txt = cp.text
+                                        break
+                        msg = stop_txt.strip()[:60] if stop_txt else "<container with heading>"
+                    except Exception:
+                        msg = "<container with heading>"
+                    print(f"[INFO] Stopping deletion at next heading: {msg}")
                 break
 
-        # Cache next sibling before deletion
+        # Cache next sibling before we remove current next_elem
         nxt = next_elem.getnext()
         current.getparent().remove(next_elem)
         delete_count += 1
 
-        # Safety: stop if too many elements deleted (accidental overshoot)
+        if DEBUG and delete_count % 50 == 0:
+            print(f"[DEBUG] Deleted {delete_count} block-level elements so far...")
+
         if delete_count > max_delete_limit:
-            print("[WARN] Stop deletion: safety limit reached.")
+            print("[WARN] Stop deletion: safety limit reached. Possible malformed doc.")
             break
 
         if nxt is None:
@@ -154,7 +208,7 @@ def insert_rfr_and_mrmg_with_tags(
         sn = _snum(tag)
         paras = doc.paragraphs
 
-        # 1️⃣ Locate the paragraph that contains the tag (e.g., "Test S6")
+        # 1) Locate the paragraph that contains the tag (e.g., "Test S6")
         start_idx = next((i for i, p in enumerate(paras) if tag.lower() in _norm(p.text)), None)
         if start_idx is None and sn:
             start_idx = next((i for i, p in enumerate(paras) if sn.lower() in _norm(p.text)), None)
@@ -163,12 +217,10 @@ def insert_rfr_and_mrmg_with_tags(
                 print(f"[WARN] Skipping row with tag '{tag}': no match in doc")
             continue
 
-        # 2️⃣ Find MRMG Assessment heading after this tag
+        # 2) Find MRMG Assessment heading after this tag
         def _is_mrmg_heading(p):
-            return (
-                _norm(p.text).startswith("mrmg assessment") or
-                _norm(p.text).startswith("mrmg evaluation")
-            ) and sn.lower() in _norm(p.text)
+            txt = _norm(p.text)
+            return (txt.startswith("mrmg assessment") or txt.startswith("mrmg evaluation")) and (sn.lower() in txt)
 
         mrmg_idx = next((i for i in range(start_idx, len(paras)) if _is_mrmg_heading(paras[i])), None)
         if mrmg_idx is None:
@@ -176,33 +228,58 @@ def insert_rfr_and_mrmg_with_tags(
                 print(f"[WARN] No MRMG heading found for {sn}")
             continue
 
-        # 3️⃣ Normalize MRMG heading (remove trailing colon/text)
-        m = re.match(r"^(mrmg assessment(?:\s*s?\d+)?)(:.*)?$", paras[mrmg_idx].text.strip(), flags=re.IGNORECASE)
+        # 3) Normalize MRMG heading text (strip colon/trailing)
+        head_txt = paras[mrmg_idx].text.strip()
+        m = re.match(r"^(mrmg assessment(?:\s*s?\d+)?)(:.*)?$", head_txt, flags=re.IGNORECASE)
         if m:
             _set_paragraph_text(paras[mrmg_idx], m.group(1), bold=True)
         else:
-            m = re.match(r"^(mrmg evaluation(?:\s*s?\d+)?)(:.*)?$", paras[mrmg_idx].text.strip(), flags=re.IGNORECASE)
-            if m:
-                _set_paragraph_text(paras[mrmg_idx], m.group(1), bold=True)
+            m2 = re.match(r"^(mrmg evaluation(?:\s*s?\d+)?)(:.*)?$", head_txt, flags=re.IGNORECASE)
+            if m2:
+                _set_paragraph_text(paras[mrmg_idx], m2.group(1), bold=True)
 
-        # 4️⃣ Delete all content after MRMG heading (until next heading)
         if DEBUG:
-            print(f"[INFO] Cleaning content after MRMG heading {mrmg_idx}: {paras[mrmg_idx].text}")
-        _delete_content_after_paragraph(paras[mrmg_idx], stop_on_heading=True)
+            print(f"[INFO] Cleaning content after MRMG heading idx={mrmg_idx}: '{paras[mrmg_idx].text.strip()}'")
 
-        # Refresh paragraph list after deletion
+        # 4) Delete all content after MRMG heading (until next heading or heading inside a container)
+        _delete_content_after_paragraph(paras[mrmg_idx], stop_on_heading=True, DEBUG=DEBUG)
+
+        # 5) Refresh paragraph list *after* deletion
         paras = doc.paragraphs
 
-        # 5️⃣ Insert cleaned MRMG body text
-        if DEBUG:
-            print(f"[INFO] Inserting MRMG content for {sn}")
+        # IMPORTANT: After deletion, the original paragraph object is still valid,
+        # but its index may have shifted. Find it again by identity-safe search.
+        # We re-find by scanning a small window around the old index; fallback to full scan.
+        anchor = paras[mrmg_idx] if mrmg_idx < len(paras) else None
+        if anchor is None or anchor.text.strip() != paras[mrmg_idx].text.strip():
+            # Best-effort: locate the heading by exact text match near old idx
+            ref_text = head_txt.split(":")[0].strip()  # before normalization
+            ref_text_norm = _norm(ref_text)
+            relocate = None
+            # try around old window
+            start_scan = max(0, mrmg_idx - 5)
+            end_scan = min(len(paras), mrmg_idx + 6)
+            for i in range(start_scan, end_scan):
+                if _norm(paras[i].text).startswith("mrmg assessment") or _norm(paras[i].text).startswith("mrmg evaluation"):
+                    relocate = i
+                    break
+            if relocate is None:
+                # full scan as a fallback
+                for i, p in enumerate(paras):
+                    t = _norm(p.text)
+                    if t.startswith("mrmg assessment") or t.startswith("mrmg evaluation"):
+                        relocate = i
+                        break
+            mrmg_idx = relocate if relocate is not None else mrmg_idx
+
+        # 6) Insert cleaned MRMG body text right after MRMG heading
         new_body = _insert_after_para(
             paras[mrmg_idx],
             text=mrmg_new,
             bold=False,
             highlight=(assessment_highlight_color if highlight_assessment else None),
         )
-        _insert_after_para(new_body, "")  # spacer paragraph
+        _insert_after_para(new_body, "")  # spacer
 
     doc.save(output_path)
     if DEBUG:
