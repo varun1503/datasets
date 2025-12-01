@@ -1,413 +1,146 @@
-Perfect — here is the corrected Section 6, now comparing ADK vs LangChain vs LangGraph, in the same PPT-ready, deep-dive format that matches your entire presentation structure.
-
-I kept your original tone/structure and expanded each comparison slide.
-
-
----
-
-⭐ SECTION 6 — ADK vs LANGCHAIN vs LANGGRAPH
-
-
----
-
-⭐ Slide 17 — Why Compare ADK, LangChain & LangGraph (Technical View)
-
-ADK = Conversation Runtime
-
-Designed for:
-
-persistent multi-turn chat
-
-long-term memory
-
-structured state
-
-event lifecycle
-
-multi-agent execution tied to conversation context
-
-
-LangChain = Developer Toolkit
-
-Designed for:
-
-chaining models
-
-custom memory classes
-
-building quick prototypes
-
-tool execution wrappers
-
-
-LangGraph = Orchestration Engine
-
-Designed for:
-
-building workflow DAGs
-
-agent-to-agent routing
-
-retries, branching, state-machine logic
-
-
-
----
-
-⭐ Slide 18 — Session Handling: ADK vs LangChain vs LangGraph
-
-ADK (Best in Class)
-
-✔ Native Session object
-✔ Built-in SessionService with:
-
-create_session
-
-get_session
-
-append_event
-
-delete_session
-
-list_sessions
-
-
-✔ Stores:
-
-event history
-
-state
-
-metadata
-
-timestamps
-
-
-✔ Supports multi-user and multi-session
-✔ Persisted via DB or Vertex AI SessionService
-
-LangChain
-
-✗ No session system
-✗ Developer manually stores chat history
-✗ No event log
-✗ No session lifecycle
-✗ No persistence
-
-LangGraph
-
-✗ No concept of a conversation session
-✔ Graph execution state, but NOT a chat session
-✗ No event log
-✗ No multi-session management
-
-📌 Conclusion:
-ADK is the ONLY framework with a built-in, production-grade session architecture.
-
-
----
-
-⭐ Slide 19 — State Management: ADK vs LangChain vs LangGraph
-
-ADK State Model (Most Advanced)
-
-State is:
-
-structured
-
-persistent
-
-scoped
-
-
-Supports prefixes:
-
-Prefix	Meaning	Scope
-
-""	session	per conversation
-user:	user-level	across sessions
-app:	app-level	global
-temp:	per-run	per invocation
-
-
-Updates via:
-
-output_key
-
-CallbackContext.state
-
-ToolContext.state
-
-EventActions.state_delta
-
-
-✔ Persisted
-✔ Event-linked
-✔ Thread-safe
-✔ Deterministic
-
-
----
-
-LangChain State
-
-✗ No state engine
-✗ “Memory” = only chat history buffer
-✗ Does NOT persist
-✗ No prefixes
-✗ No user/app-level state
-✗ No event-scoped updates
-✗ Manual coding required
-
-
----
-
-LangGraph State
-
-✔ Graph state exists (node-level state)
-✔ Maintains workflow variables
-BUT: ✗ Not linked to a conversation session
-✗ No user/app scoping
-✗ Not persisted unless developer adds backend
-✗ Not tied to event model
-
-📌 Conclusion:
-ADK = Conversational State Engine
-LangGraph = Workflow State Machine
-LangChain = No Structured State
-
-
----
-
-⭐ Slide 20 — Memory (Long-Term Memory): ADK vs LangChain vs LangGraph
-
-ADK Memory (Only True Long-Term Memory)
-
-Two backends:
-
-1. InMemoryMemoryService
-✔ Basic search
-✔ Simple
-✔ For testing
-
-
-2. VertexAiMemoryBankService
-✔ Semantic memory
-✔ Persistent
-✔ Extracts “important facts” from sessions
-✔ Stores them forever
-✔ Multi-session user recall
-✔ Automatic ingestion
-✔ Vector search
-✔ Deduplication
-
-
-
-
----
-
-LangChain Memory
-
-✗ Short-term only
-✗ Chat buffer stored in RAM
-✗ Erased on restart
-✗ No semantic memory
-✗ No long-term user knowledge
-✗ No LLM-powered memory extraction
-
-
----
-
-LangGraph Memory
-
-✗ No memory system at all
-✔ You can manually integrate vector DB
-BUT:
-
-Not tied to chat sessions
-
-No semantic memory
-
-No automatic ingestion
-
-
-📌 Conclusion:
-ADK is the only framework with true long-term conversational memory.
-
-
----
-
-⭐ Slide 21 — Multi-Agent Systems: ADK vs LangChain vs LangGraph
-
-ADK Multi-Agent System
-
-✔ SequentialAgent
-✔ ParallelAgent
-✔ RouterAgent
-✔ Agents share:
-
-session
-
-state
-
-temp: invocation context
-✔ State passed automatically
-✔ Event lifecycle preserved
-
-
-
----
-
-LangChain Agents
-
-✔ Agent → tool calling
-✔ ReAct-style agents
-BUT:
-✗ No shared state
-✗ No unified session
-✗ No persistent memory
-✗ Agent-to-agent coordination is manual
-
-
----
-
-LangGraph (Best Orchestrator)
-
-✔ DAG of agents
-✔ Node-level execution
-✔ Explicit transitions
-✔ Automatic retries
-✔ Branching, routing, loops
-✗ But NO session, NO long-term memory, NO event model
-✗ State NOT tied to multi-turn dialog
-
-📌 Conclusion:
-ADK = Best conversational multi-agent
-LangGraph = Best workflow engine
-LangChain = Basic agent wrapper
-
-
----
-
-⭐ Slide 22 — Tool Execution: ADK vs LangChain vs LangGraph
-
-ADK Tools
-
-✔ Tools are events
-✔ Tools can modify state
-✔ Tool calls tracked in event log
-✔ ToolContext gives access to:
-
-session state
-
-invocation state
-
-memory service
-✔ Provenance guaranteed
-
-
-
----
-
-LangChain Tools
-
-✔ Simple to implement
-BUT:
-✗ No event log
-✗ No memory integration
-✗ No persistent state update
-✗ No cross-turn context
-
-
----
-
-LangGraph Tools
-
-✔ Tools can be nodes in the graph
-✔ Node execution is deterministic
-BUT:
-✗ Tools do not update conversational state
-✗ No memory integration
-✗ Must wire manually
-
-📌 Conclusion:
-ADK = Tool execution integrated with memory + session + state
-LangChain = Tools isolated
-LangGraph = Tools as workflow nodes
-
-
----
-
-⭐ Slide 23 — Production Readiness: ADK vs LangChain vs LangGraph
-
-ADK
-
-✔ Persisted sessions
-✔ Persisted memories
-✔ Event audit log
-✔ State safety
-✔ Multi-agent orchestration
-✔ Database + Vertex AI backends
-✔ Enterprise-ready
-
-
----
-
-LangChain
-
-⚠ Useful for prototyping
-✗ Difficult to scale production conversational systems
-✗ No persistence
-✗ No session
-✗ No state engine
-✗ No event tracking
-
-
----
-
-LangGraph
-
-✔ Excellent for production workflows
-✔ Great for:
-
-pipelines
-
-batch tasks
-
-tool orchestration
-BUT:
-✗ Not a conversational runtime
-✗ Not designed for multi-turn chat memory/state
-
-
-📌 Conclusion:
-ADK = Production conversational platform
-LangGraph = Production workflow engine
-LangChain = Prototyping library
-
-
----
-
-⭐ Slide 24 — Final Summary (Perfect PPT Sheet)
-
-Feature	ADK	LangChain	LangGraph
-
-Session Model	✔ Native	✗ No sessions	✗ No
-Event Log	✔ Yes	✗ No	✗ No
-State Engine	✔ Scoped + persistent	✗ No	✔ Graph-level only
-Memory	✔ Long-term + semantic	✗ Buffer only	✗ No
-Multi-Agent	✔ Native	△ Limited	✔ Strong orchestration
-Tool Integration	✔ State-aware	△ Basic	✔ Node-based
-Persistence	✔ DB & Vertex AI	✗ Manual	✗ Manual
-Best For	Conversational AI	Prototyping	Workflow automation
-
-
-
----
-
-If you want:
-
-✅ A single combined slide
-✅ A short 4-slide executive version
-✅ A ready-to-download PPTX file
-Just say "Generate PPT".
+# common/pg_store.py
+import os
+import json
+import asyncpg
+from typing import List, Dict, Any, Optional
+from dotenv import load_dotenv
+
+load_dotenv()
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL must be set in .env")
+
+DEFAULT_LAST_N = int(os.getenv("LAST_N_HISTORY", "50"))
+
+class PostgresStore:
+    def __init__(self, dsn: str = None, min_size: int = 1, max_size: int = 10):
+        self.dsn = dsn or DATABASE_URL
+        self.pool: Optional[asyncpg.Pool] = None
+        self.min_size = min_size
+        self.max_size = max_size
+
+    async def init(self):
+        if self.pool is None:
+            self.pool = await asyncpg.create_pool(dsn=self.dsn, min_size=self.min_size, max_size=self.max_size)
+
+    async def close(self):
+        if self.pool:
+            await self.pool.close()
+            self.pool = None
+
+    # -------------------------
+    # Conversation (transcript)
+    # -------------------------
+    async def save_message(self,
+                           app_name: str,
+                           agent_name: Optional[str],
+                           user_id: str,
+                           session_id: str,
+                           role: str,
+                           content: Dict[str, Any]):
+        """
+        content: JSON-serializable dict (we store ADK parts JSON here)
+        """
+        await self.init()
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO adk_conversations (app_name, agent_name, user_id, session_id, role, content)
+                VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+                """,
+                app_name, agent_name, user_id, session_id, role, json.dumps(content)
+            )
+
+    async def get_history(self, app_name: str, user_id: str, session_id: str, last_n: Optional[int] = None) -> List[Dict[str, Any]]:
+        """
+        Return messages in ascending order (oldest first).
+        If last_n is provided, returns the last N messages (still ordered oldest->newest).
+        Each item: {"role": ..., "content": {...}}
+        """
+        await self.init()
+        async with self.pool.acquire() as conn:
+            if last_n:
+                rows = await conn.fetch(
+                    """
+                    SELECT role, content, created_at
+                    FROM adk_conversations
+                    WHERE app_name=$1 AND user_id=$2 AND session_id=$3
+                    ORDER BY created_at DESC
+                    LIMIT $4
+                    """,
+                    app_name, user_id, session_id, last_n
+                )
+                rows = list(reversed(rows))
+            else:
+                rows = await conn.fetch(
+                    """
+                    SELECT role, content, created_at
+                    FROM adk_conversations
+                    WHERE app_name=$1 AND user_id=$2 AND session_id=$3
+                    ORDER BY created_at ASC
+                    """,
+                    app_name, user_id, session_id
+                )
+        out = []
+        for r in rows:
+            content = r["content"]
+            if isinstance(content, str):
+                try:
+                    content = json.loads(content)
+                except Exception:
+                    content = {"parts": [{"text": content}]}
+            out.append({"role": r["role"], "content": content})
+        return out
+
+    # -------------------------
+    # Key-value facts (structured memory)
+    # -------------------------
+    async def upsert_fact(self, app_name: str, user_id: str, session_id: Optional[str], key: str, value: Dict[str, Any]):
+        """
+        Upsert a structured fact (JSON). session_id may be NULL for user-scoped facts.
+        """
+        await self.init()
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO adk_facts (app_name, user_id, session_id, key, value)
+                VALUES ($1, $2, $3, $4, $5::jsonb)
+                ON CONFLICT (app_name, user_id, session_id, key)
+                DO UPDATE SET value = $5::jsonb, updated_at = now()
+                """,
+                app_name, user_id, session_id, key, json.dumps(value)
+            )
+
+    async def get_fact(self, app_name: str, user_id: str, session_id: Optional[str], key: str) -> Optional[Dict[str, Any]]:
+        await self.init()
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT value FROM adk_facts
+                WHERE app_name=$1 AND user_id=$2 AND session_id=$3 AND key=$4
+                """,
+                app_name, user_id, session_id, key
+            )
+            if row:
+                v = row["value"]
+                if isinstance(v, str):
+                    try:
+                        return json.loads(v)
+                    except:
+                        return {"value": v}
+                return v
+            return None
+
+    async def list_facts(self, app_name: str, user_id: str, session_id: Optional[str] = None):
+        await self.init()
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT key, value, updated_at FROM adk_facts
+                WHERE app_name=$1 AND user_id=$2 AND session_id=$3
+                ORDER BY updated_at ASC
+                """,
+                app_name, user_id, session_id
+            )
+        return [{"key": r["key"], "value": r["value"], "updated_at": r["updated_at"]} for r in rows]
