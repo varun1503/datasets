@@ -1,5 +1,53 @@
-DATABASE_URL=postgresql://adk_user:adk_pass@localhost:5432/adk_memory
-APP_NAME=travel_assistant
-SHARED_USER_ID=global_user
-SHARED_SESSION_ID=global_session
-LAST_N_HISTORY=40
+# common/memory_runner.py
+import os
+from dotenv import load_dotenv
+from typing import List, Dict, Any
+from google.adk.runners import Runner  # ADK Runner base
+load_dotenv()
+
+APP_NAME = os.getenv("APP_NAME", "travel_assistant")
+LAST_N_HISTORY = int(os.getenv("LAST_N_HISTORY", "50"))
+
+class MemoryRunner(Runner):
+    """
+    Runner wrapper that:
+      - Reads last-N history from PostgresStore (self.session_service should be PostgresStore)
+      - Reads key-value facts (optional)
+      - Injects them into LLM calls by passing messages param (if ADK supports)
+    """
+
+    async def run_async(self, user_id: str, session_id: str, new_message, last_n: int = LAST_N_HISTORY):
+        # fetch history
+        history = []
+        if hasattr(self, "session_service") and hasattr(self.session_service, "get_history"):
+            history = await self.session_service.get_history(app_name=APP_NAME, user_id=user_id, session_id=session_id, last_n=last_n)
+
+        # Optionally fetch important facts and convert them to a "system" message
+        facts_system = None
+        if hasattr(self.session_service, "get_fact"):
+            # Example: get a persistent profile fact
+            profile = await self.session_service.get_fact(app_name=APP_NAME, user_id=user_id, session_id=None, key="profile")
+            if profile:
+                facts_system = {"role": "system", "content": {"parts": [{"text": f"User profile: {json.dumps(profile)}"}]}}
+
+        # Build messages for injection: convert history to ADK Content-like structures accepted by Runner
+        messages_param = []
+        for item in history:
+            # each item is {"role": "user"|"assistant", "content": {...}}
+            messages_param.append({"role": item["role"], "content": item["content"]})
+
+        # Append system facts at the front if present
+        if facts_system:
+            messages_param.insert(0, facts_system)
+
+        # Append new user message (serializing parts)
+        messages_param.append({"role": new_message.role, "content": {"parts": [p.model_dump() if hasattr(p, "model_dump") else getattr(p, "__dict__", {"text": getattr(p, "text", "")}) for p in new_message.parts]}})
+
+        # Try to call Runner.run_async with an explicit messages param (if supported by your ADK Runner)
+        try:
+            async for event in super().run_async(user_id=user_id, session_id=session_id, new_message=new_message, messages=messages_param):
+                yield event
+        except TypeError:
+            # Fallback: if Runner doesn't accept messages param, call base and rely on session_service behavior
+            async for event in super().run_async(user_id=user_id, session_id=session_id, new_message=new_message):
+                yield event
