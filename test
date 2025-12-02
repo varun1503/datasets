@@ -1,204 +1,62 @@
-import re
-import json
-import unicodedata
+# agents/activities_agent.py
 import os
-import pandas as pd
-from typing import List, Dict, Tuple
-from docx import Document
-from collections import OrderedDict
-from docx.oxml.ns import qn
-from docx.table import Table
-from docx.text.paragraph import Paragraph
+import json
+from dotenv import load_dotenv
+from google.adk.agents import Agent
+from google.genai import types
 
+from common.pg_store import PostgresStore
+from common.memory_runner import MemoryRunner
 
-# ---------------- HELPER UTILS ----------------
+load_dotenv()
 
-def norm(s: str) -> str:
-    if not s:
-        return ""
-    s = unicodedata.normalize("NFKC", s).replace("\u00A0", " ")
-    return re.sub(r"\s+", " ", s).strip()
+APP_NAME = os.getenv("APP_NAME", "travel_assistant")
+USER_ID = os.getenv("SHARED_USER_ID", "global_user")
+SESSION_ID = os.getenv("SHARED_SESSION_ID", "global_session")
 
+# define agent
+activities_agent = Agent(
+    name="activities_agent",
+    model='gemini-1.5-flash',
+    description="Suggests interesting activities for the user at a destination.",
+    instruction=(
+        "Given a destination, dates, and budget, suggest 2-3 activities..."
+    )
+)
 
-def clean_greater_than(lines):
-    return [re.sub(r'>.*$', '', s).strip() for s in lines]
+# shared Postgres-backed session service (same instance can be reused across agents if you want)
+session_service = PostgresStore()
 
+# runner that injects memory
+runner = MemoryRunner(agent=activities_agent, app_name=APP_NAME, session_service=session_service)
 
-# ------------ REGEX PATTERNS ------------------
-
-REQ_ITEMS_RX = re.compile(r"^\s*Request\s+Items\s*$", re.IGNORECASE)
-RFR_RX = re.compile(r"\s*RFR\s*\d+\s*", re.IGNORECASE)
-BRACKETS_RX = re.compile(r"<\s*([^>]+?)\s*>")
-Q_KEY_RX = re.compile(r"^\s*Q\d+\s*:\s*", re.IGNORECASE)
-RESP_HDR_RX = re.compile(r"Modeling Team[’']?s Response", re.IGNORECASE)
-
-TEST_TAG_RX = re.compile(r"^Test\s*(\w+)", re.IGNORECASE)
-
-
-# ------------- DOCX LINE READING ----------------
-
-def read_docx_lines(path: str) -> List[str]:
-    doc = Document(path)
-    lines: List[str] = []
-
-    for child in doc.element.body.iterchildren():
-        if child.tag == qn("w:p"):
-            t = norm(Paragraph(child, doc).text)
-            if t:
-                lines.append(t)
-
-        elif child.tag == qn("w:tbl"):
-            tbl = Table(child, doc)
-            for row in tbl.rows:
-                row_text = []
-                for cell in row.cells:
-                    for p in cell.paragraphs:
-                        t = norm(p.text)
-                        if t:
-                            row_text.append(t)
-                if row_text:
-                    lines.append(" | ".join(row_text))
-
-    return lines
-
-
-# ------------------------------------------------------
-
-def extract_meta_from_rfr_header(line: str):
+async def execute(request: dict):
     """
-    Extracts: IMVP question, section, q_key and test_tag
+    request: {destination, start_date, end_date, budget}
     """
-    q_key = ""
-    section = ""
-    imvp = ""
-    test_key = None
+    # Build prompt and types.Content per ADK API you use
+    prompt = (
+        f"User is flying to {request['destination']} from {request['start_date']} to {request['end_date']}, "
+        f"with a budget of {request['budget']}. Suggest 2-3 activities, each with name, description, price estimate, and duration. "
+        f"Respond in JSON format using the key 'activities' with a list of activity objects."
+    )
+    message = types.Content(role="user", parts=[types.Part(text=prompt)])
 
-    parts = [norm(x) for x in BRACKETS_RX.findall(line)]
+    # Persist the user message in DB
+    # Convert message to serializable form
+    content_json = {"parts": [p.model_dump() if hasattr(p, "model_dump") else {"text": getattr(p, "text", "")} for p in message.parts]}
+    await session_service.save_message(app_name=APP_NAME, agent_name="activities_agent", user_id=USER_ID, session_id=SESSION_ID, role="user", content=content_json)
 
-    # Detect IMVP question (one ending with ?)
-    questions = [p for p in parts if p.endswith("?")]
-    if questions:
-        imvp = questions[-1]
+    # Run the agent (MemoryRunner will inject previous history + facts)
+    async for event in runner.run_async(user_id=USER_ID, session_id=SESSION_ID, new_message=message):
+        if event.is_final_response():
+            # save assistant reply
+            assistant_content = {"parts": [p.model_dump() if hasattr(p, "model_dump") else {"text": getattr(p, "text", "")} for p in event.content.parts]}
+            await session_service.save_message(app_name=APP_NAME, agent_name="activities_agent", user_id=USER_ID, session_id=SESSION_ID, role="assistant", content=assistant_content)
 
-    # Detect QX:
-    for p in parts:
-        if Q_KEY_RX.match(p):
-            q_key = p.split(":")[0]  # remove trailing colon
-            break
-
-    # Detect Test tag
-    for p in parts:
-        m = TEST_TAG_RX.match(p)
-        if m:
-            tag_value = m.group(1).lower()
-            test_key = f"tests{tag_value}"
-            break
-
-    # Detect Section (first non-Q, non-?")
-    for p in parts:
-        if p == imvp: 
-            continue
-        if p == q_key:
-            continue
-        if not p.endswith("?"):
-            section = p
-            break
-
-    return q_key, section, imvp, test_key
-
-
-# ------------------------------------------------------
-
-def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
-
-    # Start after "Request Items"
-    start = 0
-    for i, t in enumerate(lines):
-        if REQ_ITEMS_RX.search(t):
-            start = i + 1
-            break
-
-    L = lines[start:]
-    rows = []
-    i = 0
-
-    while i < len(L):
-        line = L[i]
-
-        if RFR_RX.search(line):
-            q_key, section, imvp_q, test_tag = extract_meta_from_rfr_header(line)
-            responses = []
-            i += 1
-
-            # Collect responses
-            while i < len(L) and not RFR_RX.search(L[i]):
-                cur = L[i]
-
-                # Modeling Team Response block
-                if RESP_HDR_RX.search(cur):
-                    i += 1
-                    block = []
-
-                    while (
-                        i < len(L)
-                        and not RESP_HDR_RX.search(L[i])
-                        and not RFR_RX.search(L[i])
-                    ):
-                        block.append(L[i])
-                        i += 1
-
-                    resp = norm(" ".join(block))
-                    if resp:
-                        responses.append(resp)
-                    continue
-
-                i += 1
-
-            responses = clean_greater_than(responses)
-            full_resp = " ".join(responses).strip()
-
-            # Skip empty
-            if not imvp_q:
-                continue
-
-            # Build row
-            row = {
-                test_tag: imvp_q,           # <-- MAIN REQUIREMENT
-                "section": section,
-                "rfr": {q_key: full_resp}
-            }
-
-            rows.append(row)
-            continue
-
-        i += 1
-
-    return rows
-
-
-# ------------------------------------------------------
-
-def convert_csv(rows, path):
-    file_name = os.path.basename(path)
-    df = pd.DataFrame(rows)
-    df["file name"] = file_name
-    df["type"] = "rfr"
-    return df
-
-
-# ------------------------------------------------------
-
-if __name__ == "__main__":
-    DOCX_PATH = "FinalRFRorignal.docx"
-    OUT_PATH = "rfr_rows.json"
-
-    rows = parse_lines_after_request_items(read_docx_lines(DOCX_PATH))
-    df = convert_csv(rows, DOCX_PATH)
-
-    print(df)
-
-    with open(OUT_PATH, "w", encoding="utf-8") as f:
-        for r in rows:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
-
-    print(f"Wrote {len(rows)} row(s) to {OUT_PATH}")
+            response_text = event.content.parts[0].text
+            try:
+                parsed = json.loads(response_text)
+                return {"activities": parsed.get("activities", response_text)}
+            except json.JSONDecodeError:
+                return {"activities": response_text}
