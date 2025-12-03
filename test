@@ -135,8 +135,11 @@ STOP_SUBS = ["Modeling Team's Response", "Modeling Team's Response"]
 
 # ---------- EXTRACTION ----------
 
-def extract_meta_from_rfr_header(line: str) -> Tuple[str, str, str, str]:
-    """Extract q_key, section, imvp, and test_tag from RFR header"""
+def extract_meta_from_rfr_header(line: str) -> Tuple[str, str, str, Optional[str]]:
+    """
+    Extract q_key, section, imvp, and test_tag from RFR header.
+    Returns: (q_key, section, imvp, test_tag)
+    """
     q_key = ""
     section = ""
     imvp = ""
@@ -144,23 +147,18 @@ def extract_meta_from_rfr_header(line: str) -> Tuple[str, str, str, str]:
     
     parts = [norm(x) for x in BRACKETS_RX.findall(line)]
     
-    test_idx = -1
-    q_idx = -1
-    
     # Detect Q key
-    for idx, part in enumerate(parts):
+    for part in parts:
         if Q_KEY_RX.match(part):
             q_key = part
-            q_idx = idx
             break
     
     # Detect Test tag
-    for idx, part in enumerate(parts):
+    for part in parts:
         m = TEST_TAG_RX.match(part)
         if m:
             tag_value = m.group(1).lower()
             test_tag = f"tests{tag_value}"
-            test_idx = idx
             break
     
     # Last '?' (excluding q_key) is IMVP
@@ -168,18 +166,16 @@ def extract_meta_from_rfr_header(line: str) -> Tuple[str, str, str, str]:
     if q_candidates:
         imvp = q_candidates[-1]
     
-    # Section: first non-q, non-question, non-test after Q key
-    if q_idx >= 0:
-        for idx in range(q_idx + 1, len(parts)):
-            part = parts[idx]
-            if part == q_key or part.endswith("?") or idx == test_idx:
-                continue
+    # First non-q, non-question is Section
+    for part in parts:
+        if part == q_key:
+            continue
+        if not part.endswith("?"):
             section = part
             break
     
-    # Fallback for section
     if not section:
-        non_q = [p for idx, p in enumerate(parts) if p != q_key and not p.endswith("?") and idx != test_idx]
+        non_q = [p for p in parts if p != q_key and not p.endswith("?")]
         if non_q:
             section = sorted(non_q, key=len)[0]
     
@@ -191,6 +187,7 @@ def clean_greater_than(lines):
 
 
 def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
+    # start after "Request Items" if present
     start = 0
     for i, t in enumerate(lines):
         if REQ_ITEMS_RX.search(t):
@@ -221,7 +218,7 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
                         block.append(L[i])
                         i += 1
                     resp = norm(" ".join(block))
-                    m = BRACKETS_RX.fullmatch(resp)
+                    m = BRACKETS_RX.fullmatch(resp)  # unwrap <...> if whole block
                     if m:
                         resp = norm(m.group(1))
                     if resp:
@@ -229,8 +226,8 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
                     continue
                 i += 1
             
+            # Guard: only emit if we have IMVP or any response
             responses = clean_greater_than(responses)
-            
             if (imvp_q and imvp_q.strip()) or responses:
                 row = {
                     "IMVP Question": imvp_q or "",
@@ -255,9 +252,13 @@ def parse_docx_to_rfr_rows(path: str) -> List[Dict]:
 # ---------- MERGERS ----------
 
 def collapse_empty_imvp_into_previous(rows: List[Dict]) -> List[Dict]:
+    """
+    If a row has empty IMVP but has rfr content, merge that rfr into the
+    most recent prior row with the SAME Section and a non-empty IMVP.
+    Drop the empty-IMVP row afterward.
+    """
     out: List[Dict] = []
     last_with_imvp_by_section: dict = {}
-    
     for r in rows:
         imvp = (r.get("IMVP Question") or "").strip()
         section = (r.get("Section") or "").strip()
@@ -265,14 +266,23 @@ def collapse_empty_imvp_into_previous(rows: List[Dict]) -> List[Dict]:
             out.append(r)
             last_with_imvp_by_section[section] = len(out) - 1
         else:
+            # empty IMVP; try to merge
             idx = last_with_imvp_by_section.get(section)
             if idx is not None and r.get("rfr"):
                 out[idx]["rfr"].update(r["rfr"])
-    
+            else:
+                # optional: keep as-is if no target found; or skip entirely
+                # Here we skip to avoid stray rows
+                pass
     return out
 
 
 def merge_rows_by_imvp(rows: List[Dict]) -> List[Dict]:
+    """
+    Merge rows with identical non-empty IMVP Question:
+    - Combine rfr entries
+    - Keep first non-empty Section
+    """
     merged: "OrderedDict[str, Dict]" = OrderedDict()
     
     for r in rows:
@@ -312,17 +322,28 @@ def convert_csv(rows, document_path):
 
 
 def validate_rows(rows: List[Dict]) -> List[Dict]:
+    """
+    Strict rules:
+    - IMVP Question must exist and end with '?'
+    - rfr map must have exactly one key and that key must equal the IMVP Question
+    - response must be non-empty
+    If a row uses 'Q3' (or 'Q?') as the rfr key because the question is missing,
+    raise an error.
+    """
     for idx, r in enumerate(rows, start=1):
         imvp = (r.get("IMVP Question") or "").strip()
         rfr = r.get("rfr") or {}
         
         if not imvp or not imvp.endswith("?"):
+            # explicitly fail when the document has no question
+            # even if we detected Q3
             qkeys = list(rfr.keys())
             raise ValueError(
                 f"Document is not formatted correctly: row {idx} missing IMVP question "
                 f"(found rfr keys={qkeys}). Header must include a <...?> block."
             )
         
+        # must have exactly one rfr key, and it must equal the question text
         if not isinstance(rfr, dict) or len(rfr) != 1:
             raise ValueError(
                 f"Document is not formatted correctly: row {idx} has invalid rfr map: {rfr}"
@@ -350,8 +371,12 @@ if __name__ == "__main__":
     OUT_PATH = "rfr_rows.json"
     
     rows = parse_docx_to_rfr_rows(DOCX_PATH)
+    
+    # 1) fold empty-IMVP rows into previous same-section item
     rows = validate_rows(rows)
     rows = collapse_empty_imvp_into_previous(rows)
+    
+    # 2) merge duplicates by identical IMVP
     rows = merge_rows_by_imvp(rows)
     
     df = convert_csv(rows, DOCX_PATH)
