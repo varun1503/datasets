@@ -27,15 +27,62 @@ def clean_greater_than(lines):
 # ------------ REGEX PATTERNS ------------------
 
 REQ_ITEMS_RX = re.compile(r"^\s*Request\s+Items\s*$", re.IGNORECASE)
-RFR_RX = re.compile(r"\s*\[?RFR\s*\d+\]?\s*", re.IGNORECASE)
+RFR_RX = re.compile(r"\s*RFR\s*\d+\s*", re.IGNORECASE)
 BRACKETS_RX = re.compile(r"<\s*([^>]+?)\s*>")
 Q_KEY_RX = re.compile(r"^\s*Q\d+\s*:\s*", re.IGNORECASE)
 RESP_HDR_RX = re.compile(r"Modeling Team['']?s Response", re.IGNORECASE)
-
 TEST_TAG_RX = re.compile(r"^Test\s*(\w+)", re.IGNORECASE)
+
+STOP_SUBS = ["Modeling Team's Response", "Modeling Team's Response"]
 
 
 # ------------- DOCX LINE READING ----------------
+
+def group_blocks_from_list(lines, start_rx, stop_substrings, include_stop_line=False):
+    """Group lines into blocks based on start pattern and stop substrings"""
+    blocks = []
+    i = 0
+    while i < len(lines):
+        if start_rx.search(lines[i]):
+            block = [lines[i]]
+            i += 1
+            while i < len(lines):
+                if any(sub in lines[i] for sub in stop_substrings):
+                    if include_stop_line:
+                        block.append(lines[i])
+                    break
+                block.append(lines[i])
+                i += 1
+            blocks.append(block)
+        i += 1
+    return blocks
+
+
+def replace_blocks_in_lines(lines, blocks):
+    """Replace multi-line blocks with single joined line"""
+    result = []
+    block_set = {id(block): " ".join(block) for block in blocks}
+    i = 0
+    while i < len(lines):
+        found = False
+        for block in blocks:
+            if i < len(lines) and lines[i] == block[0]:
+                # Check if this is the start of a block
+                match = True
+                for j, line in enumerate(block):
+                    if i + j >= len(lines) or lines[i + j] != line:
+                        match = False
+                        break
+                if match:
+                    result.append(block_set[id(block)])
+                    i += len(block)
+                    found = True
+                    break
+        if not found:
+            result.append(lines[i])
+            i += 1
+    return result
+
 
 def read_docx_lines(path: str) -> List[str]:
     doc = Document(path)
@@ -43,10 +90,10 @@ def read_docx_lines(path: str) -> List[str]:
 
     for child in doc.element.body.iterchildren():
         if child.tag == qn("w:p"):
-            t = norm(Paragraph(child, doc).text)
+            p = Paragraph(child, doc)
+            t = norm(p.text)
             if t:
                 lines.append(t)
-
         elif child.tag == qn("w:tbl"):
             tbl = Table(child, doc)
             for row in tbl.rows:
@@ -59,118 +106,89 @@ def read_docx_lines(path: str) -> List[str]:
                 if row_text:
                     lines.append(" | ".join(row_text))
 
-    return lines
+    blocks = group_blocks_from_list(lines, start_rx=RFR_RX, stop_substrings=STOP_SUBS, include_stop_line=False)
+    final_lines = replace_blocks_in_lines(lines, blocks)
+    return final_lines
 
 
 # ------------------------------------------------------
 
-def extract_meta_from_rfr_header(line: str):
-    """
-    Extracts: IMVP question, section, q_key, test_tag, and RFR question
-    Structure: [RFR1]: <Q1: Full RFR question text here> | <Data Validation> | <IMVP question?> | <Test S1>
-    """
+def extract_meta_from_rfr_header(line: str) -> Tuple[str, str, str, str]:
+    """Extract q_key, section, imvp, and test_tag from RFR header"""
     q_key = ""
     section = ""
     imvp = ""
-    test_key = None
-    rfr_question = ""
-
-    # Extract all content within angle brackets
+    test_tag = None
+    
     parts = [norm(x) for x in BRACKETS_RX.findall(line)]
     
-    if not parts:
-        return q_key, section, imvp, test_key, rfr_question
-
-    # Track indices
-    q_key_idx = -1
     test_idx = -1
-
-    # Process each part
-    for idx, p in enumerate(parts):
-        # Check for Q key pattern (Q1:, Q2:, etc.)
-        if Q_KEY_RX.match(p):
-            q_key_idx = idx
-            # Extract Q key (e.g., "Q1")
-            q_match = re.match(r'^\s*(Q\d+)\s*:\s*(.+)$', p, re.IGNORECASE)
-            if q_match:
-                q_key = q_match.group(1).strip()
-                # Everything after the colon is the RFR question
-                rfr_question = q_match.group(2).strip()
-            continue
-        
-        # Check for Test tag
-        test_match = TEST_TAG_RX.match(p)
-        if test_match:
-            tag_value = test_match.group(1).lower()
-            test_key = f"tests{tag_value}"
+    q_idx = -1
+    
+    # Detect Q key
+    for idx, part in enumerate(parts):
+        if Q_KEY_RX.match(part):
+            q_key = part
+            q_idx = idx
+            break
+    
+    # Detect Test tag
+    for idx, part in enumerate(parts):
+        m = TEST_TAG_RX.match(part)
+        if m:
+            tag_value = m.group(1).lower()
+            test_tag = f"tests{tag_value}"
             test_idx = idx
-            continue
-        
-        # Check if it's a question (likely IMVP)
-        if p.endswith("?"):
-            imvp = p
-            continue
-        
-        # If we've already found Q key and this isn't a question or test tag,
-        # it's likely the section
-        if q_key_idx >= 0 and not section and idx > q_key_idx:
-            section = p
+            break
+    
+    # Last '?' (excluding q_key) is IMVP
+    q_candidates = [p for p in parts if p.endswith("?") and p != q_key]
+    if q_candidates:
+        imvp = q_candidates[-1]
+    
+    # Section: first non-q, non-question, non-test after Q key
+    if q_idx >= 0:
+        for idx in range(q_idx + 1, len(parts)):
+            part = parts[idx]
+            if part == q_key or part.endswith("?") or idx == test_idx:
+                continue
+            section = part
+            break
+    
+    # Fallback: first non-q, non-question, non-test
+    if not section:
+        for idx, part in enumerate(parts):
+            if part != q_key and not part.endswith("?") and idx != test_idx:
+                section = part
+                break
+    
+    return q_key, section, imvp, test_tag
 
-    return q_key, section, imvp, test_key, rfr_question
-
-
-# ------------------------------------------------------
 
 def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
-
     # Start after "Request Items"
     start = 0
     for i, t in enumerate(lines):
         if REQ_ITEMS_RX.search(t):
             start = i + 1
             break
-
+    
     L = lines[start:]
-    rows = []
+    rows: List[Dict] = []
     i = 0
-
+    
     while i < len(L):
         line = L[i]
-
         if RFR_RX.search(line):
-            # Collect the full RFR text block (may span multiple lines)
-            rfr_block = [line]
+            q_key, section, imvp_q, test_tag = extract_meta_from_rfr_header(line)
+            responses: List[str] = []
             i += 1
             
-            # Continue collecting lines until we hit "Modeling Team's Response"
-            while i < len(L) and not RESP_HDR_RX.search(L[i]) and not RFR_RX.search(L[i]):
-                rfr_block.append(L[i])
-                i += 1
-            
-            # Join the full RFR block
-            full_rfr_line = " ".join(rfr_block)
-            
-            # Now extract metadata from the full line
-            q_key, section, imvp_q, test_tag, _ = extract_meta_from_rfr_header(full_rfr_line)
-            
-            # Extract the RFR question: text after Q#: and before the next | or >
-            rfr_question = ""
-            # Find the Q#: part
-            q_match = re.search(r'<\s*Q\d+\s*:\s*([^<>|]+?)(?:\s*[|>]|\s*<)', full_rfr_line, re.IGNORECASE | re.DOTALL)
-            if q_match:
-                rfr_question = norm(q_match.group(1))
-            
-            responses = []
-
-            # Collect responses
             while i < len(L) and not RFR_RX.search(L[i]):
                 cur = L[i]
-
-                # Modeling Team Response block
                 if RESP_HDR_RX.search(cur):
                     i += 1
-                    block = []
-
+                    block: List[str] = []
                     while (
                         i < len(L)
                         and not RESP_HDR_RX.search(L[i])
@@ -178,73 +196,144 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
                     ):
                         block.append(L[i])
                         i += 1
-
                     resp = norm(" ".join(block))
+                    m = BRACKETS_RX.fullmatch(resp)
+                    if m:
+                        resp = norm(m.group(1))
                     if resp:
                         responses.append(resp)
                     continue
-
                 i += 1
-
+            
             responses = clean_greater_than(responses)
-            full_resp = " ".join(responses).strip()
-
-            # Skip if no IMVP question
-            if not imvp_q:
-                continue
-
-            # Build row - RFR question as key, response as value
-            row = {
-                test_tag: imvp_q,
-                "section": section,
-                "rfr": {rfr_question: full_resp} if rfr_question else {}
-            }
-
-            rows.append(row)
+            
+            if (imvp_q and imvp_q.strip()) or responses:
+                row = {
+                    test_tag: imvp_q or "",
+                    "section": section or "",
+                    "rfr": {(q_key or "Q?"): " ".join(responses).strip()},
+                }
+                rows.append(row)
             continue
-
         i += 1
-
+    
     return rows
 
 
-# ------------------------------------------------------
+def parse_docx_to_rfr_rows(path: str) -> List[Dict]:
+    return parse_lines_after_request_items(read_docx_lines(path))
 
-def convert_csv(rows, path):
-    file_name = os.path.basename(path)
+
+# ----- MERGERS -----
+
+def collapse_empty_imvp_into_previous(rows: List[Dict]) -> List[Dict]:
+    """Merge rows with empty test_tag into previous row with same section"""
+    out: List[Dict] = []
+    last_with_imvp_by_section: dict = {}
+    
+    for r in rows:
+        # Find the test tag key (tests1, tests2, etc.)
+        test_keys = [k for k in r.keys() if k.startswith("tests")]
+        imvp = r.get(test_keys[0], "").strip() if test_keys else ""
+        section = (r.get("section") or "").strip()
+        
+        if imvp:
+            out.append(r)
+            last_with_imvp_by_section[section] = len(out) - 1
+        else:
+            idx = last_with_imvp_by_section.get(section)
+            if idx is not None and r.get("rfr"):
+                out[idx]["rfr"].update(r["rfr"])
+    
+    return out
+
+
+def merge_rows_by_imvp(rows: List[Dict]) -> List[Dict]:
+    """Merge rows with identical IMVP questions"""
+    merged: "OrderedDict[str, Dict]" = OrderedDict()
+    
+    for r in rows:
+        # Find the test tag key
+        test_keys = [k for k in r.keys() if k.startswith("tests")]
+        if not test_keys:
+            continue
+        
+        test_key = test_keys[0]
+        imvp = (r.get(test_key) or "").strip()
+        
+        if not imvp:
+            continue
+        
+        if imvp not in merged:
+            merged[imvp] = {
+                test_key: imvp,
+                "section": r.get("section") or "",
+                "rfr": dict(r.get("rfr") or {})
+            }
+        else:
+            merged[imvp]["rfr"].update(r.get("rfr") or {})
+            if not merged[imvp]["section"] and (r.get("section") or ""):
+                merged[imvp]["section"] = r["section"]
+    
+    return list(merged.values())
+
+
+def convert_csv(rows, document_path):
+    file_name = os.path.basename(document_path)
     df = pd.DataFrame(rows)
     df["file name"] = file_name
     df["type"] = "rfr"
     return df
 
 
-# ------------------------------------------------------
+def validate_rows(rows: List[Dict]) -> List[Dict]:
+    """Validate row structure"""
+    for idx, r in enumerate(rows, start=1):
+        # Find test tag key
+        test_keys = [k for k in r.keys() if k.startswith("tests")]
+        if not test_keys:
+            raise ValueError(f"Row {idx} missing test tag")
+        
+        imvp = (r.get(test_keys[0]) or "").strip()
+        rfr = r.get("rfr") or {}
+        
+        if not imvp or not imvp.endswith("?"):
+            qkeys = list(rfr.keys())
+            raise ValueError(
+                f"Document is not formatted correctly: row {idx} missing IMVP question "
+                f"(found rfr keys={qkeys}). Header must include a <...?> block."
+            )
+        
+        if not isinstance(rfr, dict) or len(rfr) != 1:
+            raise ValueError(
+                f"Document is not formatted correctly: row {idx} has invalid rfr map: {rfr}"
+            )
+        
+        (k, v) = next(iter(rfr.items()))
+        if not (v or "").strip():
+            raise ValueError(
+                f"Document is not formatted correctly: row {idx} has empty Modeling Team response for '{imvp}'"
+            )
+    
+    return rows
+
+
+# --------- MAIN ---------
 
 if __name__ == "__main__":
     DOCX_PATH = "FinalRFRorignal.docx"
     OUT_PATH = "rfr_rows.json"
-
-    lines = read_docx_lines(DOCX_PATH)
     
-    # Debug: print first few lines to see structure
-    print("First 10 lines:")
-    for i, line in enumerate(lines[:10]):
-        print(f"{i}: {line[:100]}...")
-    
-    rows = parse_lines_after_request_items(lines)
-    
-    # Debug: print first row
-    if rows:
-        print("\nFirst row:")
-        print(json.dumps(rows[0], indent=2, ensure_ascii=False))
+    rows = parse_docx_to_rfr_rows(DOCX_PATH)
+    rows = validate_rows(rows)
+    rows = collapse_empty_imvp_into_previous(rows)
+    rows = merge_rows_by_imvp(rows)
     
     df = convert_csv(rows, DOCX_PATH)
-
-    print(f"\nDataFrame shape: {df.shape}")
-    print(df.head())
-
+    print(df)
+    
     with open(OUT_PATH, "w", encoding="utf-8") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
-
-    print(f"\nWrote {len(rows)} row(s) to {OUT_PATH}")
+    
+    print(f"Wrote {len(rows)} row(s) to {OUT_PATH}")
