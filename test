@@ -67,7 +67,10 @@ def read_docx_lines(path: str) -> List[str]:
 def extract_meta_from_rfr_header(line: str):
     """
     Extracts: IMVP question, section, q_key, test_tag, and RFR question
-    Structure: [RFR1]- <Q1: RFR question> | <Section> | <IMVP question?> | <Test S1>
+    Structure: [RFR1]- <Q1: RFR question text...> | <Data Validation> | <IMVP question?> | <Test S1>
+    
+    The RFR question is the full text from the line BEFORE the angle brackets start.
+    The Q1: part inside brackets helps identify structure but RFR question is outside.
     """
     q_key = ""
     section = ""
@@ -75,6 +78,13 @@ def extract_meta_from_rfr_header(line: str):
     test_key = None
     rfr_question = ""
 
+    # Extract the RFR question from the main text (before first <...>)
+    # Pattern: [RFR1]- <Q1: ... everything before the first angle bracket
+    before_brackets = re.split(r'<', line, 1)[0]
+    # Remove [RFR1] part
+    rfr_match = re.sub(r'\[RFR\d+\]\s*-?\s*', '', before_brackets, flags=re.IGNORECASE)
+    
+    # Now extract from angle brackets
     parts = [norm(x) for x in BRACKETS_RX.findall(line)]
 
     # Track indices of special parts
@@ -82,7 +92,7 @@ def extract_meta_from_rfr_header(line: str):
     imvp_idx = -1
     test_idx = -1
 
-    # Detect IMVP question (one ending with ?)
+    # Detect IMVP question (last one ending with ?)
     questions = [p for p in parts if p.endswith("?")]
     if questions:
         imvp = questions[-1]
@@ -95,10 +105,17 @@ def extract_meta_from_rfr_header(line: str):
             # Extract just the Q key (e.g., "Q1")
             q_key = re.sub(r':.*$', '', p).strip()
             q_key_idx = idx
-            # Everything after the colon is the RFR question
+            # The RFR question text is after the colon inside the bracket
             if ':' in p:
-                rfr_question = p.split(':', 1)[1].strip()
+                bracket_question = p.split(':', 1)[1].strip()
+                # Use this as RFR question if we didn't get it from before brackets
+                if not rfr_match.strip():
+                    rfr_question = bracket_question
             break
+
+    # If we found RFR text before brackets, use that
+    if rfr_match.strip():
+        rfr_question = norm(rfr_match)
 
     # Detect Test tag
     for idx, p in enumerate(parts):
