@@ -27,9 +27,9 @@ def clean_greater_than(lines):
 # ------------ REGEX PATTERNS ------------------
 
 REQ_ITEMS_RX = re.compile(r"^\s*Request\s+Items\s*$", re.IGNORECASE)
-RFR_RX = re.compile(r"\s*RFR\s*\d+\s*", re.IGNORECASE)
+RFR_RX = re.compile(r"\s*\[?RFR\s*\d+\]?\s*", re.IGNORECASE)
 BRACKETS_RX = re.compile(r"<\s*([^>]+?)\s*>")
-Q_KEY_RX = re.compile(r"^\s*Q\d+\s*:?\s*", re.IGNORECASE)
+Q_KEY_RX = re.compile(r"^\s*Q\d+\s*:\s*", re.IGNORECASE)
 RESP_HDR_RX = re.compile(r"Modeling Team['']?s Response", re.IGNORECASE)
 
 TEST_TAG_RX = re.compile(r"^Test\s*(\w+)", re.IGNORECASE)
@@ -67,10 +67,7 @@ def read_docx_lines(path: str) -> List[str]:
 def extract_meta_from_rfr_header(line: str):
     """
     Extracts: IMVP question, section, q_key, test_tag, and RFR question
-    Structure: [RFR1]- <Q1: RFR question text...> | <Data Validation> | <IMVP question?> | <Test S1>
-    
-    The RFR question is the full text from the line BEFORE the angle brackets start.
-    The Q1: part inside brackets helps identify structure but RFR question is outside.
+    Structure: [RFR1]: <Q1: Full RFR question text here> | <Data Validation> | <IMVP question?> | <Test S1>
     """
     q_key = ""
     section = ""
@@ -78,67 +75,46 @@ def extract_meta_from_rfr_header(line: str):
     test_key = None
     rfr_question = ""
 
-    # Extract the RFR question from the main text (before first <...>)
-    # Pattern: [RFR1]- <Q1: ... everything before the first angle bracket
-    before_brackets = re.split(r'<', line, 1)[0]
-    # Remove [RFR1] part
-    rfr_match = re.sub(r'\[RFR\d+\]\s*-?\s*', '', before_brackets, flags=re.IGNORECASE)
-    
-    # Now extract from angle brackets
+    # Extract all content within angle brackets
     parts = [norm(x) for x in BRACKETS_RX.findall(line)]
+    
+    if not parts:
+        return q_key, section, imvp, test_key, rfr_question
 
-    # Track indices of special parts
+    # Track indices
     q_key_idx = -1
-    imvp_idx = -1
     test_idx = -1
 
-    # Detect IMVP question (last one ending with ?)
-    questions = [p for p in parts if p.endswith("?")]
-    if questions:
-        imvp = questions[-1]
-        imvp_idx = parts.index(imvp) if imvp in parts else -1
-
-    # Detect QX:
+    # Process each part
     for idx, p in enumerate(parts):
-        m = Q_KEY_RX.match(p)
-        if m:
-            # Extract just the Q key (e.g., "Q1")
-            q_key = re.sub(r':.*$', '', p).strip()
+        # Check for Q key pattern (Q1:, Q2:, etc.)
+        if Q_KEY_RX.match(p):
             q_key_idx = idx
-            # The RFR question text is after the colon inside the bracket
-            if ':' in p:
-                bracket_question = p.split(':', 1)[1].strip()
-                # Use this as RFR question if we didn't get it from before brackets
-                if not rfr_match.strip():
-                    rfr_question = bracket_question
-            break
-
-    # If we found RFR text before brackets, use that
-    if rfr_match.strip():
-        rfr_question = norm(rfr_match)
-
-    # Detect Test tag
-    for idx, p in enumerate(parts):
-        m = TEST_TAG_RX.match(p)
-        if m:
-            tag_value = m.group(1).lower()
+            # Extract Q key (e.g., "Q1")
+            q_match = re.match(r'^\s*(Q\d+)\s*:\s*(.+)$', p, re.IGNORECASE)
+            if q_match:
+                q_key = q_match.group(1).strip()
+                # Everything after the colon is the RFR question
+                rfr_question = q_match.group(2).strip()
+            continue
+        
+        # Check for Test tag
+        test_match = TEST_TAG_RX.match(p)
+        if test_match:
+            tag_value = test_match.group(1).lower()
             test_key = f"tests{tag_value}"
             test_idx = idx
-            break
-
-    # Detect Section: should be AFTER Q_key but BEFORE IMVP question and NOT a test tag
-    if q_key_idx >= 0 and q_key_idx + 1 < len(parts):
-        # Look forward from q_key position
-        for idx in range(q_key_idx + 1, len(parts)):
-            p = parts[idx]
-            # Skip if it's the IMVP question or test tag
-            if p == imvp or idx == test_idx:
-                continue
-            # Skip if it's a question
-            if p.endswith("?"):
-                continue
+            continue
+        
+        # Check if it's a question (likely IMVP)
+        if p.endswith("?"):
+            imvp = p
+            continue
+        
+        # If we've already found Q key and this isn't a question or test tag,
+        # it's likely the section
+        if q_key_idx >= 0 and not section and idx > q_key_idx:
             section = p
-            break
 
     return q_key, section, imvp, test_key, rfr_question
 
@@ -162,9 +138,29 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
         line = L[i]
 
         if RFR_RX.search(line):
-            q_key, section, imvp_q, test_tag, rfr_q = extract_meta_from_rfr_header(line)
-            responses = []
+            # Collect the full RFR text block (may span multiple lines)
+            rfr_block = [line]
             i += 1
+            
+            # Continue collecting lines until we hit "Modeling Team's Response"
+            while i < len(L) and not RESP_HDR_RX.search(L[i]) and not RFR_RX.search(L[i]):
+                rfr_block.append(L[i])
+                i += 1
+            
+            # Join the full RFR block
+            full_rfr_line = " ".join(rfr_block)
+            
+            # Now extract metadata from the full line
+            q_key, section, imvp_q, test_tag, _ = extract_meta_from_rfr_header(full_rfr_line)
+            
+            # Extract the RFR question: text after Q#: and before the next | or >
+            rfr_question = ""
+            # Find the Q#: part
+            q_match = re.search(r'<\s*Q\d+\s*:\s*([^<>|]+?)(?:\s*[|>]|\s*<)', full_rfr_line, re.IGNORECASE | re.DOTALL)
+            if q_match:
+                rfr_question = norm(q_match.group(1))
+            
+            responses = []
 
             # Collect responses
             while i < len(L) and not RFR_RX.search(L[i]):
@@ -193,15 +189,15 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
             responses = clean_greater_than(responses)
             full_resp = " ".join(responses).strip()
 
-            # Skip empty
+            # Skip if no IMVP question
             if not imvp_q:
                 continue
 
-            # Build row
+            # Build row - RFR question as key, response as value
             row = {
                 test_tag: imvp_q,
                 "section": section,
-                "rfr": {q_key: rfr_q if rfr_q else full_resp}
+                "rfr": {rfr_question: full_resp} if rfr_question else {}
             }
 
             rows.append(row)
@@ -228,13 +224,27 @@ if __name__ == "__main__":
     DOCX_PATH = "FinalRFRorignal.docx"
     OUT_PATH = "rfr_rows.json"
 
-    rows = parse_lines_after_request_items(read_docx_lines(DOCX_PATH))
+    lines = read_docx_lines(DOCX_PATH)
+    
+    # Debug: print first few lines to see structure
+    print("First 10 lines:")
+    for i, line in enumerate(lines[:10]):
+        print(f"{i}: {line[:100]}...")
+    
+    rows = parse_lines_after_request_items(lines)
+    
+    # Debug: print first row
+    if rows:
+        print("\nFirst row:")
+        print(json.dumps(rows[0], indent=2, ensure_ascii=False))
+    
     df = convert_csv(rows, DOCX_PATH)
 
-    print(df)
+    print(f"\nDataFrame shape: {df.shape}")
+    print(df.head())
 
     with open(OUT_PATH, "w", encoding="utf-8") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
-    print(f"Wrote {len(rows)} row(s) to {OUT_PATH}")
+    print(f"\nWrote {len(rows)} row(s) to {OUT_PATH}")
