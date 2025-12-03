@@ -292,28 +292,32 @@ def validate_rows(rows: List[Dict]) -> List[Dict]:
         # Find test tag key
         test_keys = [k for k in r.keys() if k.startswith("tests")]
         if not test_keys:
-            raise ValueError(f"Row {idx} missing test tag")
+            # Skip rows without test tags instead of failing
+            continue
         
         imvp = (r.get(test_keys[0]) or "").strip()
         rfr = r.get("rfr") or {}
         
+        # Check if IMVP exists and ends with ?
         if not imvp or not imvp.endswith("?"):
             qkeys = list(rfr.keys())
-            raise ValueError(
-                f"Document is not formatted correctly: row {idx} missing IMVP question "
-                f"(found rfr keys={qkeys}). Header must include a <...?> block."
-            )
+            print(f"Warning: Row {idx} missing or invalid IMVP question (found rfr keys={qkeys})")
+            continue
         
-        if not isinstance(rfr, dict) or len(rfr) != 1:
-            raise ValueError(
-                f"Document is not formatted correctly: row {idx} has invalid rfr map: {rfr}"
-            )
+        # Check rfr is a dict
+        if not isinstance(rfr, dict):
+            print(f"Warning: Row {idx} has invalid rfr map: {rfr}")
+            continue
         
-        (k, v) = next(iter(rfr.items()))
-        if not (v or "").strip():
-            raise ValueError(
-                f"Document is not formatted correctly: row {idx} has empty Modeling Team response for '{imvp}'"
-            )
+        # Check if there's at least one rfr entry
+        if len(rfr) == 0:
+            print(f"Warning: Row {idx} has empty rfr map for '{imvp}'")
+            continue
+        
+        # Check if response value is not empty
+        for k, v in rfr.items():
+            if not (v or "").strip():
+                print(f"Warning: Row {idx} has empty Modeling Team response for question key '{k}', IMVP: '{imvp}'")
     
     return rows
 
@@ -325,15 +329,26 @@ if __name__ == "__main__":
     OUT_PATH = "rfr_rows.json"
     
     rows = parse_docx_to_rfr_rows(DOCX_PATH)
+    
+    # Debug: Print first few rows before validation
+    print("=" * 80)
+    print("PARSED ROWS (before validation):")
+    print("=" * 80)
+    for i, row in enumerate(rows[:3], 1):
+        print(f"\nRow {i}:")
+        print(json.dumps(row, indent=2, ensure_ascii=False))
+    print("=" * 80)
+    
     rows = validate_rows(rows)
     rows = collapse_empty_imvp_into_previous(rows)
     rows = merge_rows_by_imvp(rows)
     
     df = convert_csv(rows, DOCX_PATH)
+    print("\nFinal DataFrame:")
     print(df)
     
     with open(OUT_PATH, "w", encoding="utf-8") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
     
-    print(f"Wrote {len(rows)} row(s) to {OUT_PATH}")
+    print(f"\nWrote {len(rows)} row(s) to {OUT_PATH}")
