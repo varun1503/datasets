@@ -67,6 +67,7 @@ def read_docx_lines(path: str) -> List[str]:
 def extract_meta_from_rfr_header(line: str):
     """
     Extracts: IMVP question, section, q_key, test_tag, and RFR question
+    Structure: [RFR1]- <Q1: RFR question> | <Section> | <IMVP question?> | <Test S1>
     """
     q_key = ""
     section = ""
@@ -108,13 +109,16 @@ def extract_meta_from_rfr_header(line: str):
             test_idx = idx
             break
 
-    # Detect Section: should be the part BEFORE the Q_key
-    if q_key_idx > 0:
-        # Look backwards from q_key position
-        for idx in range(q_key_idx - 1, -1, -1):
+    # Detect Section: should be AFTER Q_key but BEFORE IMVP question and NOT a test tag
+    if q_key_idx >= 0 and q_key_idx + 1 < len(parts):
+        # Look forward from q_key position
+        for idx in range(q_key_idx + 1, len(parts)):
             p = parts[idx]
             # Skip if it's the IMVP question or test tag
             if p == imvp or idx == test_idx:
+                continue
+            # Skip if it's a question
+            if p.endswith("?"):
                 continue
             section = p
             break
