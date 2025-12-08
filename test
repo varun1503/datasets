@@ -1,15 +1,54 @@
-Here is one combined description and one combined acceptance criteria for both tasks together:
+Here’s a clean one-pager for your sprint, fully based on the tasks visible in your screenshot.
+Short, crisp, and ready to paste in your sprint review or mail.
 
 
 ---
 
-📌 Combined Description
+Sprint One-Pager – MRMG Annotation Improvements
 
-You developed and enhanced the data processing workflow by creating a mobile data extraction and formatting pipeline that pulls information from RFR using IMTP questions and mapped test text, and automatically generates a structured Findings Excel. Additionally, you fixed a critical bug in the validation report module that caused failures when no findings were present, ensuring the report now handles zero-finding scenarios smoothly and maintains proper formatting.
+Sprint Goal
+
+Enhance the MRMG annotation pipeline by fixing existing issues, improving RFR-based data extraction, and validating newly deployed modules to ensure accurate findings generation and seamless workflow execution.
 
 
 ---
 
-✅ Combined Acceptance Criteria
+Key Deliverables
 
-The system should correctly extract and map all required data from RFR based on IMTP questions, format it into the Findings Excel template without errors, and handle repeated or missing tags gracefully. The workflow must generate a valid validation report even when findings are zero, with correct messaging and complete structure, without any crashes or formatting issues. The overall pipeline should run reliably, maintain consistent outputs, and meet all QA verification checks.
+1. Annotation Report Bug Fixes
+
+Resolved issues in the annotation report module that were causing incorrect or incomplete results in the finding section.
+
+Improved stability and correctness of the annotation generation pipeline.
+
+
+2. RFR Data Extraction Enhancements
+
+Developed new methods for RFR (Request For Review) data extraction based on IMTP questions and mapped finding details.
+
+Ensured extracted data is correctly formatted and aligned with downstream requirements (e.g., Finding Excel sheet generation).
+
+
+3. Deployed Code Validation
+
+Executed end-to-end testing on the newly deployed version of the annotation pipeline.
+
+Verified all edge cases, cross-checked functionality, and confirmed consistency with expected outputs.
+
+
+
+---
+
+Outcome
+
+Improved accuracy and reliability of the MRMG annotation workflow.
+
+Faster, structured, and more accurate RFR-to-finding mapping.
+
+Ensured smooth deployment with validated functionality, reducing manual intervention and error rate.
+
+
+
+---
+
+If you want, I can also make a management-friendly version, a bullet-only crisp version, or a more technical detailed version.
