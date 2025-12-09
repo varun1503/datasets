@@ -1,93 +1,56 @@
-I see the issue! The text mentions "Table 2" and "Table 5" but the script is renumbering the actual table captions (like "Table 1" to "Table 6"). We need to distinguish between:
-
-1. **References to tables in text** (like "shown in Table 2")
-2. **Actual table captions** (like "Table 1: History of Previous Model Versions")
-
-Here's the corrected code that only renumbers actual table/figure captions and leaves text references unchanged:
+I see! The caption "Table 4.1: Dependent variable definition" is coming AFTER the table, but we need it BEFORE the table. Here's the updated code that handles captions below tables and moves them to the top:
 
 ```python
 from docx import Document
 from docx.oxml import parse_xml
 import re
 
-def is_table_caption(para, next_element):
-    """
-    Check if a paragraph is actually a table caption
-    (must be immediately followed by a table)
-    """
-    text = para.text.strip()
-    
-    # Must contain "Table X" pattern
-    if not re.search(r'\bTable\s+[\d.]+', text, re.IGNORECASE):
-        return False
-    
-    # Must be followed by a table element
-    if next_element is not None and next_element.tag.endswith('tbl'):
-        return True
-    
-    return False
-
-def is_figure_caption(para, prev_element, next_element):
-    """
-    Check if a paragraph is actually a figure caption
-    (must be adjacent to an image)
-    """
-    text = para.text.strip()
-    
-    # Must contain "Figure X" pattern
-    if not re.search(r'\bFigure\s+[\d.]+', text, re.IGNORECASE):
-        return False
-    
-    # Check if current paragraph has image
-    has_image = False
-    for run in para.runs:
-        if run._element.xpath('.//pic:pic'):
-            has_image = True
-            break
-    
-    if has_image:
-        return True
-    
-    # Check if adjacent to image paragraph
-    if prev_element is not None and prev_element.tag.endswith('p'):
-        for p in para._part.document.paragraphs:
-            if p._element == prev_element:
-                for run in p.runs:
-                    if run._element.xpath('.//pic:pic'):
-                        return True
-                break
-    
-    if next_element is not None and next_element.tag.endswith('p'):
-        for p in para._part.document.paragraphs:
-            if p._element == next_element:
-                for run in p.runs:
-                    if run._element.xpath('.//pic:pic'):
-                        return True
-                break
-    
-    return False
-
 def renumber_captions(doc_path, output_path):
     """
-    Renumber only actual table and figure captions sequentially
-    Leave text references (like "shown in Table 2") unchanged
+    Renumber all table and figure captions sequentially
+    Move captions that are below tables to above them
+    Add captions where missing
     """
     doc = Document(doc_path)
     body = doc.element.body
+    elements = list(body)
     
-    # Step 1: Add missing captions for tables
-    for element in body:
+    # Step 1: Move table captions from below to above
+    for i, element in enumerate(elements):
+        if element.tag.endswith('tbl'):
+            # Check if next element is a caption
+            next_element = elements[i + 1] if i + 1 < len(elements) else None
+            
+            if next_element is not None and next_element.tag.endswith('p'):
+                # Find the paragraph
+                for para in doc.paragraphs:
+                    if para._element == next_element:
+                        text = para.text.strip()
+                        # Check if it's a table caption
+                        if re.search(r'\bTable\s+[\d.]+', text, re.IGNORECASE) and len(text) < 300:
+                            # Move caption from after table to before table
+                            next_element.getparent().remove(next_element)
+                            element.addprevious(next_element)
+                            print(f"✓ Moved caption to top: {text[:50]}...")
+                        break
+    
+    # Step 2: Add missing captions for tables
+    doc.save(output_path)
+    doc = Document(output_path)
+    body = doc.element.body
+    elements = list(body)
+    
+    for i, element in enumerate(elements):
         if element.tag.endswith('tbl'):
             # Check if previous element is a caption
-            prev_element = element.getprevious()
+            prev_element = elements[i - 1] if i > 0 else None
             has_caption = False
             
             if prev_element is not None and prev_element.tag.endswith('p'):
                 for para in doc.paragraphs:
                     if para._element == prev_element:
                         if re.search(r'\bTable\s+[\d.]+', para.text, re.IGNORECASE):
-                            # Verify it's actually a caption (short text, looks like title)
-                            if len(para.text.strip()) < 200:  # Captions are usually short
+                            if len(para.text.strip()) < 300:
                                 has_caption = True
                         break
             
@@ -96,8 +59,46 @@ def renumber_captions(doc_path, output_path):
                 new_para = parse_xml(r'<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:r><w:t>Table PLACEHOLDER {}</w:t></w:r></w:p>')
                 element.addprevious(new_para)
     
-    # Step 2: Add missing captions for figures
-    for element in body:
+    # Step 3: Move figure captions from below to above (if needed)
+    doc.save(output_path)
+    doc = Document(output_path)
+    body = doc.element.body
+    elements = list(body)
+    
+    for i, element in enumerate(elements):
+        if element.tag.endswith('p'):
+            # Check if paragraph contains an image
+            current_para = None
+            for para in doc.paragraphs:
+                if para._element == element:
+                    current_para = para
+                    break
+            
+            if current_para:
+                has_image = any(run._element.xpath('.//pic:pic') for run in current_para.runs)
+                
+                if has_image:
+                    # Check if next paragraph is a figure caption
+                    next_element = elements[i + 1] if i + 1 < len(elements) else None
+                    
+                    if next_element is not None and next_element.tag.endswith('p'):
+                        for para in doc.paragraphs:
+                            if para._element == next_element:
+                                text = para.text.strip()
+                                if re.search(r'\bFigure\s+[\d.]+', text, re.IGNORECASE) and len(text) < 300:
+                                    # Move caption from after image to before image
+                                    next_element.getparent().remove(next_element)
+                                    element.addprevious(next_element)
+                                    print(f"✓ Moved figure caption to top: {text[:50]}...")
+                                break
+    
+    # Step 4: Add missing captions for figures
+    doc.save(output_path)
+    doc = Document(output_path)
+    body = doc.element.body
+    elements = list(body)
+    
+    for i, element in enumerate(elements):
         if element.tag.endswith('p'):
             current_para = None
             for para in doc.paragraphs:
@@ -106,40 +107,18 @@ def renumber_captions(doc_path, output_path):
                     break
             
             if current_para:
-                # Check if paragraph contains an image
-                has_image = False
-                for run in current_para.runs:
-                    if run._element.xpath('.//pic:pic'):
-                        has_image = True
-                        break
+                has_image = any(run._element.xpath('.//pic:pic') for run in current_para.runs)
                 
                 if has_image:
-                    # Check for existing caption
-                    prev_element = element.getprevious()
-                    next_element = element.getnext()
-                    
+                    # Check for existing caption (should be before now)
+                    prev_element = elements[i - 1] if i > 0 else None
                     has_caption = False
                     
-                    # Check current paragraph
-                    if re.search(r'\bFigure\s+[\d.]+', current_para.text, re.IGNORECASE):
-                        if len(current_para.text.strip()) < 200:
-                            has_caption = True
-                    
-                    # Check previous paragraph
-                    if not has_caption and prev_element is not None and prev_element.tag.endswith('p'):
+                    if prev_element is not None and prev_element.tag.endswith('p'):
                         for para in doc.paragraphs:
                             if para._element == prev_element:
                                 if re.search(r'\bFigure\s+[\d.]+', para.text, re.IGNORECASE):
-                                    if len(para.text.strip()) < 200:
-                                        has_caption = True
-                                break
-                    
-                    # Check next paragraph
-                    if not has_caption and next_element is not None and next_element.tag.endswith('p'):
-                        for para in doc.paragraphs:
-                            if para._element == next_element:
-                                if re.search(r'\bFigure\s+[\d.]+', para.text, re.IGNORECASE):
-                                    if len(para.text.strip()) < 200:
+                                    if len(para.text.strip()) < 300:
                                         has_caption = True
                                 break
                     
@@ -147,10 +126,8 @@ def renumber_captions(doc_path, output_path):
                         new_para = parse_xml(r'<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:r><w:t>Figure PLACEHOLDER {}</w:t></w:r></w:p>')
                         element.addprevious(new_para)
     
-    # Save intermediate
+    # Step 5: Renumber all captions
     doc.save(output_path)
-    
-    # Step 3: Renumber only actual captions (not text references)
     doc = Document(output_path)
     body = doc.element.body
     elements = list(body)
@@ -160,7 +137,6 @@ def renumber_captions(doc_path, output_path):
     
     for i, element in enumerate(elements):
         if element.tag.endswith('p'):
-            # Find the paragraph
             current_para = None
             for para in doc.paragraphs:
                 if para._element == element:
@@ -170,59 +146,50 @@ def renumber_captions(doc_path, output_path):
             if current_para:
                 text = current_para.text.strip()
                 
-                # Check if this is an actual table caption
+                # Check if this is a table caption (followed by table)
                 next_element = elements[i + 1] if i + 1 < len(elements) else None
                 
                 if re.search(r'\bTable\s+(?:PLACEHOLDER|[\d.]+)', text, re.IGNORECASE):
-                    # Only renumber if it's followed by a table (actual caption)
                     if next_element is not None and next_element.tag.endswith('tbl'):
-                        match = re.search(r'\bTable\s+(?:PLACEHOLDER|[\d.]+)\s*(.*)', text, re.IGNORECASE)
-                        description = match.group(1) if match else '{}'
+                        # Extract description
+                        match = re.search(r'\bTable\s+(?:PLACEHOLDER|[\d.]+):?\s*(.*)', text, re.IGNORECASE)
+                        description = match.group(1) if match else ''
+                        
                         if not description.strip():
                             description = '{}'
-                        current_para.text = f'Table {table_num} {description}'
+                        else:
+                            description = ': ' + description if description else '{}'
+                        
+                        current_para.text = f'Table {table_num}{description}'
                         table_num += 1
                 
-                # Check if this is an actual figure caption
+                # Check if this is a figure caption (followed by image)
                 if re.search(r'\bFigure\s+(?:PLACEHOLDER|[\d.]+)', text, re.IGNORECASE):
-                    # Check if it's adjacent to an image
-                    has_image = any(run._element.xpath('.//pic:pic') for run in current_para.runs)
-                    
-                    prev_element = elements[i - 1] if i > 0 else None
-                    next_element = elements[i + 1] if i + 1 < len(elements) else None
-                    
-                    adjacent_to_image = has_image
-                    
-                    # Check previous paragraph for image
-                    if not adjacent_to_image and prev_element is not None and prev_element.tag.endswith('p'):
-                        for para in doc.paragraphs:
-                            if para._element == prev_element:
-                                if any(run._element.xpath('.//pic:pic') for run in para.runs):
-                                    adjacent_to_image = True
-                                break
-                    
-                    # Check next paragraph for image
-                    if not adjacent_to_image and next_element is not None and next_element.tag.endswith('p'):
+                    if next_element is not None and next_element.tag.endswith('p'):
+                        # Check if next paragraph has image
                         for para in doc.paragraphs:
                             if para._element == next_element:
-                                if any(run._element.xpath('.//pic:pic') for run in para.runs):
-                                    adjacent_to_image = True
+                                has_image = any(run._element.xpath('.//pic:pic') for run in para.runs)
+                                if has_image:
+                                    # Extract description
+                                    match = re.search(r'\bFigure\s+(?:PLACEHOLDER|[\d.]+):?\s*(.*)', text, re.IGNORECASE)
+                                    description = match.group(1) if match else ''
+                                    
+                                    if not description.strip():
+                                        description = '{}'
+                                    else:
+                                        description = ': ' + description if description else '{}'
+                                    
+                                    current_para.text = f'Figure {figure_num}{description}'
+                                    figure_num += 1
                                 break
-                    
-                    if adjacent_to_image:
-                        match = re.search(r'\bFigure\s+(?:PLACEHOLDER|[\d.]+)\s*(.*)', text, re.IGNORECASE)
-                        description = match.group(1) if match else '{}'
-                        if not description.strip():
-                            description = '{}'
-                        current_para.text = f'Figure {figure_num} {description}'
-                        figure_num += 1
     
     doc.save(output_path)
     
-    print(f"✓ Document processed successfully!")
-    print(f"✓ Table captions renumbered: {table_num - 1}")
-    print(f"✓ Figure captions renumbered: {figure_num - 1}")
-    print(f"✓ Text references (like 'shown in Table 2') left unchanged")
+    print(f"\n✓ Document processed successfully!")
+    print(f"✓ Table captions: {table_num - 1}")
+    print(f"✓ Figure captions: {figure_num - 1}")
+    print(f"✓ All captions moved to top and renumbered")
     print(f"✓ Saved to: {output_path}")
 
 # Usage
@@ -233,11 +200,17 @@ if __name__ == "__main__":
     renumber_captions(input_file, output_file)
 ```
 
-**Key changes:**
+**Key improvements:**
 
-1. ✅ **Only renumbers actual captions** - Checks if "Table X" is immediately followed by a table element
-2. ✅ **Leaves text references unchanged** - "shown in Table 2" stays as "Table 2"
-3. ✅ **Validates captions** - Must be adjacent to the table/figure it describes
-4. ✅ **Length check** - Captions are typically short (<200 chars), body text is longer
+1. ✅ **Moves captions from bottom to top** - Detects "Table 4.1" below a table and moves it above
+2. ✅ **Preserves descriptions** - Keeps ": Dependent variable definition" part
+3. ✅ **Sequential renumbering** - Changes "Table 4.1" to "Table 1", "Table 6" to "Table 2", etc.
+4. ✅ **Handles both formats** - Works whether caption is above or below initially
+5. ✅ **All captions on top** - Final result has all captions positioned above tables/figures
 
-Now "Table 1: History of Previous Model Versions" will be renumbered, but "shown in Table 2" in the paragraph text will remain unchanged!
+The script now:
+- First moves any captions that are below tables to above them
+- Then adds missing captions
+- Finally renumbers everything sequentially
+
+So "Table 4.1: Dependent variable definition" will become "Table 1: Dependent variable definition" and be placed on top!
