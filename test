@@ -4,116 +4,41 @@ import re
 def renumber_captions(doc_path, output_path):
     """
     Renumber all table and figure captions sequentially
-    Add captions to tables/figures that don't have them
     """
     doc = Document(doc_path)
     
-    table_counter = 1
-    figure_counter = 1
+    # Update all existing table captions
+    table_num = 1
+    for para in doc.paragraphs:
+        if re.search(r'\bTable\s+[\d.]+', para.text, re.IGNORECASE):
+            para.text = re.sub(
+                r'\bTable\s+[\d.]+',
+                f'Table {table_num}',
+                para.text,
+                flags=re.IGNORECASE
+            )
+            table_num += 1
     
-    # Process all paragraphs and tables
-    for element in doc.element.body:
-        # Check if it's a table
-        if element.tag.endswith('tbl'):
-            table = None
-            # Find the corresponding table object
-            for t in doc.tables:
-                if t._element == element:
-                    table = t
-                    break
-            
-            if table:
-                # Check if previous paragraph is a caption
-                table_index = doc.tables.index(table)
-                para_index = None
-                
-                # Find paragraph index before this table
-                for i, para in enumerate(doc.paragraphs):
-                    if para._element.getnext() == element:
-                        para_index = i
-                        break
-                
-                # Check if there's a caption
-                has_caption = False
-                if para_index is not None and para_index >= 0:
-                    prev_para = doc.paragraphs[para_index]
-                    text = prev_para.text.strip()
-                    
-                    # Check if it's a table caption
-                    if re.match(r'Table\s+[\d.]+', text, re.IGNORECASE):
-                        # Update existing caption
-                        new_caption = re.sub(
-                            r'Table\s+[\d.]+',
-                            f'Table {table_counter}',
-                            text,
-                            flags=re.IGNORECASE
-                        )
-                        prev_para.text = new_caption
-                        has_caption = True
-                        table_counter += 1
-                
-                # Add caption if missing
-                if not has_caption:
-                    # Insert new paragraph before table
-                    new_para = doc.add_paragraph(f'Table {table_counter} {{}}')
-                    # Move it before the table
-                    new_para._element.getparent().remove(new_para._element)
-                    element.addprevious(new_para._element)
-                    table_counter += 1
-        
-        # Check if it's a paragraph (for figures)
-        elif element.tag.endswith('p'):
-            para = None
-            for p in doc.paragraphs:
-                if p._element == element:
-                    para = p
-                    break
-            
-            if para:
-                text = para.text.strip()
-                
-                # Check for figure captions
-                if re.match(r'Figure\s+[\d.]+', text, re.IGNORECASE):
-                    new_caption = re.sub(
-                        r'Figure\s+[\d.]+',
-                        f'Figure {figure_counter}',
-                        text,
-                        flags=re.IGNORECASE
-                    )
-                    para.text = new_caption
-                    figure_counter += 1
-                
-                # Check if paragraph contains an image
-                elif any(run._element.xpath('.//pic:pic') for run in para.runs):
-                    # Check if next paragraph is already a caption
-                    para_index = doc.paragraphs.index(para)
-                    has_caption = False
-                    
-                    if para_index + 1 < len(doc.paragraphs):
-                        next_para = doc.paragraphs[para_index + 1]
-                        if re.match(r'Figure\s+[\d.]+', next_para.text.strip(), re.IGNORECASE):
-                            has_caption = True
-                    
-                    # Check if current paragraph has caption text
-                    if re.match(r'Figure\s+[\d.]+', text, re.IGNORECASE):
-                        has_caption = True
-                    
-                    # Add caption if missing
-                    if not has_caption:
-                        new_para = doc.add_paragraph(f'Figure {figure_counter} {{}}')
-                        new_para._element.getparent().remove(new_para._element)
-                        element.addnext(new_para._element)
-                        figure_counter += 1
+    # Update all existing figure captions
+    figure_num = 1
+    for para in doc.paragraphs:
+        if re.search(r'\bFigure\s+[\d.]+', para.text, re.IGNORECASE):
+            para.text = re.sub(
+                r'\bFigure\s+[\d.]+',
+                f'Figure {figure_num}',
+                para.text,
+                flags=re.IGNORECASE
+            )
+            figure_num += 1
     
-    # Save the modified document
     doc.save(output_path)
-    print(f"Document processed successfully!")
-    print(f"Total tables captioned: {table_counter - 1}")
-    print(f"Total figures captioned: {figure_counter - 1}")
+    print(f"✓ Captions renumbered successfully!")
+    print(f"✓ Tables: {table_num - 1}")
+    print(f"✓ Figures: {figure_num - 1}")
+    print(f"✓ Saved to: {output_path}")
 
 # Usage
-if __name__ == "__main__":
-    input_file = "your_document.docx"
-    output_file = "renumbered_document.docx"
-    
-    renumber_captions(input_file, output_file)
+input_file = "buisness.docx"
+output_file = "buisness_renumbered.docx"
+
+renumber_captions(input_file, output_file)
