@@ -1,245 +1,31 @@
-# travel_agents.py
-import asyncio
-import random
-from datetime import date, datetime, timedelta
+def run(
+    self,
+    messages: str | ChatMessage | list[str] | list[ChatMessage] | None = None,
+    *,
+    thread: AgentThread | None = None,
+    **kwargs: Any,
+) -> AgentRunResponse:
 
-from agent_framework import Agent, tool, AgentFlow, Sequential, Parallel
+    greeting_prompt = self.greetings_prompt(messages)
 
+    prompt_template = ChatPromptTemplate.from_messages([
+        ("human", greeting_prompt),
+    ])
 
-# ============================================================
-# 1. INTENT / SLOT EXTRACTION AGENT
-# ============================================================
-class IntentExtractor(Agent):
+    # 🔑 Convert template → ChatPromptValue
+    prompt_value = prompt_template.format_prompt()
 
-    @tool
-    def extract_intent(self, query: str) -> dict:
-        """
-        Extract destination, dates, budget from user query.
-        """
-        t = query.lower()
-        destination = None
-        for city in ["goa", "mumbai", "delhi", "bangalore", "chennai"]:
-            if city in t:
-                destination = city.capitalize()
+    llm = model("3")
 
-        # simple date guess
-        if "20" in t and "25" in t:
-            year = datetime.now().year
-            start = date(year, 12, 20)
-            end = date(year, 12, 25)
-        else:
-            today = date.today()
-            start = today + timedelta(days=7)
-            end = start + timedelta(days=3)
+    response_message = llm.invoke(prompt_value)
 
-        if "tight budget" in t or "low budget" in t:
-            budget = "low"
-        elif "luxury" in t or "high budget" in t:
-            budget = "high"
-        else:
-            budget = "medium"
-
-        return {
-            "destination": destination,
-            "start_date": str(start),
-            "end_date": str(end),
-            "budget": budget
-        }
-
-
-# ============================================================
-# 2. USER PROFILE AGENT
-# ============================================================
-class UserProfileAgent(Agent):
-    mock_profiles = {
-        "user_1": {
-            "name": "Varun",
-            "home_city": "Mumbai",
-            "preferred_airlines": ["Indigo"],
-            "default_budget": "medium"
-        }
-    }
-
-    @tool
-    def get_profile(self, user_id: str) -> dict:
-        """
-        Return stored preference profile.
-        """
-        return self.mock_profiles.get(user_id, {"home_city": "Mumbai"})
-
-
-# ============================================================
-# 3. FLIGHT AGENT
-# ============================================================
-class FlightAgent(Agent):
-    
-    @tool
-    def search_flights(self, origin: str, destination: str, start_date: str, budget: str) -> list:
-        """
-        Returns mock flight options.
-        """
-        base = {"low": 2000, "medium": 5000, "high": 12000}.get(budget, 5000)
-        results = []
-        for i in range(3):
-            results.append({
-                "id": f"FL{i+1}",
-                "from": origin,
-                "to": destination,
-                "depart_time": f"{8 + i*3}:00",
-                "price": base + random.randint(-300, 300),
-                "airline": random.choice(["Indigo", "Vistara", "Air India"])
-            })
-        return results
-
-
-# ============================================================
-# 4. HOTEL AGENT
-# ============================================================
-class HotelAgent(Agent):
-
-    @tool
-    def search_hotels(self, destination: str, start_date: str, end_date: str, budget: str) -> list:
-        """
-        Returns mock hotels.
-        """
-        base = {"low": 1500, "medium": 3500, "high": 8000}.get(budget, 3500)
-        return [
-            {
-                "id": f"HOT{i+1}",
-                "name": f"{destination} Hotel {i+1}",
-                "rating": round(3.0 + i * 0.4 + random.random(), 1),
-                "price_per_night": base + random.randint(-200, 250)
-            }
-            for i in range(3)
-        ]
-
-
-# ============================================================
-# 5. CAB AGENT
-# ============================================================
-class CabAgent(Agent):
-
-    @tool
-    def get_cabs(self, destination: str) -> list:
-        """
-        Returns simple cab options.
-        """
-        return [
-            {"name": "UberGo", "price": 300, "eta": 12},
-            {"name": "OlaMini", "price": 280, "eta": 14}
-        ]
-
-
-# ============================================================
-# 6. BUDGET + CONSISTENCY AGENT
-# ============================================================
-class BudgetAgent(Agent):
-
-    @tool
-    def validate(self, flights: list, hotels: list, cabs: list, budget: str) -> dict:
-        """
-        Check if total trip cost fits budget.
-        """
-        total = flights[0]['price'] + hotels[0]['price_per_night'] * 3 + cabs[0]['price']
-        caps = {"low": 12000, "medium": 30000, "high": 80000}
-
-        note = ""
-        if total > caps.get(budget, 30000):
-            note = f"⚠ Total {total} exceeds {budget} budget cap {caps[budget]}."
-
-        return {
-            "total_cost": total,
-            "note": note
-        }
-
-
-# ============================================================
-# 7. ITINERARY AGENT (final formatter)
-# ============================================================
-class ItineraryAgent(Agent):
-
-    @tool
-    def build_itinerary(self, flights: list, hotels: list, cabs: list, total_cost: int, notes: str) -> dict:
-        return {
-            "flights": flights,
-            "hotels": hotels,
-            "cabs": cabs,
-            "total_cost": total_cost,
-            "notes": notes
-        }
-
-
-# ============================================================
-# 8. ORCHESTRATOR AGENT (brain)
-# ============================================================
-class TravelOrchestrator(Agent):
-
-    intent = IntentExtractor()
-    profile = UserProfileAgent()
-    flights = FlightAgent()
-    hotels = HotelAgent()
-    cabs = CabAgent()
-    budget = BudgetAgent()
-    itinerary = ItineraryAgent()
-
-    async def plan_trip(self, user_id: str, query: str):
-        """
-        Full pipeline powered by Microsoft Agent Framework.
-        Uses Sequential + Parallel agentflow.
-        """
-
-        # Step 1 — Intent extraction
-        slots = await self.intent.extract_intent(query=query)
-
-        # Step 2 — User profile
-        profile = await self.profile.get_profile(user_id=user_id)
-
-        origin = profile.get("home_city", "Mumbai")
-        dest = slots["destination"]
-        start = slots["start_date"]
-        end = slots["end_date"]
-        budget_tier = slots["budget"] or profile.get("default_budget", "medium")
-
-        # Step 3 — Parallel flight + hotel + cab search
-        parallel_results = await AgentFlow(
-            Parallel(
-                self.flights.search_flights(origin=origin, destination=dest, start_date=start, budget=budget_tier),
-                self.hotels.search_hotels(destination=dest, start_date=start, end_date=end, budget=budget_tier),
-                self.cabs.get_cabs(destination=dest)
-            )
-        ).run()
-
-        flights, hotels, cabs = parallel_results
-
-        # Step 4 — Budget agent
-        validation = await self.budget.validate(flights=flights, hotels=hotels, cabs=cabs, budget=budget_tier)
-
-        # Step 5 — Itinerary agent
-        final_itin = await self.itinerary.build_itinerary(
-            flights=flights,
-            hotels=hotels,
-            cabs=cabs,
-            total_cost=validation["total_cost"],
-            notes=validation["note"]
+    if thread is not None:
+        self._notify_thread_of_new_messages(
+            thread,
+            messages,
+            response_message.content
         )
 
-        return final_itin
-
-
-# ============================================================
-# MAIN (TEST)
-# ============================================================
-async def main():
-    orchestrator = TravelOrchestrator()
-
-    result = await orchestrator.plan_trip(
-        user_id="user_1",
-        query="Plan a trip to Goa from 20–25 Dec with a tight budget."
+    return AgentRunResponse(
+        messages=[response_message.content]
     )
-
-    print("\n=== FINAL ITINERARY ===")
-    print(result)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
