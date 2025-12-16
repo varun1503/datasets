@@ -1,68 +1,73 @@
 # =========================================================
-# JUPYTER NOTEBOOK – FINAL CORRECT BaseChatClient IMPLEMENTATION
+# JUPYTER NOTEBOOK – TIME BASED GREETING AGENT (FINAL)
 # =========================================================
 
 import asyncio
+from datetime import datetime
 from typing import Sequence, Any, MutableMapping, Callable, AsyncIterable
 
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.prompt_values import ChatPromptValue
+from safechain.lcel import model
 
-from agent_framework import ChatAgent
-from agent_framework.clients import BaseChatClient
-from agent_framework.messages import ChatMessage, Role, TextContent
-from agent_framework.responses import ChatResponse
-from agent_framework.types import ToolProtocol
+from agent_framework import ChatAgent, BaseChatClient
+from agent_framework import ChatMessage, Role, TextContent
+from agent_framework import ChatResponse, ToolProtocol
 
 
 # =========================================================
-# SAFE TEXT EXTRACTION (VERSION AGNOSTIC)
+# SAFE TEXT EXTRACTION (YOUR FRAMEWORK VERSION)
 # =========================================================
 def extract_text_from_message(m: ChatMessage) -> str:
-    if hasattr(m, "content") and m.content:
-        return extract_text_from_content(m.content)
     if hasattr(m, "contents") and m.contents:
-        return extract_text_from_content(m.contents[0])
-    return ""
-
-def extract_text_from_content(c) -> str:
-    if hasattr(c, "value"):
-        return c.value
-    if hasattr(c, "text"):
-        return c.text
-    if hasattr(c, "data"):
-        return c.data
+        c = m.contents[0]
+        if hasattr(c, "text"):
+            return c.text
+        if hasattr(c, "value"):
+            return c.value
+        if hasattr(c, "data"):
+            return c.data
     return ""
 
 
 # =========================================================
-# ORG STANDARD MODEL FACTORY
+# TOOL: TIME OF DAY
 # =========================================================
-def model(version: str):
-    return MyCustomLLM(version)
+class TimeOfDayTool(ToolProtocol):
+    name = "get_time_of_day"
+    description = "Returns current time of day (morning, afternoon, evening, night)"
 
-
-# =========================================================
-# CUSTOM LLM (ChatPromptValue ONLY)
-# =========================================================
-class MyCustomLLM:
-    def __init__(self, version: str):
-        self.version = version
-
-    def invoke(self, prompt_value: ChatPromptValue) -> ChatMessage:
-        print(f"\n🔵 LLM model({self.version}) INVOKED\n")
-        print(prompt_value.to_string())
-
-        return ChatMessage(
-            role=Role.ASSISTANT,
-            contents=[
-                TextContent(text="Hello 👋 This response came from model('3')")
-            ],
-        )
+    def __call__(self) -> str:
+        hour = datetime.now().hour
+        if 5 <= hour < 12:
+            return "morning"
+        elif 12 <= hour < 17:
+            return "afternoon"
+        elif 17 <= hour < 21:
+            return "evening"
+        else:
+            return "night"
 
 
 # =========================================================
-# OFFICIAL BaseChatClient IMPLEMENTATION (FIX)
+# PROMPT
+# =========================================================
+def greetings_prompt(user_input: str, time_of_day: str) -> str:
+    return f"""
+You are a friendly, polite greeting assistant.
+
+Time of day: {time_of_day}
+
+Greet the user appropriately based on the time of day.
+
+User input:
+{user_input}
+
+Keep the response short and friendly.
+"""
+
+
+# =========================================================
+# CHAT CLIENT (EXTENDS YOUR WORKING CODE)
 # =========================================================
 class MyChatClient(BaseChatClient):
 
@@ -76,19 +81,37 @@ class MyChatClient(BaseChatClient):
         **kwargs: Any,
     ) -> ChatResponse:
 
-        # 1️⃣ Convert messages → prompt
+        # 1️⃣ Call tool (explicit, framework-safe)
+        time_tool = TimeOfDayTool()
+        time_of_day = time_tool()
+
+        # 2️⃣ Build prompt using tool output
         prompt_template = ChatPromptTemplate.from_messages(
-            [(m.role, extract_text_from_message(m)) for m in messages]
+            [
+                (
+                    m.role.value,
+                    greetings_prompt(
+                        extract_text_from_message(m),
+                        time_of_day=time_of_day
+                    )
+                )
+                for m in messages
+            ]
         )
 
         prompt_value = prompt_template.format_prompt()
 
-        # 2️⃣ ORG STANDARD MODEL CALL
+        # 3️⃣ SafeChain model call
         llm = model("3")
-        assistant_message = llm.invoke(prompt_value)
+        llm_response = llm.invoke(prompt_value)
 
-        # 3️⃣ MUST wrap in ChatResponse
-        return ChatResponse(message=assistant_message)
+        # 4️⃣ Wrap response (YOUR WORKING PATTERN)
+        response_message = ChatMessage(
+            role=Role.ASSISTANT,
+            contents=[TextContent(text=llm_response.content)],
+        )
+
+        return ChatResponse(messages=response_message)
 
     async def _inner_get_streaming_response(
         self,
@@ -99,7 +122,6 @@ class MyChatClient(BaseChatClient):
         chat_options: MutableMapping[str, Any] | None = None,
         **kwargs: Any,
     ) -> AsyncIterable[ChatResponse]:
-        # Streaming not supported yet
         raise NotImplementedError("Streaming not implemented")
 
 
@@ -122,17 +144,7 @@ async def main():
     agent = GreetingAgent()
     response = await agent.run("Hi")
 
-    print("\n🟢 FINAL RESPONSE TEXT:\n")
-    print(extract_text_from_message(response.messages[0]))
-
-await main()# =========================================================
-# RUN
-# =========================================================
-async def main():
-    agent = GreetingAgent()
-    response = await agent.run("Hi")
-
-    print("\n🟢 FINAL RESPONSE TEXT:\n")
-    print(extract_text_from_message(response.messages[0]))
+    print("\n🟢 FINAL RESPONSE:\n")
+    print(response.messages.contents[0].text)
 
 await main()
