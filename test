@@ -1,25 +1,36 @@
 # =========================================================
-# JUPYTER NOTEBOOK – VERSION-SAFE FINAL CODE
+# JUPYTER NOTEBOOK – OFFICIAL-STYLE CHATCLIENT IMPLEMENTATION
 # =========================================================
 
 import asyncio
-from typing import List
+from typing import List, Any, MutableMapping, Sequence, Callable
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.prompt_values import ChatPromptValue
 
 from agent_framework import ChatAgent
+from agent_framework.clients import BaseChatClient
 from agent_framework.messages import ChatMessage, Role, TextContent
+from agent_framework.types import ToolProtocol
 
 
 # =========================================================
-# HELPER (VERSION SAFE)
+# SAFE TEXT EXTRACTION (VERSION AGNOSTIC)
 # =========================================================
-def get_text(m: ChatMessage) -> str:
+def extract_text_from_message(m: ChatMessage) -> str:
     if hasattr(m, "content") and m.content:
-        return m.content.value
+        return extract_text_from_content(m.content)
     if hasattr(m, "contents") and m.contents:
-        return m.contents[0].value
+        return extract_text_from_content(m.contents[0])
+    return ""
+
+def extract_text_from_content(c) -> str:
+    if hasattr(c, "value"):
+        return c.value
+    if hasattr(c, "text"):
+        return c.text
+    if hasattr(c, "data"):
+        return c.data
     return ""
 
 
@@ -31,57 +42,58 @@ def model(version: str):
 
 
 # =========================================================
-# CUSTOM LLM (ChatPromptValue ONLY)
+# YOUR CUSTOM LLM (ChatPromptValue ONLY)
 # =========================================================
 class MyCustomLLM:
     def __init__(self, version: str):
         self.version = version
 
     def invoke(self, prompt_value: ChatPromptValue) -> ChatMessage:
-        print(f"\n🔵 LLM model({self.version}) INVOKED WITH PROMPT:\n")
+        print(f"\n🔵 LLM model({self.version}) INVOKED\n")
         print(prompt_value.to_string())
 
-        # IMPORTANT: use contents (list)
         return ChatMessage(
             role=Role.ASSISTANT,
             contents=[
-                TextContent(
-                    value="Hello 👋 This response came from model('3')"
-                )
+                TextContent(text="Hello 👋 This response came from model('3')")
             ],
         )
 
 
 # =========================================================
-# CUSTOM CHAT CLIENT (FRAMEWORK COMPATIBLE)
+# OFFICIAL-STYLE CUSTOM CHAT CLIENT
 # =========================================================
-class MyChatClient:
+class MyChatClient(BaseChatClient):
+    """
+    Matches agent-framework's official ChatClient design.
+    """
+
     async def get_response(
         self,
-        messages: List[ChatMessage],
+        messages: Sequence[ChatMessage],
         *,
-        tools=None,
-        **kwargs,
+        tools: Sequence[ToolProtocol] | None = None,
+        tool_choice: Callable[..., Any] | None = None,
+        chat_options: MutableMapping[str, Any] | None = None,
+        **kwargs: Any,
     ) -> ChatMessage:
-        return await self.invoke(messages, tools=tools, **kwargs)
+        """
+        This method is REQUIRED by ChatAgent.
+        """
 
-    async def invoke(
-        self,
-        messages: List[ChatMessage],
-        *,
-        tools=None,
-        **kwargs,
-    ) -> ChatMessage:
-
-        # 🔑 SAFE extraction for YOUR framework version
+        # 1️⃣ Convert messages → ChatPromptTemplate
         prompt_template = ChatPromptTemplate.from_messages(
-            [(m.role, get_text(m)) for m in messages]
+            [(m.role, extract_text_from_message(m)) for m in messages]
         )
 
+        # 2️⃣ Convert → ChatPromptValue
         prompt_value = prompt_template.format_prompt()
 
+        # 3️⃣ ORG STANDARD LLM CALL
         llm = model("3")
-        return llm.invoke(prompt_value)
+        response_message = llm.invoke(prompt_value)
+
+        return response_message
 
 
 # =========================================================
@@ -91,7 +103,7 @@ class GreetingAgent(ChatAgent):
     def __init__(self):
         super().__init__(
             name="GreetingAgent",
-            chat_client=MyChatClient(),
+            chat_client=MyChatClient(),  # ✅ OFFICIAL STYLE
             instructions="You are a friendly greeting assistant.",
         )
 
@@ -104,8 +116,6 @@ async def main():
     response = await agent.run("Hi")
 
     print("\n🟢 FINAL RESPONSE TEXT:\n")
-
-    # SAFE printing
-    print(get_text(response.messages[0]))
+    print(extract_text_from_message(response.messages[0]))
 
 await main()
