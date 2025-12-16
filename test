@@ -1,5 +1,5 @@
 # =========================================================
-# JUPYTER NOTEBOOK – FULL WORKING CHATAGENT + CUSTOM LLM
+# JUPYTER NOTEBOOK – FULL WORKING EXAMPLE (FINAL)
 # =========================================================
 
 import asyncio
@@ -16,27 +16,23 @@ from agent_framework.messages import ChatMessage, Role
 # ORG STANDARD MODEL FACTORY
 # =========================================================
 def model(version: str):
-    """
-    Your org-standard model factory.
-    Must return an object with invoke(ChatPromptValue).
-    """
     return MyCustomLLM(version)
 
 
 # =========================================================
-# YOUR CUSTOM LLM (ChatPromptValue ONLY)
+# CUSTOM LLM (ACCEPTS ChatPromptValue ONLY)
 # =========================================================
 class MyCustomLLM:
     def __init__(self, version: str):
         self.version = version
 
     def invoke(self, prompt_value: ChatPromptValue) -> ChatMessage:
-        print(f"\n🔵 LLM model({self.version}) INVOKED")
+        print(f"\n🔵 LLM model({self.version}) INVOKED WITH PROMPT:\n")
         print(prompt_value.to_string())
 
         return ChatMessage(
             role=Role.ASSISTANT,
-            content="Hello 👋 (response from model('3'))"
+            content="Hello 👋 This response came from model('3')"
         )
 
 
@@ -45,12 +41,10 @@ class MyCustomLLM:
 # =========================================================
 class MyChatClient:
     """
-    Fully compatible with agent-framework ChatAgent.
-    REQUIRED methods:
-      - get_response()
+    Required by ChatAgent:
+    - get_response()
     """
 
-    # 🔑 REQUIRED BY agent-framework
     async def get_response(
         self,
         messages: List[ChatMessage],
@@ -60,7 +54,6 @@ class MyChatClient:
     ) -> ChatMessage:
         return await self.invoke(messages, tools=tools, **kwargs)
 
-    # 🔑 YOUR CUSTOM INVOCATION LOGIC
     async def invoke(
         self,
         messages: List[ChatMessage],
@@ -77,10 +70,8 @@ class MyChatClient:
         # Convert → ChatPromptValue
         prompt_value = prompt_template.format_prompt()
 
-        # EXACT ORG STANDARD LINE
+        # ORG STANDARD MODEL CALL
         llm = model("3")
-
-        # EXACT CALL YOU WANT
         response_message = llm.invoke(prompt_value)
 
         return response_message
@@ -93,7 +84,7 @@ class GreetingAgent(ChatAgent):
     def __init__(self):
         super().__init__(
             name="GreetingAgent",
-            chat_client=MyChatClient(),   # 👈 REQUIRED
+            chat_client=MyChatClient(),
             instructions="You are a friendly greeting assistant.",
         )
 
@@ -104,7 +95,9 @@ class GreetingAgent(ChatAgent):
 async def main():
     agent = GreetingAgent()
     response = await agent.run("Hi")
-    print("\n🟢 FINAL RESPONSE:")
-    print(response)
+
+    print("\n🟢 FINAL RESPONSE TEXT:\n")
+    # ✅ CORRECT WAY TO PRINT OUTPUT
+    print(response.messages[0].content.value)
 
 await main()
