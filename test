@@ -1,5 +1,5 @@
 # =========================================================
-# JUPYTER NOTEBOOK – TIME BASED GREETING AGENT (FINAL)
+# JUPYTER NOTEBOOK – GREETING AGENT WITH MULTIPLE TOOLS
 # =========================================================
 
 import asyncio
@@ -30,11 +30,11 @@ def extract_text_from_message(m: ChatMessage) -> str:
 
 
 # =========================================================
-# TOOL: TIME OF DAY
+# TOOL 1: TIME OF DAY
 # =========================================================
 class TimeOfDayTool(ToolProtocol):
     name = "get_time_of_day"
-    description = "Returns current time of day (morning, afternoon, evening, night)"
+    description = "Returns current time of day: morning, afternoon, evening, night"
 
     def __call__(self) -> str:
         hour = datetime.now().hour
@@ -49,15 +49,28 @@ class TimeOfDayTool(ToolProtocol):
 
 
 # =========================================================
+# TOOL 2: WEATHER
+# =========================================================
+class WeatherTool(ToolProtocol):
+    name = "get_weather"
+    description = "Returns current weather condition for a city"
+
+    def __call__(self, location: str = "Bangalore") -> str:
+        # Mocked weather (replace with API later)
+        return f"The weather in {location} is sunny with light clouds 🌤️"
+
+
+# =========================================================
 # PROMPT
 # =========================================================
-def greetings_prompt(user_input: str, time_of_day: str) -> str:
+def greetings_prompt(user_input: str, time_of_day: str, weather: str) -> str:
     return f"""
 You are a friendly, polite greeting assistant.
 
 Time of day: {time_of_day}
+Weather info: {weather}
 
-Greet the user appropriately based on the time of day.
+Greet the user appropriately using the time and weather.
 
 User input:
 {user_input}
@@ -67,7 +80,7 @@ Keep the response short and friendly.
 
 
 # =========================================================
-# CHAT CLIENT (EXTENDS YOUR WORKING CODE)
+# CHAT CLIENT (MULTI-TOOL AWARE)
 # =========================================================
 class MyChatClient(BaseChatClient):
 
@@ -81,18 +94,30 @@ class MyChatClient(BaseChatClient):
         **kwargs: Any,
     ) -> ChatResponse:
 
-        # 1️⃣ Call tool (explicit, framework-safe)
-        time_tool = TimeOfDayTool()
-        time_of_day = time_tool()
+        # -------------------------------------------------
+        # TOOL RESOLUTION (LIST OF TOOLS)
+        # -------------------------------------------------
+        time_of_day = "day"
+        weather_info = "Weather unavailable"
 
-        # 2️⃣ Build prompt using tool output
+        if tools:
+            for tool in tools:
+                if tool.name == "get_time_of_day":
+                    time_of_day = tool()
+                elif tool.name == "get_weather":
+                    weather_info = tool("Bangalore")
+
+        # -------------------------------------------------
+        # PROMPT BUILDING
+        # -------------------------------------------------
         prompt_template = ChatPromptTemplate.from_messages(
             [
                 (
                     m.role.value,
                     greetings_prompt(
                         extract_text_from_message(m),
-                        time_of_day=time_of_day
+                        time_of_day=time_of_day,
+                        weather=weather_info,
                     )
                 )
                 for m in messages
@@ -101,11 +126,12 @@ class MyChatClient(BaseChatClient):
 
         prompt_value = prompt_template.format_prompt()
 
-        # 3️⃣ SafeChain model call
+        # -------------------------------------------------
+        # SAFECHAIN MODEL CALL
+        # -------------------------------------------------
         llm = model("3")
         llm_response = llm.invoke(prompt_value)
 
-        # 4️⃣ Wrap response (YOUR WORKING PATTERN)
         response_message = ChatMessage(
             role=Role.ASSISTANT,
             contents=[TextContent(text=llm_response.content)],
@@ -126,7 +152,7 @@ class MyChatClient(BaseChatClient):
 
 
 # =========================================================
-# GREETING AGENT
+# GREETING AGENT (PASS TOOLS AS LIST)
 # =========================================================
 class GreetingAgent(ChatAgent):
     def __init__(self):
@@ -134,6 +160,10 @@ class GreetingAgent(ChatAgent):
             name="GreetingAgent",
             chat_client=MyChatClient(),
             instructions="You are a friendly greeting assistant.",
+            tools=[
+                TimeOfDayTool(),
+                WeatherTool(),
+            ],  # 👈 LIST OF TOOLS (OFFICIAL STYLE)
         )
 
 
