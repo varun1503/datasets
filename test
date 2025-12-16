@@ -1,5 +1,5 @@
 # =========================================================
-# JUPYTER NOTEBOOK – FULL FIXED VERSION
+# JUPYTER NOTEBOOK – VERSION-SAFE FINAL CODE
 # =========================================================
 
 import asyncio
@@ -10,6 +10,17 @@ from langchain_core.prompt_values import ChatPromptValue
 
 from agent_framework import ChatAgent
 from agent_framework.messages import ChatMessage, Role, TextContent
+
+
+# =========================================================
+# HELPER (VERSION SAFE)
+# =========================================================
+def get_text(m: ChatMessage) -> str:
+    if hasattr(m, "content") and m.content:
+        return m.content.value
+    if hasattr(m, "contents") and m.contents:
+        return m.contents[0].value
+    return ""
 
 
 # =========================================================
@@ -27,15 +38,17 @@ class MyCustomLLM:
         self.version = version
 
     def invoke(self, prompt_value: ChatPromptValue) -> ChatMessage:
-        print("\n🔵 LLM INVOKED WITH PROMPT:\n")
+        print(f"\n🔵 LLM model({self.version}) INVOKED WITH PROMPT:\n")
         print(prompt_value.to_string())
 
-        # 🔑 MUST return TextContent
+        # IMPORTANT: use contents (list)
         return ChatMessage(
             role=Role.ASSISTANT,
-            content=TextContent(
-                value="Hello 👋 This response came from model('3')"
-            ),
+            contents=[
+                TextContent(
+                    value="Hello 👋 This response came from model('3')"
+                )
+            ],
         )
 
 
@@ -60,8 +73,9 @@ class MyChatClient:
         **kwargs,
     ) -> ChatMessage:
 
+        # 🔑 SAFE extraction for YOUR framework version
         prompt_template = ChatPromptTemplate.from_messages(
-            [(m.role, m.content.value) for m in messages]
+            [(m.role, get_text(m)) for m in messages]
         )
 
         prompt_value = prompt_template.format_prompt()
@@ -89,10 +103,9 @@ async def main():
     agent = GreetingAgent()
     response = await agent.run("Hi")
 
-    print("\n🟢 RAW RESPONSE OBJECT:\n", response)
     print("\n🟢 FINAL RESPONSE TEXT:\n")
 
-    # ✅ THIS WILL NOW PRINT
-    print(response.messages[0].content.value)
+    # SAFE printing
+    print(get_text(response.messages[0]))
 
 await main()
