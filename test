@@ -1,31 +1,18 @@
-def run(
-    self,
-    messages: str | ChatMessage | list[str] | list[ChatMessage] | None = None,
-    *,
-    thread: AgentThread | None = None,
-    **kwargs: Any,
-) -> AgentRunResponse:
+import inspect
+from pydantic import create_model
 
-    greeting_prompt = self.greetings_prompt(messages)
+def function_to_schema(func):
+    sig = inspect.signature(func)
+    fields = {}
 
-    prompt_template = ChatPromptTemplate.from_messages([
-        ("human", greeting_prompt),
-    ])
+    for name, param in sig.parameters.items():
+        fields[name] = (param.annotation, ...)
 
-    # 🔑 Convert template → ChatPromptValue
-    prompt_value = prompt_template.format_prompt()
+    model = create_model(func.__name__ + "Schema", **fields)
 
-    llm = model("3")
-
-    response_message = llm.invoke(prompt_value)
-
-    if thread is not None:
-        self._notify_thread_of_new_messages(
-            thread,
-            messages,
-            response_message.content
-        )
-
-    return AgentRunResponse(
-        messages=[response_message.content]
-    )
+    return {
+        "name": func.__name__,
+        "description": func.__doc__ or "",
+        "parameters": model.model_json_schema(),
+        "callable": func,
+    }
