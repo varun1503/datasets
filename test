@@ -1,5 +1,5 @@
 # =========================================================
-# JUPYTER NOTEBOOK – FULL WORKING EXAMPLE (FINAL)
+# JUPYTER NOTEBOOK – FULL FIXED VERSION
 # =========================================================
 
 import asyncio
@@ -9,7 +9,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.prompt_values import ChatPromptValue
 
 from agent_framework import ChatAgent
-from agent_framework.messages import ChatMessage, Role
+from agent_framework.messages import ChatMessage, Role, TextContent
 
 
 # =========================================================
@@ -20,19 +20,22 @@ def model(version: str):
 
 
 # =========================================================
-# CUSTOM LLM (ACCEPTS ChatPromptValue ONLY)
+# CUSTOM LLM (ChatPromptValue ONLY)
 # =========================================================
 class MyCustomLLM:
     def __init__(self, version: str):
         self.version = version
 
     def invoke(self, prompt_value: ChatPromptValue) -> ChatMessage:
-        print(f"\n🔵 LLM model({self.version}) INVOKED WITH PROMPT:\n")
+        print("\n🔵 LLM INVOKED WITH PROMPT:\n")
         print(prompt_value.to_string())
 
+        # 🔑 MUST return TextContent
         return ChatMessage(
             role=Role.ASSISTANT,
-            content="Hello 👋 This response came from model('3')"
+            content=TextContent(
+                value="Hello 👋 This response came from model('3')"
+            ),
         )
 
 
@@ -40,11 +43,6 @@ class MyCustomLLM:
 # CUSTOM CHAT CLIENT (FRAMEWORK COMPATIBLE)
 # =========================================================
 class MyChatClient:
-    """
-    Required by ChatAgent:
-    - get_response()
-    """
-
     async def get_response(
         self,
         messages: List[ChatMessage],
@@ -62,19 +60,14 @@ class MyChatClient:
         **kwargs,
     ) -> ChatMessage:
 
-        # Convert ChatMessages → ChatPromptTemplate
         prompt_template = ChatPromptTemplate.from_messages(
-            [(m.role, m.content) for m in messages]
+            [(m.role, m.content.value) for m in messages]
         )
 
-        # Convert → ChatPromptValue
         prompt_value = prompt_template.format_prompt()
 
-        # ORG STANDARD MODEL CALL
         llm = model("3")
-        response_message = llm.invoke(prompt_value)
-
-        return response_message
+        return llm.invoke(prompt_value)
 
 
 # =========================================================
@@ -90,14 +83,16 @@ class GreetingAgent(ChatAgent):
 
 
 # =========================================================
-# RUN IN NOTEBOOK
+# RUN
 # =========================================================
 async def main():
     agent = GreetingAgent()
     response = await agent.run("Hi")
 
+    print("\n🟢 RAW RESPONSE OBJECT:\n", response)
     print("\n🟢 FINAL RESPONSE TEXT:\n")
-    # ✅ CORRECT WAY TO PRINT OUTPUT
+
+    # ✅ THIS WILL NOW PRINT
     print(response.messages[0].content.value)
 
 await main()
