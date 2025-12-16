@@ -1,9 +1,9 @@
 # =========================================================
-# JUPYTER NOTEBOOK – OFFICIAL-STYLE CHATCLIENT IMPLEMENTATION
+# JUPYTER NOTEBOOK – FINAL CORRECT BaseChatClient IMPLEMENTATION
 # =========================================================
 
 import asyncio
-from typing import List, Any, MutableMapping, Sequence, Callable
+from typing import Sequence, Any, MutableMapping, Callable, AsyncIterable
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.prompt_values import ChatPromptValue
@@ -11,6 +11,7 @@ from langchain_core.prompt_values import ChatPromptValue
 from agent_framework import ChatAgent
 from agent_framework.clients import BaseChatClient
 from agent_framework.messages import ChatMessage, Role, TextContent
+from agent_framework.responses import ChatResponse
 from agent_framework.types import ToolProtocol
 
 
@@ -42,7 +43,7 @@ def model(version: str):
 
 
 # =========================================================
-# YOUR CUSTOM LLM (ChatPromptValue ONLY)
+# CUSTOM LLM (ChatPromptValue ONLY)
 # =========================================================
 class MyCustomLLM:
     def __init__(self, version: str):
@@ -61,14 +62,11 @@ class MyCustomLLM:
 
 
 # =========================================================
-# OFFICIAL-STYLE CUSTOM CHAT CLIENT
+# OFFICIAL BaseChatClient IMPLEMENTATION (FIX)
 # =========================================================
 class MyChatClient(BaseChatClient):
-    """
-    Matches agent-framework's official ChatClient design.
-    """
 
-    async def get_response(
+    async def _inner_get_response(
         self,
         messages: Sequence[ChatMessage],
         *,
@@ -76,24 +74,33 @@ class MyChatClient(BaseChatClient):
         tool_choice: Callable[..., Any] | None = None,
         chat_options: MutableMapping[str, Any] | None = None,
         **kwargs: Any,
-    ) -> ChatMessage:
-        """
-        This method is REQUIRED by ChatAgent.
-        """
+    ) -> ChatResponse:
 
-        # 1️⃣ Convert messages → ChatPromptTemplate
+        # 1️⃣ Convert messages → prompt
         prompt_template = ChatPromptTemplate.from_messages(
             [(m.role, extract_text_from_message(m)) for m in messages]
         )
 
-        # 2️⃣ Convert → ChatPromptValue
         prompt_value = prompt_template.format_prompt()
 
-        # 3️⃣ ORG STANDARD LLM CALL
+        # 2️⃣ ORG STANDARD MODEL CALL
         llm = model("3")
-        response_message = llm.invoke(prompt_value)
+        assistant_message = llm.invoke(prompt_value)
 
-        return response_message
+        # 3️⃣ MUST wrap in ChatResponse
+        return ChatResponse(message=assistant_message)
+
+    async def _inner_get_streaming_response(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[ToolProtocol] | None = None,
+        tool_choice: Callable[..., Any] | None = None,
+        chat_options: MutableMapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterable[ChatResponse]:
+        # Streaming not supported yet
+        raise NotImplementedError("Streaming not implemented")
 
 
 # =========================================================
@@ -103,12 +110,22 @@ class GreetingAgent(ChatAgent):
     def __init__(self):
         super().__init__(
             name="GreetingAgent",
-            chat_client=MyChatClient(),  # ✅ OFFICIAL STYLE
+            chat_client=MyChatClient(),
             instructions="You are a friendly greeting assistant.",
         )
 
 
 # =========================================================
+# RUN
+# =========================================================
+async def main():
+    agent = GreetingAgent()
+    response = await agent.run("Hi")
+
+    print("\n🟢 FINAL RESPONSE TEXT:\n")
+    print(extract_text_from_message(response.messages[0]))
+
+await main()# =========================================================
 # RUN
 # =========================================================
 async def main():
