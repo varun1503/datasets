@@ -1,87 +1,39 @@
-# =========================
-# tools/time_tool.py
-# =========================
-from datetime import datetime
-
-def get_time_of_day() -> str:
-    """
-    Returns the current time of day.
-    Possible values: morning, afternoon, evening, night
-    """
-    hour = datetime.now().hour
-
-    if 5 <= hour < 12:
-        return "morning"
-    elif 12 <= hour < 17:
-        return "afternoon"
-    elif 17 <= hour < 21:
-        return "evening"
-    else:
-        return "night"
-
-
-# =========================
-# agents/greeting_agent.py
-# =========================
-from typing import Any
-from agent_framework import BaseAgent, AgentRunResponse, AgentThread
-from agent_framework.messages import ChatMessage
 from tools.time_tool import get_time_of_day
+from langchain_core.prompts import ChatPromptTemplate
 
+def run(
+    self,
+    messages: str | ChatMessage | list[str] | list[ChatMessage] | None = None,
+    *,
+    thread: AgentThread | None = None,
+    **kwargs,
+) -> AgentRunResponse:
 
-class GreetingAgent(BaseAgent):
-    def __init__(self, **kwargs: Any):
-        super().__init__(
-            name="GreetingAgent",
-            description="Greets the user based on time of day",
-            instructions=(
-                "You are a friendly greeting assistant. "
-                "Use the available tool to determine the time of day "
-                "and greet the user appropriately."
-            ),
-            tools=[get_time_of_day],
-            **kwargs,
+    # 1️⃣ Call tool
+    time_of_day = get_time_of_day()
+
+    # 2️⃣ Build prompt using tool output
+    greeting_prompt = self.greetings_prompt(
+        user_input=messages,
+        time_of_day=time_of_day
+    )
+
+    prompt_template = ChatPromptTemplate.from_messages([
+        ("human", greeting_prompt),
+    ])
+
+    prompt_value = prompt_template.format_prompt()
+
+    llm = model("3")
+    response_message = llm.invoke(prompt_value)
+
+    if thread is not None:
+        self._notify_thread_of_new_messages(
+            thread,
+            messages,
+            response_message.content
         )
 
-    def greetings_prompt(self, user_input: Any) -> str:
-        return f"""
-You are a friendly greeting assistant.
-
-Greet the user politely based on the current time of day.
-
-User input:
-{user_input}
-"""
-
-    async def run(
-        self,
-        messages: str | ChatMessage | list[str] | list[ChatMessage] | None = None,
-        *,
-        thread: AgentThread | None = None,
-        **kwargs: Any,
-    ) -> AgentRunResponse:
-        # Preprocess input into a prompt
-        prompt = self.greetings_prompt(messages)
-
-        # IMPORTANT: delegate execution back to BaseAgent
-        # so tool calling works correctly
-        return await super().run(
-            prompt,
-            thread=thread,
-            **kwargs,
-        )
-
-
-# =========================
-# app.py
-# =========================
-import asyncio
-from agents.greeting_agent import GreetingAgent
-
-async def main():
-    agent = GreetingAgent()
-    response = await agent.run("Hi")
-    print(response)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    return AgentRunResponse(
+        messages=[response_message.content]
+    )
