@@ -1,53 +1,21 @@
-# =========================================================
-# JUPYTER NOTEBOOK – MCP POWERED AGENT (SINGLE IMPLEMENTATION)
-# =========================================================
-
 import asyncio
-import httpx
 from typing import Sequence, Any, MutableMapping, Callable, AsyncIterable
 
 from langchain_core.prompts import ChatPromptTemplate
 from safechain.lcel import model
 
-from agent_framework import ChatAgent, BaseChatClient
-from agent_framework import ChatMessage, Role, TextContent
-from agent_framework import ChatResponse, ToolProtocol
+from agent_framework import (
+    ChatAgent,
+    BaseChatClient,
+    ChatMessage,
+    Role,
+    TextContent,
+    ChatResponse,
+    ChatOptions,
+    ToolProtocol,
+)
 
-
-# =========================================================
-# MCP CLIENT (LOCAL)
-# =========================================================
-class MCPClient:
-    """
-    Minimal MCP client that talks to FastMCP server.
-    """
-
-    def __init__(self, base_url: str):
-        self.base_url = base_url.rstrip("/")
-
-    async def call_tool(self, tool_name: str, arguments: dict | None = None):
-        payload = {
-            "name": tool_name,
-            "arguments": arguments or {},
-        }
-
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{self.base_url}/messages/",
-                json=payload,
-                timeout=30,
-            )
-            resp.raise_for_status()
-            return resp.json()
-
-
-# MCP server running locally
-mcp_client = MCPClient("http://localhost:8006")
-
-
-# =========================================================
-# SAFE TEXT EXTRACTION (YOUR FRAMEWORK VERSION)
-# =========================================================
+from agent_framework.mcp import MCPStreamableHTTPTool
 def extract_text_from_message(m: ChatMessage) -> str:
     if hasattr(m, "contents") and m.contents:
         c = m.contents[0]
@@ -58,12 +26,11 @@ def extract_text_from_message(m: ChatMessage) -> str:
         if hasattr(c, "data"):
             return c.data
     return ""
-
-
-# =========================================================
-# CHAT CLIENT (AGENT ↔ MCP ↔ LLM)
-# =========================================================
-class MCPBackedChatClient(BaseChatClient):
+mcp_tool = MCPStreamableHTTPTool(
+    name="travel_mcp",
+    url="http://localhost:8006",
+)
+class MyChatClient(BaseChatClient):
 
     async def _inner_get_response(
         self,
@@ -75,35 +42,52 @@ class MCPBackedChatClient(BaseChatClient):
         **kwargs: Any,
     ) -> ChatResponse:
 
-        user_query = extract_text_from_message(messages[-1])
+        user_text = extract_text_from_message(messages[-1])
 
-        # -------------------------------------------------
-        # MCP TOOL CALLS (NO TOOLS IN AGENT)
-        # -------------------------------------------------
-        hotel_data = await mcp_client.call_tool(
+        # ----------------------------------------
+        # FIND MCP TOOL
+        # ----------------------------------------
+        mcp = None
+        for tool in tools or []:
+            if tool.name == "travel_mcp":
+                mcp = tool
+                break
+
+        if mcp is None:
+            raise RuntimeError("MCP tool not provided")
+
+        # ----------------------------------------
+        # CALL MCP TOOLS
+        # ----------------------------------------
+        hotel_data = await mcp.call(
             "get_hotel_details",
-            {"city_name": "Bangalore", "star_rating": 5},
+            {
+                "city_name": "Bangalore",
+                "star_rating": 5,
+            }
         )
 
-        flight_data = await mcp_client.call_tool(
+        flight_data = await mcp.call(
             "get_flight_booking_details",
-            {"user_id": "U123"},
+            {
+                "user_id": "U123",
+            }
         )
 
-        # -------------------------------------------------
-        # PROMPT
-        # -------------------------------------------------
-        prompt_template = ChatPromptTemplate.from_messages([
+        # ----------------------------------------
+        # BUILD PROMPT
+        # ----------------------------------------
+        prompt = ChatPromptTemplate.from_messages([
             (
                 "human",
                 f"""
-User request:
-{user_query}
+User query:
+{user_text}
 
-Hotel information from system:
+Hotel data from MCP:
 {hotel_data}
 
-Flight booking information from system:
+Flight data from MCP:
 {flight_data}
 
 Respond clearly and helpfully.
@@ -111,58 +95,48 @@ Respond clearly and helpfully.
             )
         ])
 
-        prompt_value = prompt_template.format_prompt()
+        prompt_value = prompt.format_prompt()
 
-        # -------------------------------------------------
-        # SAFECHAIN MODEL
-        # -------------------------------------------------
+        # ----------------------------------------
+        # SAFECHAIN MODEL CALL
+        # ----------------------------------------
         llm = model("3")
         llm_response = llm.invoke(prompt_value)
 
-        response_message = ChatMessage(
-            role=Role.ASSISTANT,
-            contents=[TextContent(text=llm_response.content)],
+        # ----------------------------------------
+        # RETURN CHAT RESPONSE
+        # ----------------------------------------
+        return ChatResponse(
+            messages=ChatMessage(
+                role=Role.ASSISTANT,
+                contents=[TextContent(text=llm_response.content)],
+            )
         )
-
-        return ChatResponse(messages=response_message)
 
     async def _inner_get_streaming_response(
         self,
         messages: Sequence[ChatMessage],
         *,
         tools: Sequence[ToolProtocol] | None = None,
-        tool_choice: Callable[..., Any] | None = None,
-        chat_options: MutableMapping[str, Any] | None = None,
         **kwargs: Any,
     ) -> AsyncIterable[ChatResponse]:
         raise NotImplementedError("Streaming not implemented")
-
-
-# =========================================================
-# AGENT (NO TOOL LOGIC HERE)
-# =========================================================
 class TravelAgent(ChatAgent):
     def __init__(self):
         super().__init__(
             name="TravelAgent",
-            chat_client=MCPBackedChatClient(),
-            instructions=(
-                "You are a travel assistant. "
-                "Use provided system data to help the user."
-            ),
+            chat_client=MyChatClient(),
+            instructions="You are a helpful travel assistant.",
+            tools=[
+                mcp_tool,  # MCP SERVER AS TOOL
+            ],
         )
-
-
-# =========================================================
-# RUN IN NOTEBOOK
-# =========================================================
 async def main():
     agent = TravelAgent()
     response = await agent.run(
-        "Check my flights and suggest a good hotel"
+        "Find my flights and suggest a good hotel"
     )
-
     print("\n🟢 FINAL RESPONSE:\n")
-    print(response.messages.contents[0].text)
+    print(response.text)
 
 await main()
