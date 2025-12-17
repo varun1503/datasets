@@ -1,9 +1,9 @@
 # =========================================================
-# JUPYTER NOTEBOOK – GREETING AGENT WITH MULTIPLE TOOLS
+# JUPYTER NOTEBOOK – MCP POWERED AGENT (SINGLE IMPLEMENTATION)
 # =========================================================
 
 import asyncio
-from datetime import datetime
+import httpx
 from typing import Sequence, Any, MutableMapping, Callable, AsyncIterable
 
 from langchain_core.prompts import ChatPromptTemplate
@@ -12,6 +12,37 @@ from safechain.lcel import model
 from agent_framework import ChatAgent, BaseChatClient
 from agent_framework import ChatMessage, Role, TextContent
 from agent_framework import ChatResponse, ToolProtocol
+
+
+# =========================================================
+# MCP CLIENT (LOCAL)
+# =========================================================
+class MCPClient:
+    """
+    Minimal MCP client that talks to FastMCP server.
+    """
+
+    def __init__(self, base_url: str):
+        self.base_url = base_url.rstrip("/")
+
+    async def call_tool(self, tool_name: str, arguments: dict | None = None):
+        payload = {
+            "name": tool_name,
+            "arguments": arguments or {},
+        }
+
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{self.base_url}/messages/",
+                json=payload,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+
+# MCP server running locally
+mcp_client = MCPClient("http://localhost:8006")
 
 
 # =========================================================
@@ -30,59 +61,9 @@ def extract_text_from_message(m: ChatMessage) -> str:
 
 
 # =========================================================
-# TOOL 1: TIME OF DAY
+# CHAT CLIENT (AGENT ↔ MCP ↔ LLM)
 # =========================================================
-class TimeOfDayTool(ToolProtocol):
-    name = "get_time_of_day"
-    description = "Returns current time of day: morning, afternoon, evening, night"
-
-    def __call__(self) -> str:
-        hour = datetime.now().hour
-        if 5 <= hour < 12:
-            return "morning"
-        elif 12 <= hour < 17:
-            return "afternoon"
-        elif 17 <= hour < 21:
-            return "evening"
-        else:
-            return "night"
-
-
-# =========================================================
-# TOOL 2: WEATHER
-# =========================================================
-class WeatherTool(ToolProtocol):
-    name = "get_weather"
-    description = "Returns current weather condition for a city"
-
-    def __call__(self, location: str = "Bangalore") -> str:
-        # Mocked weather (replace with API later)
-        return f"The weather in {location} is sunny with light clouds 🌤️"
-
-
-# =========================================================
-# PROMPT
-# =========================================================
-def greetings_prompt(user_input: str, time_of_day: str, weather: str) -> str:
-    return f"""
-You are a friendly, polite greeting assistant.
-
-Time of day: {time_of_day}
-Weather info: {weather}
-
-Greet the user appropriately using the time and weather.
-
-User input:
-{user_input}
-
-Keep the response short and friendly.
-"""
-
-
-# =========================================================
-# CHAT CLIENT (MULTI-TOOL AWARE)
-# =========================================================
-class MyChatClient(BaseChatClient):
+class MCPBackedChatClient(BaseChatClient):
 
     async def _inner_get_response(
         self,
@@ -94,40 +75,46 @@ class MyChatClient(BaseChatClient):
         **kwargs: Any,
     ) -> ChatResponse:
 
-        # -------------------------------------------------
-        # TOOL RESOLUTION (LIST OF TOOLS)
-        # -------------------------------------------------
-        time_of_day = "day"
-        weather_info = "Weather unavailable"
-
-        if tools:
-            for tool in tools:
-                if tool.name == "get_time_of_day":
-                    time_of_day = tool()
-                elif tool.name == "get_weather":
-                    weather_info = tool("Bangalore")
+        user_query = extract_text_from_message(messages[-1])
 
         # -------------------------------------------------
-        # PROMPT BUILDING
+        # MCP TOOL CALLS (NO TOOLS IN AGENT)
         # -------------------------------------------------
-        prompt_template = ChatPromptTemplate.from_messages(
-            [
-                (
-                    m.role.value,
-                    greetings_prompt(
-                        extract_text_from_message(m),
-                        time_of_day=time_of_day,
-                        weather=weather_info,
-                    )
-                )
-                for m in messages
-            ]
+        hotel_data = await mcp_client.call_tool(
+            "get_hotel_details",
+            {"city_name": "Bangalore", "star_rating": 5},
         )
+
+        flight_data = await mcp_client.call_tool(
+            "get_flight_booking_details",
+            {"user_id": "U123"},
+        )
+
+        # -------------------------------------------------
+        # PROMPT
+        # -------------------------------------------------
+        prompt_template = ChatPromptTemplate.from_messages([
+            (
+                "human",
+                f"""
+User request:
+{user_query}
+
+Hotel information from system:
+{hotel_data}
+
+Flight booking information from system:
+{flight_data}
+
+Respond clearly and helpfully.
+"""
+            )
+        ])
 
         prompt_value = prompt_template.format_prompt()
 
         # -------------------------------------------------
-        # SAFECHAIN MODEL CALL
+        # SAFECHAIN MODEL
         # -------------------------------------------------
         llm = model("3")
         llm_response = llm.invoke(prompt_value)
@@ -152,27 +139,28 @@ class MyChatClient(BaseChatClient):
 
 
 # =========================================================
-# GREETING AGENT (PASS TOOLS AS LIST)
+# AGENT (NO TOOL LOGIC HERE)
 # =========================================================
-class GreetingAgent(ChatAgent):
+class TravelAgent(ChatAgent):
     def __init__(self):
         super().__init__(
-            name="GreetingAgent",
-            chat_client=MyChatClient(),
-            instructions="You are a friendly greeting assistant.",
-            tools=[
-                TimeOfDayTool(),
-                WeatherTool(),
-            ],  # 👈 LIST OF TOOLS (OFFICIAL STYLE)
+            name="TravelAgent",
+            chat_client=MCPBackedChatClient(),
+            instructions=(
+                "You are a travel assistant. "
+                "Use provided system data to help the user."
+            ),
         )
 
 
 # =========================================================
-# RUN
+# RUN IN NOTEBOOK
 # =========================================================
 async def main():
-    agent = GreetingAgent()
-    response = await agent.run("Hi")
+    agent = TravelAgent()
+    response = await agent.run(
+        "Check my flights and suggest a good hotel"
+    )
 
     print("\n🟢 FINAL RESPONSE:\n")
     print(response.messages.contents[0].text)
