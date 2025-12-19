@@ -1,142 +1,21 @@
-import asyncio
-from typing import Sequence, Any, MutableMapping, Callable, AsyncIterable
+Got it 👍
+Here is the clean SPIRIT-style format, with one small paragraph each, no extra detail.
 
-from langchain_core.prompts import ChatPromptTemplate
-from safechain.lcel import model
 
-from agent_framework import (
-    ChatAgent,
-    BaseChatClient,
-    ChatMessage,
-    Role,
-    TextContent,
-    ChatResponse,
-    ChatOptions,
-    ToolProtocol,
-)
+---
 
-from agent_framework.mcp import MCPStreamableHTTPTool
-def extract_text_from_message(m: ChatMessage) -> str:
-    if hasattr(m, "contents") and m.contents:
-        c = m.contents[0]
-        if hasattr(c, "text"):
-            return c.text
-        if hasattr(c, "value"):
-            return c.value
-        if hasattr(c, "data"):
-            return c.data
-    return ""
-mcp_tool = MCPStreamableHTTPTool(
-    name="travel_mcp",
-    url="http://localhost:8006",
-)
-class MyChatClient(BaseChatClient):
+📝 Story Description
 
-    async def _inner_get_response(
-        self,
-        messages: Sequence[ChatMessage],
-        *,
-        tools: Sequence[ToolProtocol] | None = None,
-        tool_choice: Callable[..., Any] | None = None,
-        chat_options: MutableMapping[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> ChatResponse:
+Update the DOCX caption processing logic to correctly renumber table and figure captions in sequence. The logic should ensure captions are identified accurately, moved above the corresponding table or figure when required, and handle corner cases where footnotes or descriptive text appear near tables or images.
 
-        user_text = extract_text_from_message(messages[-1])
 
-        # ----------------------------------------
-        # FIND MCP TOOL
-        # ----------------------------------------
-        mcp = None
-        for tool in tools or []:
-            if tool.name == "travel_mcp":
-                mcp = tool
-                break
+---
 
-        if mcp is None:
-            raise RuntimeError("MCP tool not provided")
+✅ Acceptance Criteria
 
-        # ----------------------------------------
-        # CALL MCP TOOLS
-        # ----------------------------------------
-        hotel_data = await mcp.call(
-            "get_hotel_details",
-            {
-                "city_name": "Bangalore",
-                "star_rating": 5,
-            }
-        )
+Only valid table and figure captions are detected and renumbered sequentially, captions are correctly positioned above their respective tables or figures, and footnotes, notes, or descriptive paragraphs are excluded from caption processing and remain unchanged.
 
-        flight_data = await mcp.call(
-            "get_flight_booking_details",
-            {
-                "user_id": "U123",
-            }
-        )
 
-        # ----------------------------------------
-        # BUILD PROMPT
-        # ----------------------------------------
-        prompt = ChatPromptTemplate.from_messages([
-            (
-                "human",
-                f"""
-User query:
-{user_text}
+---
 
-Hotel data from MCP:
-{hotel_data}
-
-Flight data from MCP:
-{flight_data}
-
-Respond clearly and helpfully.
-"""
-            )
-        ])
-
-        prompt_value = prompt.format_prompt()
-
-        # ----------------------------------------
-        # SAFECHAIN MODEL CALL
-        # ----------------------------------------
-        llm = model("3")
-        llm_response = llm.invoke(prompt_value)
-
-        # ----------------------------------------
-        # RETURN CHAT RESPONSE
-        # ----------------------------------------
-        return ChatResponse(
-            messages=ChatMessage(
-                role=Role.ASSISTANT,
-                contents=[TextContent(text=llm_response.content)],
-            )
-        )
-
-    async def _inner_get_streaming_response(
-        self,
-        messages: Sequence[ChatMessage],
-        *,
-        tools: Sequence[ToolProtocol] | None = None,
-        **kwargs: Any,
-    ) -> AsyncIterable[ChatResponse]:
-        raise NotImplementedError("Streaming not implemented")
-class TravelAgent(ChatAgent):
-    def __init__(self):
-        super().__init__(
-            name="TravelAgent",
-            chat_client=MyChatClient(),
-            instructions="You are a helpful travel assistant.",
-            tools=[
-                mcp_tool,  # MCP SERVER AS TOOL
-            ],
-        )
-async def main():
-    agent = TravelAgent()
-    response = await agent.run(
-        "Find my flights and suggest a good hotel"
-    )
-    print("\n🟢 FINAL RESPONSE:\n")
-    print(response.text)
-
-await main()
+If you want it even tighter (2–3 lines total) or aligned to EY/Jira wording, I can do that as well.
