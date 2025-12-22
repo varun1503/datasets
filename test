@@ -1,21 +1,15 @@
-Got it 👍
-Here is the clean SPIRIT-style format, with one small paragraph each, no extra detail.
-
-
----
-
-📝 Story Description
-
-Update the DOCX caption processing logic to correctly renumber table and figure captions in sequence. The logic should ensure captions are identified accurately, moved above the corresponding table or figure when required, and handle corner cases where footnotes or descriptive text appear near tables or images.
-
-
----
-
-✅ Acceptance Criteria
-
-Only valid table and figure captions are detected and renumbered sequentially, captions are correctly positioned above their respective tables or figures, and footnotes, notes, or descriptive paragraphs are excluded from caption processing and remain unchanged.
-
-
----
-
-If you want it even tighter (2–3 lines total) or aligned to EY/Jira wording, I can do that as well.
+Task 1: Implement Caption Identification Logic
+Detected valid table and figure captions
+Excluded footnotes, notes, and descriptive paragraphs
+Task 2: Handle Caption Positioning
+Moved captions above corresponding tables or figures
+Preserved original position of footnotes
+Task 3: Renumber Table Captions
+Applied sequential numbering only to valid table captions
+Skipped non-caption references and notes
+Task 4: Renumber Figure Captions
+Applied sequential numbering only to valid figure captions
+Ensured correct association with image content
+Task 5: Corner Case Validation
+Tested missing captions, mixed layouts, and footnote scenarios
+Verified no unintended document structure changes
