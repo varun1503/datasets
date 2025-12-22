@@ -1,15 +1,209 @@
-Task 1: Implement Caption Identification Logic
-Detected valid table and figure captions
-Excluded footnotes, notes, and descriptive paragraphs
-Task 2: Handle Caption Positioning
-Moved captions above corresponding tables or figures
-Preserved original position of footnotes
-Task 3: Renumber Table Captions
-Applied sequential numbering only to valid table captions
-Skipped non-caption references and notes
-Task 4: Renumber Figure Captions
-Applied sequential numbering only to valid figure captions
-Ensured correct association with image content
-Task 5: Corner Case Validation
-Tested missing captions, mixed layouts, and footnote scenarios
-Verified no unintended document structure changes
+from docx import Document
+from docx.oxml import parse_xml
+import re
+
+
+# ---------------------------------------------------
+# STRICT CAPTION DETECTION (MUST START WITH)
+# ---------------------------------------------------
+def is_real_caption(text: str, kind: str) -> bool:
+    """
+    Caption rules:
+    - MUST start with 'Table X' or 'Figure X'
+    - No mid-sentence references allowed
+    """
+
+    if not text:
+        return False
+
+    text = text.strip()
+
+    # Length guard
+    if len(text) > 300:
+        return False
+
+    if kind == "table":
+        return bool(
+            re.match(
+                r'^Table\s+\d+(\.\d+)*\s*[:\-]?\s*.*$',
+                text,
+                re.IGNORECASE
+            )
+        )
+
+    if kind == "figure":
+        return bool(
+            re.match(
+                r'^Figure\s+\d+(\.\d+)*\s*[:\-]?\s*.*$',
+                text,
+                re.IGNORECASE
+            )
+        )
+
+    return False
+
+
+# ---------------------------------------------------
+# MAIN FUNCTION
+# ---------------------------------------------------
+def renumber_captions(doc_path, output_path):
+
+    # =======================
+    # STEP 1: Move TABLE captions above tables
+    # =======================
+    doc = Document(doc_path)
+    body = doc.element.body
+    elements = list(body)
+
+    for i, element in enumerate(elements):
+        if element.tag.endswith('tbl'):
+            next_el = elements[i + 1] if i + 1 < len(elements) else None
+
+            if next_el is not None and next_el.tag.endswith('p'):
+                para = next((p for p in doc.paragraphs if p._element == next_el), None)
+                if para and is_real_caption(para.text, "table"):
+                    next_el.getparent().remove(next_el)
+                    element.addprevious(next_el)
+
+    doc.save(output_path)
+
+    # =======================
+    # STEP 2: Add missing TABLE captions
+    # =======================
+    doc = Document(output_path)
+    body = doc.element.body
+    elements = list(body)
+
+    for i, element in enumerate(elements):
+        if element.tag.endswith('tbl'):
+            prev_el = elements[i - 1] if i > 0 else None
+            has_caption = False
+
+            if prev_el is not None and prev_el.tag.endswith('p'):
+                para = next((p for p in doc.paragraphs if p._element == prev_el), None)
+                if para and is_real_caption(para.text, "table"):
+                    has_caption = True
+
+            if not has_caption:
+                new_para = parse_xml(
+                    r'<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                    r'<w:r><w:t>Table PLACEHOLDER</w:t></w:r></w:p>'
+                )
+                element.addprevious(new_para)
+
+    doc.save(output_path)
+
+    # =======================
+    # STEP 3: Move FIGURE captions above images
+    # =======================
+    doc = Document(output_path)
+    body = doc.element.body
+    elements = list(body)
+
+    for i, element in enumerate(elements):
+        if not element.tag.endswith('p'):
+            continue
+
+        para = next((p for p in doc.paragraphs if p._element == element), None)
+        if not para:
+            continue
+
+        has_image = any(run._element.xpath('.//pic:pic') for run in para.runs)
+        if not has_image:
+            continue
+
+        next_el = elements[i + 1] if i + 1 < len(elements) else None
+        if next_el is not None and next_el.tag.endswith('p'):
+            cap_para = next((p for p in doc.paragraphs if p._element == next_el), None)
+            if cap_para and is_real_caption(cap_para.text, "figure"):
+                next_el.getparent().remove(next_el)
+                element.addprevious(next_el)
+
+    doc.save(output_path)
+
+    # =======================
+    # STEP 4: Add missing FIGURE captions
+    # =======================
+    doc = Document(output_path)
+    body = doc.element.body
+    elements = list(body)
+
+    for i, element in enumerate(elements):
+        if not element.tag.endswith('p'):
+            continue
+
+        para = next((p for p in doc.paragraphs if p._element == element), None)
+        if not para:
+            continue
+
+        has_image = any(run._element.xpath('.//pic:pic') for run in para.runs)
+        if not has_image:
+            continue
+
+        prev_el = elements[i - 1] if i > 0 else None
+        has_caption = False
+
+        if prev_el is not None and prev_el.tag.endswith('p'):
+            cap_para = next((p for p in doc.paragraphs if p._element == prev_el), None)
+            if cap_para and is_real_caption(cap_para.text, "figure"):
+                has_caption = True
+
+        if not has_caption:
+            new_para = parse_xml(
+                r'<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                r'<w:r><w:t>Figure PLACEHOLDER</w:t></w:r></w:p>'
+            )
+            element.addprevious(new_para)
+
+    doc.save(output_path)
+
+    # =======================
+    # STEP 5: Renumber captions
+    # =======================
+    doc = Document(output_path)
+    body = doc.element.body
+    elements = list(body)
+
+    table_num = 1
+    figure_num = 1
+
+    for i, element in enumerate(elements):
+        if not element.tag.endswith('p'):
+            continue
+
+        para = next((p for p in doc.paragraphs if p._element == element), None)
+        if not para:
+            continue
+
+        text = para.text.strip()
+        next_el = elements[i + 1] if i + 1 < len(elements) else None
+
+        # TABLE
+        if is_real_caption(text, "table") and next_el is not None and next_el.tag.endswith('tbl'):
+            desc = re.sub(r'^Table\s+\d+(\.\d+)*\s*[:\-]?\s*', '', text, flags=re.IGNORECASE)
+            para.text = f"Table {table_num}" + (f": {desc}" if desc else "")
+            table_num += 1
+
+        # FIGURE
+        if is_real_caption(text, "figure") and next_el is not None and next_el.tag.endswith('p'):
+            img_para = next((p for p in doc.paragraphs if p._element == next_el), None)
+            if img_para and any(run._element.xpath('.//pic:pic') for run in img_para.runs):
+                desc = re.sub(r'^Figure\s+\d+(\.\d+)*\s*[:\-]?\s*', '', text, flags=re.IGNORECASE)
+                para.text = f"Figure {figure_num}" + (f": {desc}" if desc else "")
+                figure_num += 1
+
+    doc.save(output_path)
+
+    print("\n✓ Captions processed successfully")
+    print(f"✓ Tables: {table_num - 1}")
+    print(f"✓ Figures: {figure_num - 1}")
+    print(f"✓ Output: {output_path}")
+
+
+# ---------------------------------------------------
+# USAGE
+# ---------------------------------------------------
+if __name__ == "__main__":
+    input_file = "buisness.docx"
+    output_file = "buisness_renumbered.docx"
+    renumber_captions(input_file, output_file)
