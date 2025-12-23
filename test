@@ -4,7 +4,6 @@ import unicodedata
 import os
 from pathlib import Path
 from typing import List, Dict, Optional
-from collections import OrderedDict
 
 import pandas as pd
 from docx import Document
@@ -13,7 +12,7 @@ from docx.table import Table
 from docx.text.paragraph import Paragraph
 
 
-# ==================== TEXT NORMALIZATION ====================
+# ==================== NORMALIZATION ====================
 
 def norm(s: str) -> str:
     if not s:
@@ -26,7 +25,7 @@ def norm(s: str) -> str:
 
 def read_docx_lines(path: str) -> List[str]:
     doc = Document(path)
-    lines: List[str] = []
+    lines = []
 
     for child in doc.element.body.iterchildren():
         if child.tag == qn("w:p"):
@@ -68,6 +67,7 @@ def extract_meta_from_rfr_header(line: str):
     rfr_q = ""
     section = ""
     imvp = ""
+    test_tag = ""
 
     for p in parts:
         if Q_KEY_RX.search(p):
@@ -79,16 +79,15 @@ def extract_meta_from_rfr_header(line: str):
             imvp = p
 
     for p in parts:
-        if p != rfr_q and not p.endswith("?"):
+        if p != rfr_q and not p.endswith("?") and not p.lower().startswith("test"):
             section = p
             break
 
-    return rfr_q, section, imvp
-
-
-def extract_test_tag(line: str) -> Optional[str]:
     m = TEST_TAG_RX.search(line)
-    return f"test{m.group(1).lower()}" if m else None
+    if m:
+        test_tag = m.group(1).upper()
+
+    return rfr_q, section, imvp, test_tag
 
 
 # ==================== HELPERS ====================
@@ -101,9 +100,7 @@ def is_only_bullets(text: str) -> bool:
 
 
 def clean_f_key(text: str, fallback: str) -> str:
-    if not text:
-        return fallback
-    if is_only_bullets(text):
+    if not text or is_only_bullets(text):
         return fallback
     return text.strip()
 
@@ -125,16 +122,14 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
         line = L[i]
 
         if RFR_RX.search(line):
-            rfr_q, section, imvp = extract_meta_from_rfr_header(line)
-            test_tag = extract_test_tag(line)
+            rfr_q, section, imvp, test_tag = extract_meta_from_rfr_header(line)
 
-            f_items = {}
+            f_items: Dict[str, str] = {}
             direct_response = ""
 
-            current_f = None
+            current_f_key = None
             in_block = False
             buffer = []
-            collecting_question = False
             collecting_response = False
 
             i += 1
@@ -142,14 +137,13 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
             while i < len(L) and not RFR_RX.search(L[i]):
                 cur = L[i].strip()
 
-                # RESPONSE HEADER
+                # -------- RESPONSE HEADER --------
                 if RESP_HDR_RX.search(cur):
-                    collecting_question = False
                     collecting_response = True
                     i += 1
                     continue
 
-                # OPEN <
+                # -------- OPEN < --------
                 if cur.startswith("<"):
                     in_block = True
                     buffer = []
@@ -158,30 +152,23 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
                     if f_match:
                         f_num = f"F{f_match.group(1)}"
                         f_text = clean_f_key(f_match.group(2).strip(), f_num)
-                        current_f = f_text
-                        f_items.setdefault(current_f, {"question": "", "response": ""})
-                        collecting_question = True
-                        collecting_response = False
+                        current_f_key = f_text
 
                         rest = f_match.group(2).strip()
                         if rest:
                             buffer.append(rest)
+
                     i += 1
                     continue
 
-                # CLOSE >
+                # -------- CLOSE > --------
                 if cur.startswith(">"):
                     content = norm(" ".join(buffer))
                     in_block = False
 
-                    if collecting_question and current_f:
-                        if not is_only_bullets(content):
-                            f_items[current_f]["question"] = content
-                        collecting_question = False
-
-                    elif collecting_response:
-                        if current_f:
-                            f_items[current_f]["response"] = content
+                    if collecting_response:
+                        if current_f_key:
+                            f_items[current_f_key] = content
                         else:
                             direct_response = content
                         collecting_response = False
@@ -190,7 +177,7 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
                     i += 1
                     continue
 
-                # COLLECT
+                # -------- COLLECT --------
                 if in_block:
                     buffer.append(cur)
                     i += 1
@@ -198,27 +185,24 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
 
                 i += 1
 
-            # FINALIZE
-            q_responses = {}
+            # -------- BUILD OUTPUT --------
+            rfr_payload = {}
 
             if f_items:
-                for k, v in f_items.items():
-                    if v.get("response"):
-                        q_responses[k] = v["response"]
-                    elif v.get("question"):
-                        q_responses[k] = v["question"]
-
+                rfr_payload = f_items
             elif direct_response:
-                q_responses["response"] = direct_response
+                rfr_payload = {"response": direct_response}
 
-            if q_responses:
+            if rfr_payload:
                 row = {
                     "IMVP Question": imvp,
                     "Section": section,
-                    "rfr": {rfr_q: q_responses},
+                    "rfr": {rfr_q: rfr_payload},
                 }
+
                 if test_tag:
-                    row[test_tag] = imvp
+                    row["Test Tag"] = test_tag
+
                 rows.append(row)
 
             continue
@@ -239,7 +223,8 @@ def main():
         print("❌ DOCX file not found")
         return
 
-    rows = parse_lines_after_request_items(read_docx_lines(DOCX_PATH))
+    lines = read_docx_lines(DOCX_PATH)
+    rows = parse_lines_after_request_items(lines)
 
     with open(OUT_JSON, "w", encoding="utf-8") as f:
         json.dump(rows, f, indent=2, ensure_ascii=False)
