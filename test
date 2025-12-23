@@ -266,7 +266,19 @@ def extract_f_key_and_description(line: str) -> Optional[str]:
 def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
     """
     Parse lines into structured RFR rows with nested F-items.
-    Both F-item content and responses are wrapped in < ... > blocks.
+    Handles both:
+    - F-items with < ... > wrapped content
+    - Direct responses without F-items
+    
+    Structure:
+    < F1:Dataset Name
+      i. question 1
+      ii. question 2
+    >
+    Modelling Team Response:
+    <
+      response text
+    >
     
     Returns:
         List of dictionaries with IMVP Question, Section, and nested rfr responses
@@ -290,8 +302,9 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
             rfr_question, section, imvp_q = extract_meta_from_rfr_header(line)
             test_tag = extract_test_tag(line)
             
-            # Initialize nested structure
-            q_responses: Dict[str, str] = {}
+            # Store F-items: {f_description: {"question": "...", "response": "..."}}
+            f_items: Dict[str, Dict[str, str]] = {}
+            direct_response = ""
             i += 1
             
             # State tracking
@@ -299,6 +312,7 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
             in_angle_bracket_block = False
             bracket_buffer: List[str] = []
             waiting_for_response = False
+            has_f_items = False
             
             while i < len(L) and not RFR_RX.search(L[i]):
                 cur = L[i].strip()
@@ -306,16 +320,52 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
                 # Check for F-item header
                 f_desc = extract_f_key_and_description(cur)
                 if f_desc:
+                    has_f_items = True
                     current_f_description = f_desc
                     in_angle_bracket_block = True
                     bracket_buffer = []
                     waiting_for_response = False
+                    
+                    # Initialize F-item entry
+                    if current_f_description not in f_items:
+                        f_items[current_f_description] = {"question": "", "response": ""}
+                    
                     i += 1
                     continue
                 
                 # Check for "Modelling Team Response:"
                 if RESP_HDR_RX.search(cur):
                     waiting_for_response = True
+                    
+                    # If no F-items detected, use old logic
+                    if not has_f_items:
+                        i += 1
+                        block: List[str] = []
+                        
+                        # Collect response content until next RFR or response header
+                        while (
+                            i < len(L)
+                            and not RESP_HDR_RX.search(L[i])
+                            and not RFR_RX.search(L[i])
+                        ):
+                            block.append(L[i])
+                            i += 1
+                        
+                        resp = norm(" ".join(block))
+                        
+                        # Unwrap <...> if entire block is wrapped
+                        m = BRACKETS_RX.fullmatch(resp)
+                        if m:
+                            resp = norm(m.group(1))
+                        
+                        # Remove anything after >
+                        resp = re.sub(r'>.*$', '', resp).strip()
+                        
+                        if resp:
+                            direct_response = resp
+                        continue
+                    
+                    # Has F-items, continue with angle bracket logic
                     in_angle_bracket_block = False
                     bracket_buffer = []
                     i += 1
@@ -338,15 +388,15 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
                         
                         if waiting_for_response and current_f_description:
                             # This is a response for the current F-item
-                            q_responses[current_f_description] = content
-                            current_f_description = None
+                            f_items[current_f_description]["response"] = content
                             waiting_for_response = False
+                            current_f_description = None  # Ready for next F-item
                         elif current_f_description and not waiting_for_response:
                             # This is the F-item question content
-                            q_responses[current_f_description] = content
-                        elif waiting_for_response:
-                            # Direct response without F-item
-                            q_responses["response"] = content
+                            f_items[current_f_description]["question"] = content
+                        elif waiting_for_response and not current_f_description:
+                            # Direct response without current F-item context
+                            direct_response = content
                             waiting_for_response = False
                         
                         bracket_buffer = []
@@ -357,6 +407,8 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
                 # Collect content inside angle bracket blocks
                 if in_angle_bracket_block:
                     bracket_buffer.append(cur)
+                    i += 1
+                    continue
                 
                 i += 1
             
@@ -364,9 +416,24 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
             if bracket_buffer:
                 content = norm(" ".join(bracket_buffer))
                 if current_f_description:
-                    q_responses[current_f_description] = content
-                elif waiting_for_response:
-                    q_responses["response"] = content
+                    if waiting_for_response:
+                        f_items[current_f_description]["response"] = content
+                    else:
+                        f_items[current_f_description]["question"] = content
+                elif waiting_for_response or not has_f_items:
+                    direct_response = content
+            
+            # Build the final response structure
+            q_responses: Dict[str, str] = {}
+            
+            if f_items:
+                # Use F-item responses (prefer response over question if both exist)
+                for f_desc, content in f_items.items():
+                    # Use response if available, otherwise use question
+                    q_responses[f_desc] = content.get("response") or content.get("question", "")
+            elif direct_response:
+                # No F-items, use direct response
+                q_responses["response"] = direct_response
             
             # Only emit row if we have IMVP or responses
             if (imvp_q and imvp_q.strip()) or q_responses:
@@ -526,31 +593,4 @@ def main():
         
         # Process rows
         rows = collapse_empty_imvp_into_previous(rows)
-        print(f"After collapsing: {len(rows)} rows")
-        
-        # Optionally validate (uncomment if needed)
-        # rows = validate_rows(rows)
-        
-        # Save JSON
-        with open(OUT_JSON, "w", encoding="utf-8") as f:
-            for r in rows:
-                f.write(json.dumps(r, ensure_ascii=False) + "\n")
-        print(f"Saved {len(rows)} rows to {OUT_JSON}")
-        
-        # Save CSV
-        df = convert_to_dataframe(rows, DOCX_PATH)
-        df.to_csv(OUT_CSV, index=False)
-        print(f"Saved DataFrame to {OUT_CSV}")
-        
-        # Display sample
-        if rows:
-            print("\nSample row:")
-            print(json.dumps(rows[0], indent=2, ensure_ascii=False))
-    
-    except Exception as e:
-        print(f"Error: {e}")
-        raise
-
-
-if __name__ == "__main__":
-    main()
+        print(
