@@ -189,8 +189,10 @@ def extract_meta_from_rfr_header(line: str) -> Tuple[str, str, str]:
     parts = [norm(x) for x in BRACKETS_RX.findall(line)]
     
     # Find RFR question (starts with Q1:, Q2:, etc.)
+    rfr_question_full = ""
     for part in parts:
         if Q_KEY_RX.match(part):
+            rfr_question_full = part  # Store the full "Q3: MRMG would like..."
             # Extract everything after "Q3: " -> "MRMG would like to know..."
             rfr_question = Q_KEY_RX.sub('', part).strip()
             break
@@ -198,19 +200,21 @@ def extract_meta_from_rfr_header(line: str) -> Tuple[str, str, str]:
     # Find IMVP question (last '?' that's not the RFR question)
     all_questions = [p for p in parts if p.endswith("?")]
     # Remove the RFR question from candidates
-    imvp_candidates = [q for q in all_questions if Q_KEY_RX.sub('', q).strip() != rfr_question]
+    imvp_candidates = [q for q in all_questions if q != rfr_question_full and q != rfr_question]
     if imvp_candidates:
         imvp = imvp_candidates[-1]
     
-    # Find Section (first non-question bracket)
+    # Find Section (first non-question bracket that's not the RFR question)
     for part in parts:
-        if not part.endswith("?"):
-            section = part
-            break
+        # Skip if it's the RFR question or any question
+        if part == rfr_question_full or part.endswith("?"):
+            continue
+        section = part
+        break
     
     # Fallback: shortest non-question part
     if not section:
-        non_q = [p for p in parts if not p.endswith("?")]
+        non_q = [p for p in parts if not p.endswith("?") and p != rfr_question_full]
         if non_q:
             section = sorted(non_q, key=len)[0]
     
