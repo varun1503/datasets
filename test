@@ -233,7 +233,8 @@ def extract_test_tag(line: str) -> Optional[str]:
 
 
 def extract_f_key_and_description(line: str) -> Optional[str]:
-    """Extract F-item description from line (e.g., '<F1:Amex US SBS...' -> 'Amex US SBS...')."""
+    """Extract F-item description from line (e.g., '< F1:Amex US SBS...' -> 'Amex US SBS...')."""
+    # First try with brackets
     parts = [norm(x) for x in BRACKETS_RX.findall(line)]
     for part in parts:
         m = F_KEY_RX.match(part)
@@ -241,8 +242,22 @@ def extract_f_key_and_description(line: str) -> Optional[str]:
             # Extract everything after 'F1:', 'F2:', etc.
             if ':' in part:
                 description = part.split(':', 1)[1].strip()
+                # Remove trailing dashes or hyphens
+                description = description.rstrip('–-').strip()
                 return description
             return part
+    
+    # Also try without brackets - look for pattern like "< F1:" in the raw line
+    line_norm = norm(line)
+    # Pattern: optional <, optional space, F followed by digit, colon
+    alt_pattern = re.compile(r'<?[\s]*F(\d+)\s*:\s*(.+)', re.IGNORECASE)
+    m = alt_pattern.search(line_norm)
+    if m:
+        description = m.group(2).strip()
+        # Remove trailing dashes or hyphens
+        description = description.rstrip('–-').strip()
+        return description
+    
     return None
 
 
@@ -251,6 +266,7 @@ def extract_f_key_and_description(line: str) -> Optional[str]:
 def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
     """
     Parse lines into structured RFR rows with nested F-items.
+    Both F-item content and responses are wrapped in < ... > blocks.
     
     Returns:
         List of dictionaries with IMVP Question, Section, and nested rfr responses
@@ -274,66 +290,90 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
             rfr_question, section, imvp_q = extract_meta_from_rfr_header(line)
             test_tag = extract_test_tag(line)
             
-            # Initialize nested structure for RFR-question -> F-description -> response
+            # Initialize nested structure
             q_responses: Dict[str, str] = {}
             i += 1
             
-            # Collect all F-items and responses for this RFR
+            # State tracking
             current_f_description = None
+            in_angle_bracket_block = False
+            bracket_buffer: List[str] = []
+            waiting_for_response = False
             
             while i < len(L) and not RFR_RX.search(L[i]):
-                cur = L[i]
+                cur = L[i].strip()
                 
-                # Check if this line has an F-item description
+                # Check for F-item header
                 f_desc = extract_f_key_and_description(cur)
                 if f_desc:
                     current_f_description = f_desc
+                    in_angle_bracket_block = True
+                    bracket_buffer = []
+                    waiting_for_response = False
                     i += 1
                     continue
                 
-                # Found a response header
+                # Check for "Modelling Team Response:"
                 if RESP_HDR_RX.search(cur):
+                    waiting_for_response = True
+                    in_angle_bracket_block = False
+                    bracket_buffer = []
                     i += 1
-                    block: List[str] = []
-                    
-                    # Collect response content
-                    while (
-                        i < len(L)
-                        and not RESP_HDR_RX.search(L[i])
-                        and not RFR_RX.search(L[i])
-                        and not extract_f_key_and_description(L[i])  # Stop at next F-item
-                    ):
-                        block.append(L[i])
-                        i += 1
-                    
-                    resp = norm(" ".join(block))
-                    
-                    # Unwrap <...> if entire block is wrapped
-                    m = BRACKETS_RX.fullmatch(resp)
-                    if m:
-                        resp = norm(m.group(1))
-                    
-                    if resp:
-                        # Store response under the current F-description
-                        if current_f_description:
-                            q_responses[current_f_description] = resp
-                        else:
-                            # If no F-description, store directly (backward compatibility)
-                            q_responses["response"] = resp
                     continue
+                
+                # Check for opening angle bracket (start of block)
+                if cur == '<':
+                    in_angle_bracket_block = True
+                    bracket_buffer = []
+                    i += 1
+                    continue
+                
+                # Check for closing angle bracket (end of block)
+                if cur == '>' or cur.startswith('>'):
+                    in_angle_bracket_block = False
+                    
+                    # Process the collected block
+                    if bracket_buffer:
+                        content = norm(" ".join(bracket_buffer))
+                        
+                        if waiting_for_response and current_f_description:
+                            # This is a response for the current F-item
+                            q_responses[current_f_description] = content
+                            current_f_description = None
+                            waiting_for_response = False
+                        elif current_f_description and not waiting_for_response:
+                            # This is the F-item question content
+                            q_responses[current_f_description] = content
+                        elif waiting_for_response:
+                            # Direct response without F-item
+                            q_responses["response"] = content
+                            waiting_for_response = False
+                        
+                        bracket_buffer = []
+                    
+                    i += 1
+                    continue
+                
+                # Collect content inside angle bracket blocks
+                if in_angle_bracket_block:
+                    bracket_buffer.append(cur)
                 
                 i += 1
             
-            # Clean responses
-            cleaned_responses = {k: re.sub(r'>.*$', '', v).strip() 
-                               for k, v in q_responses.items()}
+            # Flush any remaining buffer
+            if bracket_buffer:
+                content = norm(" ".join(bracket_buffer))
+                if current_f_description:
+                    q_responses[current_f_description] = content
+                elif waiting_for_response:
+                    q_responses["response"] = content
             
             # Only emit row if we have IMVP or responses
-            if (imvp_q and imvp_q.strip()) or cleaned_responses:
+            if (imvp_q and imvp_q.strip()) or q_responses:
                 row = {
                     "IMVP Question": imvp_q or "",
                     "Section": section or "",
-                    "rfr": {(rfr_question or "No RFR question"): cleaned_responses},
+                    "rfr": {(rfr_question or "No RFR question"): q_responses},
                 }
                 
                 # Add test tag if found
