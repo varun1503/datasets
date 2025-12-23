@@ -574,6 +574,7 @@ def convert_to_dataframe(rows: List[Dict], document_path: str) -> pd.DataFrame:
 
 # ==================== MAIN ====================
 
+
 def main():
     """Main execution function."""
     DOCX_PATH = "rfrtest.docx"
@@ -593,4 +594,32 @@ def main():
         
         # Process rows
         rows = collapse_empty_imvp_into_previous(rows)
-        print(
+        print(f"After collapsing: {len(rows)} rows")
+        
+        # Optionally validate (uncomment if needed)
+        # rows = validate_rows(rows)
+        
+        # Save JSON
+        with open(OUT_JSON, "w", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        print(f"Saved {len(rows)} rows to {OUT_JSON}")
+        
+        # Save CSV
+        df = convert_to_dataframe(rows, DOCX_PATH)
+        df.to_csv(OUT_CSV, index=False)
+        print(f"Saved DataFrame to {OUT_CSV}")
+        
+        # Display sample
+        if rows:
+            print("\nSample row:")
+            print(json.dumps(rows[0], indent=2, ensure_ascii=False))
+    
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+if __name__ == "__main__":
+    main()
