@@ -3,7 +3,7 @@ import json
 import unicodedata
 import os
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict
 
 import pandas as pd
 from docx import Document
@@ -56,7 +56,6 @@ RFR_RX = re.compile(r"\bRFR\s*\d+", re.IGNORECASE)
 RESP_HDR_RX = re.compile(r"Modell?ing Team['’]?s Response", re.IGNORECASE)
 BRACKETS_RX = re.compile(r"<\s*([^>]+?)\s*>")
 Q_KEY_RX = re.compile(r"Q\d+\s*:", re.IGNORECASE)
-TEST_TAG_RX = re.compile(r"<\s*Test\s*(\w+)\s*>", re.IGNORECASE)
 
 
 # ==================== META EXTRACTION ====================
@@ -65,29 +64,43 @@ def extract_meta_from_rfr_header(line: str):
     parts = [norm(x) for x in BRACKETS_RX.findall(line)]
 
     rfr_q = ""
-    section = ""
     imvp = ""
-    test_tag = ""
+    section = ""
 
+    # RFR question (Q2: ...)
     for p in parts:
         if Q_KEY_RX.search(p):
             rfr_q = Q_KEY_RX.sub("", p).strip()
             break
 
+    # IMVP question (ends with ?)
     for p in parts:
-        if p.endswith("?") and p != rfr_q:
+        if p.endswith("?") and not Q_KEY_RX.search(p):
             imvp = p
+            break
 
+    # Section → short label only (NOT Q, NOT long text)
     for p in parts:
-        if p != rfr_q and not p.endswith("?") and not p.lower().startswith("test"):
+        if (
+            not p.endswith("?")
+            and not Q_KEY_RX.search(p)
+            and len(p.split()) <= 5
+            and not p.lower().startswith("test")
+        ):
             section = p
             break
 
-    m = TEST_TAG_RX.search(line)
-    if m:
-        test_tag = m.group(1).upper()
+    return rfr_q, section, imvp
 
-    return rfr_q, section, imvp, test_tag
+
+def extract_test_tags(line: str) -> List[str]:
+    """
+    <Test S1> <Test S2> → ['tests1', 'tests2']
+    """
+    return [
+        f"tests{m.group(1).lower()}"
+        for m in re.finditer(r'<\s*Test\s*(\w+)\s*>', line, re.IGNORECASE)
+    ]
 
 
 # ==================== HELPERS ====================
@@ -122,9 +135,10 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
         line = L[i]
 
         if RFR_RX.search(line):
-            rfr_q, section, imvp, test_tag = extract_meta_from_rfr_header(line)
+            rfr_q, section, imvp = extract_meta_from_rfr_header(line)
+            test_tags = extract_test_tags(line)
 
-            f_items: Dict[str, str] = {}
+            followups: Dict[str, str] = {}
             direct_response = ""
 
             current_f_key = None
@@ -168,7 +182,7 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
 
                     if collecting_response:
                         if current_f_key:
-                            f_items[current_f_key] = content
+                            followups[current_f_key] = content
                         else:
                             direct_response = content
                         collecting_response = False
@@ -185,26 +199,26 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
 
                 i += 1
 
-            # -------- BUILD OUTPUT --------
-            rfr_payload = {}
-
-            if f_items:
-                rfr_payload = f_items
+            # -------- BUILD RFR PAYLOAD --------
+            if followups:
+                rfr_payload = followups
             elif direct_response:
-                rfr_payload = {"response": direct_response}
+                rfr_payload = direct_response
+            else:
+                i += 1
+                continue
 
-            if rfr_payload:
-                row = {
-                    "IMVP Question": imvp,
-                    "Section": section,
-                    "rfr": {rfr_q: rfr_payload},
-                }
+            row = {
+                "IMVP Question": imvp,
+                "Section": section,
+                "rfr": {rfr_q: rfr_payload},
+            }
 
-                if test_tag:
-                    row["Test Tag"] = test_tag
+            # add test flags
+            for tag in test_tags:
+                row[tag] = True
 
-                rows.append(row)
-
+            rows.append(row)
             continue
 
         i += 1
