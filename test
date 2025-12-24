@@ -1,3 +1,4 @@
+
 import re
 import json
 import unicodedata
@@ -23,7 +24,7 @@ def norm(s: str) -> str:
 
 def read_docx_lines(path: str) -> List[str]:
     doc = Document(path)
-    lines = []
+    lines: List[str] = []
 
     for child in doc.element.body.iterchildren():
         if child.tag == qn("w:p"):
@@ -65,13 +66,13 @@ def extract_meta_from_rfr_header(line: str):
     imvp = ""
     section = ""
 
-    # RFR Question
+    # RFR question (Q1/Q2/...)
     for p in parts:
         if Q_KEY_RX.search(p):
             rfr_q = Q_KEY_RX.sub("", p).strip()
             break
 
-    # IMVP Question
+    # IMVP question (ends with ?)
     for p in parts:
         if p.endswith("?") and not Q_KEY_RX.search(p):
             imvp = p
@@ -94,11 +95,12 @@ def extract_meta_from_rfr_header(line: str):
 def extract_test_tags(line: str) -> List[str]:
     """
     <Test S1> -> ['tests1']
+    <Test S2> -> ['tests2']
     """
-    return [
-        f"tests{m.group(1).lower()}"
-        for m in re.finditer(r"<\s*Test\s*(\w+)\s*>", line, re.IGNORECASE)
-    ]
+    tags = []
+    for m in re.finditer(r"<\s*Test\s*S(\d+)\s*>", line, re.IGNORECASE):
+        tags.append(f"tests{m.group(1)}")
+    return tags
 
 
 # ==================== CORE PARSER ====================
@@ -111,7 +113,7 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
             break
 
     L = lines[start:]
-    rows = []
+    rows: List[Dict] = []
     i = 0
 
     while i < len(L):
@@ -121,12 +123,12 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
             rfr_q, section, imvp = extract_meta_from_rfr_header(line)
             test_tags = extract_test_tags(line)
 
-            followups = {}
+            followups: Dict[str, str] = {}
             response_text = ""
             current_f_key = None
 
             in_block = False
-            buffer = []
+            buffer: List[str] = []
             collecting_response = False
 
             i += 1
@@ -134,22 +136,26 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
             while i < len(L) and not RFR_RX.search(L[i]):
                 cur = L[i].strip()
 
+                # ---- Response header ----
                 if RESP_HDR_RX.search(cur):
                     collecting_response = True
                     i += 1
                     continue
 
+                # ---- Open < ----
                 if cur.startswith("<"):
                     in_block = True
                     buffer = []
 
-                    f_match = re.search(r"<\s*F(\d+)\s*:\s*(.*)", cur, re.IGNORECASE)
+                    # Detect F1/F2/... ONLY here
+                    f_match = re.search(r"<\s*F\d+\s*:\s*(.*)", cur, re.IGNORECASE)
                     if f_match:
-                        current_f_key = f_match.group(2).strip("–- ").strip()
+                        current_f_key = f_match.group(1).strip("–- ").strip()
 
                     i += 1
                     continue
 
+                # ---- Close > ----
                 if cur.startswith(">"):
                     content = norm(" ".join(buffer))
                     in_block = False
@@ -165,6 +171,7 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
                     i += 1
                     continue
 
+                # ---- Collect block text ----
                 if in_block:
                     buffer.append(cur)
                     i += 1
@@ -172,7 +179,7 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
 
                 i += 1
 
-            # -------- BUILD RFR PAYLOAD --------
+            # ---- Build RFR payload ----
             if followups:
                 rfr_payload = followups
             else:
@@ -181,12 +188,14 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
             row = {
                 "IMVP Question": imvp,
                 "Section": section,
-                "rfr": {rfr_q: rfr_payload},
+                "rfr": {
+                    rfr_q: rfr_payload
+                }
             }
 
-            # 🔥 THIS IS THE IMPORTANT PART
+            # ✅ tests1 value = IMVP Question
             for tag in test_tags:
-                row[tag] = imvp   # VALUE = IMVP QUESTION
+                row[tag] = imvp
 
             rows.append(row)
             continue
@@ -200,6 +209,10 @@ def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
 
 def main():
     DOCX_PATH = "rfrtest.docx"
+
+    if not Path(DOCX_PATH).exists():
+        print("❌ DOCX file not found")
+        return
 
     rows = parse_lines_after_request_items(read_docx_lines(DOCX_PATH))
 
