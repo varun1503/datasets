@@ -252,4 +252,148 @@ def main():
 
 
 if __name__ == "__main__":
+    main()    t = re.sub(r'\b[a-z]\)', '', t)
+    return not t.strip()
+
+
+def clean_f_key(text: str, fallback: str) -> str:
+    if not text or is_only_bullets(text):
+        return fallback
+    return text.strip()
+
+
+# ==================== CORE PARSER ====================
+
+def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
+    start = 0
+    for i, t in enumerate(lines):
+        if REQ_ITEMS_RX.search(t):
+            start = i + 1
+            break
+
+    L = lines[start:]
+    rows = []
+    i = 0
+
+    while i < len(L):
+        line = L[i]
+
+        if RFR_RX.search(line):
+            rfr_q, section, imvp = extract_meta_from_rfr_header(line)
+            test_tags = extract_test_tags(line)
+
+            followups: Dict[str, str] = {}
+            direct_response = ""
+
+            current_f_key = None
+            in_block = False
+            buffer = []
+            collecting_response = False
+
+            i += 1
+
+            while i < len(L) and not RFR_RX.search(L[i]):
+                cur = L[i].strip()
+
+                # -------- RESPONSE HEADER --------
+                if RESP_HDR_RX.search(cur):
+                    collecting_response = True
+                    i += 1
+                    continue
+
+                # -------- OPEN < --------
+                if cur.startswith("<"):
+                    in_block = True
+                    buffer = []
+
+                    f_match = re.search(r'<\s*F(\d+)\s*:\s*(.*)', cur, re.IGNORECASE)
+                    if f_match:
+                        f_num = f"F{f_match.group(1)}"
+                        f_text = clean_f_key(f_match.group(2).strip(), f_num)
+                        current_f_key = f_text
+
+                        rest = f_match.group(2).strip()
+                        if rest:
+                            buffer.append(rest)
+
+                    i += 1
+                    continue
+
+                # -------- CLOSE > --------
+                if cur.startswith(">"):
+                    content = norm(" ".join(buffer))
+                    in_block = False
+
+                    if collecting_response:
+                        if current_f_key:
+                            followups[current_f_key] = content
+                        else:
+                            direct_response = content
+                        collecting_response = False
+
+                    buffer = []
+                    i += 1
+                    continue
+
+                # -------- COLLECT --------
+                if in_block:
+                    buffer.append(cur)
+                    i += 1
+                    continue
+
+                i += 1
+
+            # -------- BUILD RFR PAYLOAD --------
+            if followups:
+                rfr_payload = followups
+            elif direct_response:
+                rfr_payload = direct_response
+            else:
+                i += 1
+                continue
+
+            row = {
+                "IMVP Question": imvp,
+                "Section": section,
+                "rfr": {rfr_q: rfr_payload},
+            }
+
+            # add test flags
+            for tag in test_tags:
+                row[tag] = True
+
+            rows.append(row)
+            continue
+
+        i += 1
+
+    return rows
+
+
+# ==================== MAIN ====================
+
+def main():
+    DOCX_PATH = "rfrtest.docx"
+    OUT_JSON = "rfr_rows.json"
+    OUT_CSV = "rfr_rows.csv"
+
+    if not Path(DOCX_PATH).exists():
+        print("❌ DOCX file not found")
+        return
+
+    lines = read_docx_lines(DOCX_PATH)
+    rows = parse_lines_after_request_items(lines)
+
+    with open(OUT_JSON, "w", encoding="utf-8") as f:
+        json.dump(rows, f, indent=2, ensure_ascii=False)
+
+    df = pd.DataFrame({"finding": rows})
+    df["file name"] = os.path.basename(DOCX_PATH)
+    df["type"] = "rfr"
+    df.to_csv(OUT_CSV, index=False)
+
+    print("✅ Parsing completed successfully")
+
+
+if __name__ == "__main__":
     main()
