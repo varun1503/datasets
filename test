@@ -12,30 +12,23 @@ from docx.table import Table
 
 # ==================== NORMALIZATION ====================
 
-def norm_keep_content(s: str) -> str:
-    """
-    Normalize unicode & whitespace WITHOUT destroying structure
-    """
+def norm(s: str) -> str:
     if not s:
         return ""
-    s = unicodedata.normalize("NFKC", s)
-    s = s.replace("\u00A0", " ")
-    return s.strip()
+    s = unicodedata.normalize("NFKC", s).replace("\u00A0", " ")
+    return re.sub(r"\s+", " ", s).strip()
 
 
 # ==================== DOCX READING ====================
 
 def read_docx_lines(path: str) -> List[str]:
-    """
-    Read DOCX content exactly as Word provides it
-    """
     doc = Document(path)
     lines = []
 
     for child in doc.element.body.iterchildren():
         if child.tag == qn("w:p"):
             p = Paragraph(child, doc)
-            t = norm_keep_content(p.text)
+            t = norm(p.text)
             if t:
                 lines.append(t)
 
@@ -45,7 +38,7 @@ def read_docx_lines(path: str) -> List[str]:
                 row_text = []
                 for cell in row.cells:
                     for p in cell.paragraphs:
-                        t = norm_keep_content(p.text)
+                        t = norm(p.text)
                         if t:
                             row_text.append(t)
                 if row_text:
@@ -54,114 +47,68 @@ def read_docx_lines(path: str) -> List[str]:
     return lines
 
 
-# ==================== BLOCK RECONSTRUCTION ====================
+# ==================== HELPERS ====================
 
-def rebuild_angle_blocks(lines: List[str]) -> List[str]:
-    """
-    Merge multi-line < ... > blocks into single logical lines
-    """
-    rebuilt = []
-    buffer = []
-    in_block = False
-
-    for line in lines:
-        if "<" in line and not in_block:
-            in_block = True
-            buffer = [line]
-            if ">" in line:
-                rebuilt.append(" ".join(buffer))
-                buffer = []
-                in_block = False
-            continue
-
-        if in_block:
-            buffer.append(line)
-            if ">" in line:
-                rebuilt.append(" ".join(buffer))
-                buffer = []
-                in_block = False
-            continue
-
-        rebuilt.append(line)
-
-    return rebuilt
-
-
-# ==================== REGEX ====================
-
-RFR_RX = re.compile(r"RFR\s*\d+", re.IGNORECASE)
+BRACKET_BLOCK_RX = re.compile(r"<\s*([^>]+?)\s*>")
+TEST_RX = re.compile(r"Test\s*S(\d+)", re.IGNORECASE)
+F_RX = re.compile(r"F\d+\s*:\s*(.*)", re.IGNORECASE)
 Q_RX = re.compile(r"Q\d+\s*:\s*(.*)", re.IGNORECASE)
-TEST_RX = re.compile(r"<\s*Test\s*S(\d+)\s*>", re.IGNORECASE)
-F_RX = re.compile(r"<\s*F\d+\s*:\s*(.*?)>", re.IGNORECASE)
 RESP_HDR_RX = re.compile(r"Modell?ing Team['’]?s Response", re.IGNORECASE)
-SECTION_RX = re.compile(r"<\s*([A-Za-z ]{2,30})\s*>")
-IMVP_RX = re.compile(r"\?(?!.*\?)")  # last question
 
 
 # ==================== CORE PARSER ====================
 
 def parse_doc(lines: List[str]) -> List[Dict]:
-    lines = rebuild_angle_blocks(lines)
     rows = []
     i = 0
 
     while i < len(lines):
         line = lines[i]
 
-        if RFR_RX.search(line):
-            # -------- RFR --------
-            rfr_q = Q_RX.search(line).group(1).strip()
+        if "RFR" in line:
+            blocks = [norm(b) for b in BRACKET_BLOCK_RX.findall(line)]
 
-            # -------- SECTION --------
+            rfr_q = ""
             section = ""
-            for m in SECTION_RX.finditer(line):
-                val = m.group(1)
-                if not val.lower().startswith("test"):
-                    section = val
-                    break
-
-            # -------- IMVP --------
             imvp = ""
-            questions = re.findall(r"<([^>]+\?)>", line)
-            if questions:
-                imvp = questions[-1].strip()
+            test_tags = []
+            current_f = None
 
-            # -------- TEST TAG --------
-            test_tags = [f"tests{m.group(1)}" for m in TEST_RX.finditer(line)]
+            # ---- classify header blocks ----
+            for b in blocks:
+                if Q_RX.match(b):
+                    rfr_q = Q_RX.match(b).group(1).strip()
+                elif b.endswith("?"):
+                    imvp = b
+                elif TEST_RX.search(b):
+                    test_tags.append(f"tests{TEST_RX.search(b).group(1)}")
+                elif F_RX.match(b):
+                    current_f = F_RX.match(b).group(1).strip("–- ").strip()
+                elif not section and len(b.split()) <= 5:
+                    section = b
 
-            # -------- F1 --------
-            f_key = None
+            # ---- read response ----
             response = ""
-
             j = i + 1
             while j < len(lines):
-                cur = lines[j]
-
-                # F1 block
-                fm = F_RX.search(cur)
-                if fm:
-                    f_key = fm.group(1)
-                    f_key = re.sub(r"[–-].*", "", f_key).strip()
-
-                # Response
-                if RESP_HDR_RX.search(cur):
+                if RESP_HDR_RX.search(lines[j]):
                     k = j + 1
                     while k < len(lines):
                         if "<" in lines[k]:
-                            response = re.sub(r"[<>]", "", lines[k]).strip()
+                            response = norm(re.sub(r"[<>]", "", lines[k]))
                             break
                         k += 1
                     break
-
                 j += 1
 
-            # -------- BUILD --------
+            rfr_payload = (
+                {current_f: response} if current_f else response
+            )
+
             row = {
                 "IMVP Question": imvp,
                 "Section": section,
-                "rfr": {
-                    rfr_q: {f_key: response} if f_key else response
-                }
+                "rfr": {rfr_q: rfr_payload}
             }
 
             for t in test_tags:
