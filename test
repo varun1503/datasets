@@ -2,7 +2,7 @@ import re
 import json
 import unicodedata
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from docx import Document
 from docx.oxml.ns import qn
@@ -53,7 +53,7 @@ BRACKET_BLOCK_RX = re.compile(r"<\s*([^>]+?)\s*>")
 TEST_RX = re.compile(r"Test\s*S(\d+)", re.IGNORECASE)
 F_RX = re.compile(r"F\d+\s*:\s*(.*)", re.IGNORECASE)
 Q_RX = re.compile(r"Q\d+\s*:\s*(.*)", re.IGNORECASE)
-RESP_HDR_RX = re.compile(r"Modell?ing Team['’]?s Response", re.IGNORECASE)
+RESP_HDR_RX = re.compile(r"Modell?ing Team['']?s Response", re.IGNORECASE)
 
 
 # ==================== CORE PARSER ====================
@@ -72,7 +72,7 @@ def parse_doc(lines: List[str]) -> List[Dict]:
             section = ""
             imvp = ""
             test_tags = []
-            current_f = None
+            f_items = {}  # Store F-item name -> response
 
             # ---- classify header blocks ----
             for b in blocks:
@@ -82,28 +82,73 @@ def parse_doc(lines: List[str]) -> List[Dict]:
                     imvp = b
                 elif TEST_RX.search(b):
                     test_tags.append(f"tests{TEST_RX.search(b).group(1)}")
-                elif F_RX.match(b):
-                    current_f = F_RX.match(b).group(1).strip("–- ").strip()
                 elif not section and len(b.split()) <= 5:
                     section = b
 
-            # ---- read response ----
-            response = ""
-            j = i + 1
-            while j < len(lines):
-                if RESP_HDR_RX.search(lines[j]):
-                    k = j + 1
-                    while k < len(lines):
-                        if "<" in lines[k]:
-                            response = norm(re.sub(r"[<>]", "", lines[k]))
-                            break
-                        k += 1
-                    break
-                j += 1
+            # ---- Move past RFR header ----
+            i += 1
 
-            rfr_payload = (
-                {current_f: response} if current_f else response
-            )
+            # ---- Look for F-items and responses ----
+            current_f = None
+            in_angle_block = False
+            angle_buffer = []
+
+            while i < len(lines) and "RFR" not in lines[i]:
+                cur = lines[i].strip()
+
+                # Check for F-item header
+                f_match = F_RX.match(cur)
+                if f_match:
+                    current_f = f_match.group(1).strip("–- ").strip()
+                    if current_f not in f_items:
+                        f_items[current_f] = ""
+                    i += 1
+                    continue
+
+                # Check for Modelling Team Response
+                if RESP_HDR_RX.search(cur):
+                    i += 1
+                    continue
+
+                # Check for opening angle bracket
+                if cur == "<":
+                    in_angle_block = True
+                    angle_buffer = []
+                    i += 1
+                    continue
+
+                # Check for closing angle bracket
+                if cur == ">" or cur.startswith(">"):
+                    in_angle_block = False
+                    if angle_buffer:
+                        content = norm(" ".join(angle_buffer))
+                        if current_f:
+                            # Store response for current F-item
+                            f_items[current_f] = content
+                            current_f = None  # Reset for next F-item
+                        else:
+                            # Direct response without F-item
+                            f_items["response"] = content
+                        angle_buffer = []
+                    i += 1
+                    continue
+
+                # Collect content inside angle brackets
+                if in_angle_block:
+                    angle_buffer.append(cur)
+
+                i += 1
+
+            # Flush remaining buffer
+            if angle_buffer:
+                content = norm(" ".join(angle_buffer))
+                if current_f:
+                    f_items[current_f] = content
+                elif not f_items:
+                    f_items["response"] = content
+
+            # Build the row
+            rfr_payload = f_items if f_items else {"response": ""}
 
             row = {
                 "IMVP Question": imvp,
@@ -115,7 +160,6 @@ def parse_doc(lines: List[str]) -> List[Dict]:
                 row[t] = imvp
 
             rows.append(row)
-            i = j
             continue
 
         i += 1
@@ -128,10 +172,25 @@ def parse_doc(lines: List[str]) -> List[Dict]:
 def main():
     DOCX_PATH = "rfrtest.docx"
 
-    lines = read_docx_lines(DOCX_PATH)
-    rows = parse_doc(lines)
+    if not Path(DOCX_PATH).exists():
+        print(f"Error: File '{DOCX_PATH}' not found")
+        return
 
-    print(json.dumps(rows, indent=2, ensure_ascii=False))
+    try:
+        lines = read_docx_lines(DOCX_PATH)
+        rows = parse_doc(lines)
+
+        print(json.dumps(rows, indent=2, ensure_ascii=False))
+        
+        # Save to file
+        with open("rfr_output.json", "w", encoding="utf-8") as f:
+            json.dump(rows, f, indent=2, ensure_ascii=False)
+        print(f"\nSaved {len(rows)} rows to rfr_output.json")
+
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == "__main__":
