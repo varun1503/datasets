@@ -1,8 +1,226 @@
 import re
+import json
+import unicodedata
+from pathlib import Path
+from typing import List, Dict, Optional
 
-test = "<F1 Amex US SBS Customer Management Dataset –"
+from docx import Document
+from docx.oxml.ns import qn
+from docx.text.paragraph import Paragraph
+from docx.table import Table
 
-F_RX = re.compile(r"<?\s*F\d+\b\s*:?\s*(.*)", re.IGNORECASE)
 
-print(bool(F_RX.match(test)))   # True
-print(F_RX.match(test).group(1))
+# ==================== NORMALIZATION ====================
+
+def norm(s: str) -> str:
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFKC", s).replace("\u00A0", " ")
+    return re.sub(r"\s+", " ", s).strip()
+
+
+# ==================== DOCX READING ====================
+
+def read_docx_lines(path: str) -> List[str]:
+    doc = Document(path)
+    lines = []
+
+    for child in doc.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            p = Paragraph(child, doc)
+            t = norm(p.text)
+            if t:
+                lines.append(t)
+
+        elif child.tag == qn("w:tbl"):
+            tbl = Table(child, doc)
+            for row in tbl.rows:
+                row_text = []
+                for cell in row.cells:
+                    for p in cell.paragraphs:
+                        t = norm(p.text)
+                        if t:
+                            row_text.append(t)
+                if row_text:
+                    lines.append(" ".join(row_text))
+
+    return lines
+
+
+# ==================== HELPERS ====================
+
+BRACKET_BLOCK_RX = re.compile(r"<\s*([^>]+?)\s*>")
+TEST_RX = re.compile(r"Test\s*S(\d+)", re.IGNORECASE)
+F_RX = re.compile(r"<?\s*F(\d+)\s*:?\s*(.*?)(?:–|$)", re.IGNORECASE)
+Q_RX = re.compile(r"Q\d+\s*:\s*(.*)", re.IGNORECASE)
+RESP_HDR_RX = re.compile(r"Modell?ing Team['']?s Response", re.IGNORECASE)
+
+
+# ==================== CORE PARSER ====================
+
+def parse_doc(lines: List[str]) -> List[Dict]:
+    rows = []
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+
+        if "RFR" in line:
+            blocks = [norm(b) for b in BRACKET_BLOCK_RX.findall(line)]
+            
+            rfr_q = ""
+            section = ""
+            imvp = ""
+            test_tags = []
+            f_items = {}  # Store F-item name -> response
+
+            # ---- classify header blocks ----
+            for b in blocks:
+                if Q_RX.match(b):
+                    rfr_q = Q_RX.match(b).group(1).strip()
+                elif b.endswith("?"):
+                    imvp = b
+                elif TEST_RX.search(b):
+                    test_tags.append(f"tests{TEST_RX.search(b).group(1)}")
+                elif not section and len(b.split()) <= 5:
+                    section = b
+
+            # Check if F-item starts on the RFR line itself (after brackets)
+            remaining_line = line
+            for b in blocks:
+                remaining_line = remaining_line.replace(f"<{b}>", "", 1)
+            
+            f_match = F_RX.search(remaining_line)
+            initial_f = None
+            initial_f_started_on_rfr_line = False
+            
+            if f_match:
+                initial_f = f_match.group(2).strip("–- ").strip()
+                initial_f_started_on_rfr_line = True
+                if initial_f:
+                    f_items[initial_f] = ""
+
+            # ---- Move past RFR header ----
+            i += 1
+
+            # ---- Look for F-items and responses ----
+            current_f = initial_f
+            in_angle_block = initial_f_started_on_rfr_line  # If F1 on RFR line, we're already in a block
+            angle_buffer = []
+            collecting_f_content = initial_f_started_on_rfr_line
+            
+            while i < len(lines) and "RFR" not in lines[i]:
+                cur = lines[i].strip()
+
+                # Check for closing angle bracket first (since F-item might span multiple lines)
+                if cur == ">" or cur.startswith(">"):
+                    in_angle_block = False
+                    if angle_buffer:
+                        content = norm(" ".join(angle_buffer))
+                        if collecting_f_content and current_f:
+                            # This was F-item question content, store but don't clear current_f yet
+                            # (we'll get the response later)
+                            collecting_f_content = False
+                        elif current_f:
+                            # This is response for current F-item
+                            f_items[current_f] = content
+                            current_f = None
+                        else:
+                            # Direct response without F-item
+                            f_items["response"] = content
+                        angle_buffer = []
+                    i += 1
+                    continue
+
+                # Check for opening angle bracket
+                if cur == "<":
+                    in_angle_block = True
+                    angle_buffer = []
+                    i += 1
+                    continue
+
+                # Inside angle bracket block - check if it's a new F-item
+                if in_angle_block:
+                    # Check if first line in block is F-item (and we're not continuing from RFR line)
+                    if not angle_buffer and not initial_f_started_on_rfr_line:
+                        f_match = F_RX.match(cur)
+                        if f_match:
+                            current_f = f_match.group(2).strip("–- ").strip()
+                            if current_f not in f_items:
+                                f_items[current_f] = ""
+                            collecting_f_content = True
+                            i += 1
+                            continue
+                    
+                    # We've moved past the RFR line, so clear this flag
+                    initial_f_started_on_rfr_line = False
+                    
+                    # Collect line inside angle bracket
+                    angle_buffer.append(cur)
+                    i += 1
+                    continue
+
+                # Check for Modelling Team Response (outside angle brackets)
+                if RESP_HDR_RX.search(cur):
+                    # Next angle bracket block will be the response
+                    i += 1
+                    continue
+
+                i += 1
+
+            # Flush remaining buffer
+            if angle_buffer:
+                content = norm(" ".join(angle_buffer))
+                if current_f:
+                    f_items[current_f] = content
+                elif not f_items:
+                    f_items["response"] = content
+
+            # Build the row
+            rfr_payload = f_items if f_items else {"response": ""}
+
+            row = {
+                "IMVP Question": imvp,
+                "Section": section,
+                "rfr": {rfr_q: rfr_payload}
+            }
+
+            for t in test_tags:
+                row[t] = imvp
+
+            rows.append(row)
+            continue
+
+        i += 1
+
+    return rows
+
+
+# ==================== MAIN ====================
+
+def main():
+    DOCX_PATH = "rfrtest.docx"
+
+    if not Path(DOCX_PATH).exists():
+        print(f"Error: File '{DOCX_PATH}' not found")
+        return
+
+    try:
+        lines = read_docx_lines(DOCX_PATH)
+        rows = parse_doc(lines)
+
+        print(json.dumps(rows, indent=2, ensure_ascii=False))
+
+        # Save to file
+        with open("rfr_output.json", "w", encoding="utf-8") as f:
+            json.dump(rows, f, indent=2, ensure_ascii=False)
+        print(f"\nSaved {len(rows)} rows to rfr_output.json")
+
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+if __name__ == "__main__":
+    main()
