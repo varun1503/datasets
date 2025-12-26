@@ -1,3 +1,4 @@
+
 import re
 import json
 import unicodedata
@@ -90,38 +91,56 @@ def parse_doc(lines: List[str]) -> List[Dict]:
             for b in blocks:
                 remaining_line = remaining_line.replace(f"<{b}>", "", 1)
             
+            # If F-item detected but line doesn't end with >, keep reading until >
             f_match = F_RX.search(remaining_line)
             initial_f = None
-            initial_f_started_on_rfr_line = False
+            initial_f_content = []
             
             if f_match:
                 initial_f = f_match.group(2).strip("–- ").strip()
-                initial_f_started_on_rfr_line = True
-                if initial_f:
-                    f_items[initial_f] = ""
-
-            # ---- Move past RFR header ----
-            i += 1
+                
+                # Check if line ends with > (F-item complete on one line)
+                if ">" not in remaining_line:
+                    # F-item spans multiple lines, collect until >
+                    temp_i = i + 1
+                    while temp_i < len(lines) and ">" not in lines[temp_i]:
+                        initial_f_content.append(lines[temp_i].strip())
+                        temp_i += 1
+                    # Include the line with > but remove the >
+                    if temp_i < len(lines):
+                        last_line = lines[temp_i].strip().replace(">", "").strip()
+                        if last_line:
+                            initial_f_content.append(last_line)
+                    
+                    # Store F-item with its content
+                    if initial_f:
+                        f_items[initial_f] = norm(" ".join(initial_f_content))
+                    
+                    # Move index past the F-item block
+                    i = temp_i + 1
+                else:
+                    # F-item complete on RFR line
+                    if initial_f:
+                        f_items[initial_f] = ""
+                    i += 1
+            else:
+                # No F-item on RFR line, move to next line
+                i += 1
 
             # ---- Look for F-items and responses ----
             current_f = initial_f
-            in_angle_block = initial_f_started_on_rfr_line  # If F1 on RFR line, we're already in a block
+            in_angle_block = False
             angle_buffer = []
-            collecting_f_content = initial_f_started_on_rfr_line
             
             while i < len(lines) and "RFR" not in lines[i]:
                 cur = lines[i].strip()
 
-                # Check for closing angle bracket first (since F-item might span multiple lines)
+                # Check for closing angle bracket
                 if cur == ">" or cur.startswith(">"):
                     in_angle_block = False
                     if angle_buffer:
                         content = norm(" ".join(angle_buffer))
-                        if collecting_f_content and current_f:
-                            # This was F-item question content, store but don't clear current_f yet
-                            # (we'll get the response later)
-                            collecting_f_content = False
-                        elif current_f:
+                        if current_f:
                             # This is response for current F-item
                             f_items[current_f] = content
                             current_f = None
@@ -139,30 +158,40 @@ def parse_doc(lines: List[str]) -> List[Dict]:
                     i += 1
                     continue
 
-                # Inside angle bracket block - check if it's a new F-item
+                # Inside angle bracket block
                 if in_angle_block:
-                    # Check if first line in block is F-item (and we're not continuing from RFR line)
-                    if not angle_buffer and not initial_f_started_on_rfr_line:
+                    # Check if first line in block is a new F-item
+                    if not angle_buffer:
                         f_match = F_RX.match(cur)
                         if f_match:
                             current_f = f_match.group(2).strip("–- ").strip()
-                            if current_f not in f_items:
-                                f_items[current_f] = ""
-                            collecting_f_content = True
-                            i += 1
+                            # Read until > to get complete F-item
+                            temp_content = []
+                            temp_i = i + 1
+                            while temp_i < len(lines) and ">" not in lines[temp_i]:
+                                temp_content.append(lines[temp_i].strip())
+                                temp_i += 1
+                            # Include the line with >
+                            if temp_i < len(lines):
+                                last_line = lines[temp_i].strip().replace(">", "").strip()
+                                if last_line:
+                                    temp_content.append(last_line)
+                            
+                            if current_f:
+                                f_items[current_f] = norm(" ".join(temp_content))
+                            
+                            # Move index past this F-item block
+                            i = temp_i + 1
+                            in_angle_block = False
                             continue
                     
-                    # We've moved past the RFR line, so clear this flag
-                    initial_f_started_on_rfr_line = False
-                    
-                    # Collect line inside angle bracket
+                    # Collect line inside angle bracket (for responses)
                     angle_buffer.append(cur)
                     i += 1
                     continue
 
                 # Check for Modelling Team Response (outside angle brackets)
                 if RESP_HDR_RX.search(cur):
-                    # Next angle bracket block will be the response
                     i += 1
                     continue
 
