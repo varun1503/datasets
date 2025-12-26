@@ -1,4 +1,3 @@
-
 import re
 import json
 import unicodedata
@@ -91,7 +90,7 @@ def parse_doc(lines: List[str]) -> List[Dict]:
             for b in blocks:
                 remaining_line = remaining_line.replace(f"<{b}>", "", 1)
             
-            # If F-item detected but line doesn't end with >, keep reading until >
+            # Check for F-item pattern in remaining line
             f_match = F_RX.search(remaining_line)
             initial_f = None
             initial_f_content = []
@@ -99,16 +98,199 @@ def parse_doc(lines: List[str]) -> List[Dict]:
             if f_match:
                 initial_f = f_match.group(2).strip("–- ").strip()
                 
-                # Check if line ends with > (F-item complete on one line)
-                if ">" not in remaining_line:
-                    # F-item spans multiple lines, collect until >
+                # Check if this F-item block is closed on the same line
+                # If the remaining_line after F-item doesn't have >, it spans multiple lines
+                f_start_pos = remaining_line.find("<F") if "<F" in remaining_line else remaining_line.find("F")
+                after_f = remaining_line[f_start_pos:] if f_start_pos >= 0 else remaining_line
+                
+                if ">" not in after_f:
+                    # F-item spans multiple lines, collect until we hit a line with just ">"
                     temp_i = i + 1
-                    while temp_i < len(lines) and ">" not in lines[temp_i]:
-                        initial_f_content.append(lines[temp_i].strip())
+                    while temp_i < len(lines):
+                        next_line = lines[temp_i].strip()
+                        if next_line == ">" or next_line.endswith(">"):
+                            # Found the closing bracket
+                            if next_line != ">":
+                                # Line has content before >
+                                initial_f_content.append(next_line.replace(">", "").strip())
+                            break
+                        initial_f_content.append(next_line)
                         temp_i += 1
-                    # Include the line with > but remove the >
-                    if temp_i < len(lines):
-                        last_line = lines[temp_i].strip().replace(">", "").strip()
+                    
+                    # Store F-item with its content
+                    if initial_f:
+                        f_items[initial_f] = norm(" ".join(initial_f_content))
+                    
+                    # Move index past the F-item block
+                    i = temp_i + 1
+                else:
+                    # F-item complete on RFR line
+                    if initial_f:
+                        f_items[initial_f] = ""
+                    i += 1
+            else:
+                # No F-item on RFR line, move to next line
+                i += 1
+
+            # ---- Look for F-items and responses ----
+            current_f = initial_f
+            in_angle_block = False
+            angle_buffer = []
+            in_f_item_block = False
+            
+            while i < len(lines) and "RFR" not in lines[i]:
+                cur = lines[i].strip()
+
+                # Check for F-item that starts on its own line (not nested in < >)
+                if not in_angle_block:
+                    f_match = F_RX.match(cur)
+                    if f_match:
+                        current_f = f_match.group(2).strip("–- ").strip()
+                        in_f_item_block = True
+                        # Read until standalone > to get complete F-item content
+                        temp_content = []
+                        temp_i = i + 1
+                        while temp_i < len(lines):
+                            next_line = lines[temp_i].strip()
+                            if next_line == ">":
+                                break
+                            if next_line.endswith(">"):
+                                content_part = next_line.replace(">", "").strip()
+                                if content_part:
+                                    temp_content.append(content_part)
+                                break
+                            temp_content.append(next_line)
+                            temp_i += 1
+                        
+                        if current_f:
+                            f_items[current_f] = norm(" ".join(temp_content)) if temp_content else ""
+                        
+                        # Move index past this F-item block
+                        i = temp_i + 1
+                        in_f_item_block = False
+                        continue
+
+                # Check for standalone closing angle bracket
+                if cur == ">":
+                    in_angle_block = False
+                    if angle_buffer:
+                        content = norm(" ".join(angle_buffer))
+                        if current_f:
+                            # This is response for current F-item
+                            f_items[current_f] = content
+                            current_f = None
+                        else:
+                            # Direct response without F-item
+                            f_items["response"] = content
+                        angle_buffer = []
+                    i += 1
+                    continue
+
+                # Check for opening angle bracket
+                if cur == "<":
+                    in_angle_block = True
+                    angle_buffer = []
+                    i += 1
+                    continue
+
+                # Inside angle bracket block
+                if in_angle_block:
+                    # Check if first line in block is a new F-item
+                    if not angle_buffer:
+                        f_match = F_RX.match(cur)
+                        if f_match:
+                            current_f = f_match.group(2).strip("–- ").strip()
+                            # Read until standalone > to get complete F-item
+                            temp_content = []
+                            temp_i = i + 1
+                            while temp_i < len(lines):
+                                next_line = lines[temp_i].strip()
+                                if next_line == ">":
+                                    break
+                                if next_line.endswith(">"):
+                                    temp_content.append(next_line.replace(">", "").strip())
+                                    break
+                                temp_content.append(next_line)
+                                temp_i += 1
+                            
+                            if current_f:
+                                f_items[current_f] = norm(" ".join(temp_content))
+                            
+                            # Move index past this F-item block
+                            i = temp_i + 1
+                            in_angle_block = False
+                            current_f = None  # Will get response later
+                            continue
+                    
+                    # Collect line inside angle bracket (for responses)
+                    angle_buffer.append(cur)
+                    i += 1
+                    continue
+
+                # Check for Modelling Team Response (outside angle brackets)
+                if RESP_HDR_RX.search(cur):
+                    # After this, we expect the response for current_f
+                    i += 1
+                    continue
+
+                i += 1
+
+            # Flush remaining buffer
+            if angle_buffer:
+                content = norm(" ".join(angle_buffer))
+                if current_f:
+                    f_items[current_f] = content
+                elif not f_items:
+                    f_items["response"] = content
+
+            # Build the row
+            rfr_payload = f_items if f_items else {"response": ""}
+
+            row = {
+                "IMVP Question": imvp,
+                "Section": section,
+                "rfr": {rfr_q: rfr_payload}
+            }
+
+            for t in test_tags:
+                row[t] = imvp
+
+            rows.append(row)
+            continue
+
+        i += 1
+
+    return rows
+
+
+# ==================== MAIN ====================
+
+def main():
+    DOCX_PATH = "rfrtest.docx"
+
+    if not Path(DOCX_PATH).exists():
+        print(f"Error: File '{DOCX_PATH}' not found")
+        return
+
+    try:
+        lines = read_docx_lines(DOCX_PATH)
+        rows = parse_doc(lines)
+
+        print(json.dumps(rows, indent=2, ensure_ascii=False))
+
+        # Save to file
+        with open("rfr_output.json", "w", encoding="utf-8") as f:
+            json.dump(rows, f, indent=2, ensure_ascii=False)
+        print(f"\nSaved {len(rows)} rows to rfr_output.json")
+
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+if __name__ == "__main__":
+    main()                        last_line = lines[temp_i].strip().replace(">", "").strip()
                         if last_line:
                             initial_f_content.append(last_line)
                     
