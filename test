@@ -1,39 +1,66 @@
 def restructure_with_angle_tags(items: list[str]) -> list[str]:
     """
-    Merge all content between '<' and '>' into a single list element,
-    while preserving the '<' and '>' tags.
+    - Merge content between < and >.
+    - Preserve < and >.
+    - For 'Modelling Team Response', output as:
+        "<", "Modelling Team Response: content", ">"
     """
     output = []
     buffer = []
     inside_block = False
+    is_model_response = False
 
     for item in items:
         text = item.strip()
 
-        # Start of a < ... > block
+        # Detect Modelling Team Response start (with or without <)
+        if "Modelling Team Response" in text and not inside_block:
+            inside_block = True
+            is_model_response = True
+            buffer = [text.replace("<", "").replace(">", "").strip()]
+            continue
+
+        # Start of normal < block
         if text.startswith("<") and not inside_block:
             inside_block = True
-            buffer = [text]
+            is_model_response = False
+            buffer = [text.replace("<", "").strip()]
             continue
 
-        # End of a < ... > block
+        # End of block
         if text.endswith(">") and inside_block:
-            buffer.append(text)
-            merged = " ".join(buffer)
-            output.append(merged)
+            clean_text = text.replace("<", "").replace(">", "").strip()
+            if clean_text:
+                buffer.append(clean_text)
+
+            merged_content = " ".join(buffer).strip()
+
+            if is_model_response:
+                output.extend([
+                    "<",
+                    merged_content,
+                    ">"
+                ])
+            else:
+                output.append(f"< {merged_content} >")
+
             buffer = []
             inside_block = False
+            is_model_response = False
             continue
 
-        # Content inside < ... >
+        # Inside block
         if inside_block:
-            buffer.append(text)
+            buffer.append(text.replace("<", "").replace(">", "").strip())
         else:
-            # Normal text outside tags
             output.append(text)
 
-    # Safety: if '<' was never closed
+    # Safety: unclosed block
     if buffer:
-        output.append(" ".join(buffer))
+        merged_content = " ".join(buffer).strip()
+        if is_model_response:
+            output.extend(["<", merged_content, ">"])
+        else:
+            output.append(f"< {merged_content} >")
 
     return output
