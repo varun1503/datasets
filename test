@@ -1,73 +1,81 @@
-def restructure_with_angle_tags(items: list[str]) -> list[str]:
-    output = []
+from fastapi import FastAPI
+from datetime import datetime
+from pydantic import BaseModel
+from typing import Dict, Any
 
-    collecting = False
-    buffer = []
+app = FastAPI(title="Travel MCP Server")
 
-    def is_model_response_start(text: str) -> bool:
-        t = text.lower()
-        return (
-            "modelling team response" in t
-            or "[modelling team response]" in t
-        )
+# --------------------------------------------------
+# MCP Schemas
+# --------------------------------------------------
+class MCPInvokeRequest(BaseModel):
+    name: str
+    arguments: Dict[str, Any] | None = None
 
-    def flush():
-        nonlocal collecting, buffer
-        if buffer:
-            merged = " ".join(buffer).strip()
-            output.extend([
-                "<",
-                f"Modelling Team Response: {merged}",
-                ">"
-            ])
-        buffer = []
-        collecting = False
 
-    for item in items:
-        text = item.strip()
+class MCPInvokeResponse(BaseModel):
+    result: Any
 
-        # ---- START of Modelling Team Response (both cases)
-        if is_model_response_start(text):
-            flush()
-            collecting = True
 
-            # remove markers and noise
-            cleaned = (
-                text
-                .replace("[", "")
-                .replace("]", "")
-                .replace("<", "")
-                .replace(">", "")
-                .replace("Modelling Team Response", "")
-                .replace(":", "")
-                .strip()
-            )
-            if cleaned:
-                buffer.append(cleaned)
-            continue
+# --------------------------------------------------
+# Tool Registry
+# --------------------------------------------------
+def get_time_of_day() -> str:
+    hour = datetime.now().hour
+    if 5 <= hour < 12:
+        return "morning"
+    elif 12 <= hour < 17:
+        return "afternoon"
+    elif 17 <= hour < 21:
+        return "evening"
+    return "night"
 
-        # ---- CONTINUE Modelling Team Response
-        if collecting:
-            # stop if a new logical block starts
-            if (
-                text.startswith("<")
-                or text.startswith("[")
-                or text.lower().startswith("f")
-                or text.lower().startswith("rfr")
-            ):
-                flush()
-                output.append(text)
-                continue
 
-            buffer.append(
-                text.replace("<", "").replace(">", "").strip()
-            )
-            continue
+def get_weather(location: str = "Bangalore") -> str:
+    return f"The weather in {location} is sunny with light clouds 🌤️"
 
-        # ---- NORMAL CONTENT
-        output.append(text)
 
-    # ---- SAFETY FLUSH
-    flush()
+TOOLS = {
+    "get_time_of_day": {
+        "description": "Returns current time of day",
+        "function": get_time_of_day,
+        "parameters": {},
+    },
+    "get_weather": {
+        "description": "Returns weather for a city",
+        "function": get_weather,
+        "parameters": {
+            "location": {"type": "string", "default": "Bangalore"}
+        },
+    },
+}
 
-    return output
+# --------------------------------------------------
+# MCP Endpoints
+# --------------------------------------------------
+@app.get("/tools")
+def list_tools():
+    """MCP: Tool discovery"""
+    return {
+        "tools": [
+            {
+                "name": name,
+                "description": meta["description"],
+                "parameters": meta["parameters"],
+            }
+            for name, meta in TOOLS.items()
+        ]
+    }
+
+
+@app.post("/invoke", response_model=MCPInvokeResponse)
+def invoke_tool(request: MCPInvokeRequest):
+    """MCP: Tool invocation"""
+    if request.name not in TOOLS:
+        raise ValueError(f"Tool {request.name} not found")
+
+    func = TOOLS[request.name]["function"]
+    args = request.arguments or {}
+
+    result = func(**args)
+    return MCPInvokeResponse(result=result)
