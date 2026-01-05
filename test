@@ -1,81 +1,63 @@
-from fastapi import FastAPI
-from datetime import datetime
-from pydantic import BaseModel
-from typing import Dict, Any
+import asyncio
+from agent_framework import ChatAgent
+from agent_framework import MCPStreamableHTTPTool
+from agent_framework import BaseChatClient
+from agent_framework import ChatMessage, Role, TextContent, ChatResponse
+from safechain.lcel import model
+from langchain_core.prompts import ChatPromptTemplate
+from typing import Sequence, Any
 
-app = FastAPI(title="Travel MCP Server")
+
+class MyChatClient(BaseChatClient):
+    async def _inner_get_response(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools=None,
+        **kwargs: Any,
+    ) -> ChatResponse:
+
+        prompt = ChatPromptTemplate.from_messages(
+            [(m.role.value, m.contents[0].text) for m in messages]
+        ).format_prompt()
+
+        llm = model("3")
+        result = llm.invoke(prompt)
+
+        return ChatResponse(
+            messages=ChatMessage(
+                role=Role.ASSISTANT,
+                contents=[TextContent(text=result.content)],
+            )
+        )
+
 
 # --------------------------------------------------
-# MCP Schemas
+# MCP TOOL WRAPPER
 # --------------------------------------------------
-class MCPInvokeRequest(BaseModel):
-    name: str
-    arguments: Dict[str, Any] | None = None
-
-
-class MCPInvokeResponse(BaseModel):
-    result: Any
-
+travel_mcp = MCPStreamableHTTPTool(
+    name="travel_mcp",
+    url="http://localhost:8006",
+)
 
 # --------------------------------------------------
-# Tool Registry
+# Agent
 # --------------------------------------------------
-def get_time_of_day() -> str:
-    hour = datetime.now().hour
-    if 5 <= hour < 12:
-        return "morning"
-    elif 12 <= hour < 17:
-        return "afternoon"
-    elif 17 <= hour < 21:
-        return "evening"
-    return "night"
+class GreetingAgent(ChatAgent):
+    def __init__(self):
+        super().__init__(
+            name="GreetingAgent",
+            chat_client=MyChatClient(),
+            instructions="Use MCP tools for time and weather when helpful.",
+            tools=[travel_mcp],  # 👈 MCP SERVER
+        )
 
 
-def get_weather(location: str = "Bangalore") -> str:
-    return f"The weather in {location} is sunny with light clouds 🌤️"
+async def main():
+    agent = GreetingAgent()
+    response = await agent.run("Hi, how is the weather?")
+    print(response.text)
 
 
-TOOLS = {
-    "get_time_of_day": {
-        "description": "Returns current time of day",
-        "function": get_time_of_day,
-        "parameters": {},
-    },
-    "get_weather": {
-        "description": "Returns weather for a city",
-        "function": get_weather,
-        "parameters": {
-            "location": {"type": "string", "default": "Bangalore"}
-        },
-    },
-}
-
-# --------------------------------------------------
-# MCP Endpoints
-# --------------------------------------------------
-@app.get("/tools")
-def list_tools():
-    """MCP: Tool discovery"""
-    return {
-        "tools": [
-            {
-                "name": name,
-                "description": meta["description"],
-                "parameters": meta["parameters"],
-            }
-            for name, meta in TOOLS.items()
-        ]
-    }
-
-
-@app.post("/invoke", response_model=MCPInvokeResponse)
-def invoke_tool(request: MCPInvokeRequest):
-    """MCP: Tool invocation"""
-    if request.name not in TOOLS:
-        raise ValueError(f"Tool {request.name} not found")
-
-    func = TOOLS[request.name]["function"]
-    args = request.arguments or {}
-
-    result = func(**args)
-    return MCPInvokeResponse(result=result)
+if __name__ == "__main__":
+    asyncio.run(main())
