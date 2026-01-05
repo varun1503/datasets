@@ -1,134 +1,49 @@
-import asyncio
-from typing import Sequence
-
-from pydantic import BaseModel
-from agent_framework import (
-    ChatAgent,
-    BaseChatClient,
-    MCPStreamableHTTPTool,
-    ChatMessage,
-    ChatResponse,
-    Role,
-    TextContent,
-    AIFunction,
-)
-
-from langchain_core.prompts import ChatPromptTemplate
-from safechain.lcel import model
+Here are one-pager style summaries for each task, with 3 crisp points each 👇
 
 
-# =====================================================
-# MCP TOOL (HTTP)
-# =====================================================
-weather_time_mcp = MCPStreamableHTTPTool(
-    name="weather_time_mcp",
-    url="http://localhost:8006",
-)
+---
+
+Task 1: Analyzing the report format and start configuring the output format
+
+Reviewed existing MRMG / validation report structure to understand required sections, tags, and ordering.
+
+Identified standard patterns for headings, RFR blocks, modeling team responses, and follow-ups.
+
+Defined the baseline output schema to ensure consistency and reusability across reports.
 
 
-# =====================================================
-# AIFunction INPUT MODELS
-# =====================================================
-class GetWeatherInput(BaseModel):
-    city: str
+
+---
+
+Task 2: Format the RFR and follow-up questions, add Modeling Team response, and align format with multiple corner cases
+
+Standardized RFR, follow-up, and Modeling Team Response formatting with clear tag boundaries (< >).
+
+Handled variations such as inline responses, bracketed responses ([modelling team response]), and multiline cases.
+
+Ensured robustness across edge cases without altering original content order or semantics.
 
 
-class GetTimeOfDayInput(BaseModel):
-    pass
+
+---
+
+Task 3: Test the updated code and formatting
+
+Validated output against multiple real MRMG examples to ensure format accuracy.
+
+Tested edge cases to confirm no regression in tagging, ordering, or content loss.
+
+Finalized formatting logic to be production-ready and aligned with review expectations.
 
 
-# =====================================================
-# AIFunction WRAPPERS (REFERENCE-CORRECT)
-# =====================================================
-async def _get_weather(city: str):
-    result = await weather_time_mcp.invoke(
-        name="get_weather",
-        city=city,
-    )
-    return result[0].text
 
+---
 
-async def _get_time_of_day():
-    result = await weather_time_mcp.invoke(
-        name="get_time_of_day",
-    )
-    return result[0].text
+If you want, I can also:
 
+Convert this into Sprint Review slide content
 
-get_weather_fn = AIFunction(
-    name="get_weather",
-    description="Get the weather for a city",
-    input_model=GetWeatherInput,
-    approval_mode="never_require",
-    fn=_get_weather,
-)
+Add acceptance criteria
 
-get_time_fn = AIFunction(
-    name="get_time_of_day",
-    description="Get the current time of day",
-    input_model=GetTimeOfDayInput,
-    approval_mode="never_require",
-    fn=_get_time_of_day,
-)
-
-
-# =====================================================
-# CHAT CLIENT (NO MANUAL TOOL CALLING)
-# =====================================================
-class MyChatClient(BaseChatClient):
-
-    async def _inner_get_response(
-        self,
-        messages: Sequence[ChatMessage],
-        **kwargs,
-    ) -> ChatResponse:
-
-        prompt = ChatPromptTemplate.from_messages(
-            [(m.role.value, m.contents[0].text) for m in messages]
-        ).format_prompt()
-
-        llm = model("3")
-        result = llm.invoke(prompt)
-
-        return ChatResponse(
-            messages=ChatMessage(
-                role=Role.ASSISTANT,
-                contents=[TextContent(text=result.content)],
-            )
-        )
-
-
-# =====================================================
-# AGENT (TOOLS ARE AIFunctions)
-# =====================================================
-class GreetingAgent(ChatAgent):
-    def __init__(self):
-        super().__init__(
-            name="GreetingAgent",
-            chat_client=MyChatClient(),
-            instructions="""
-You can use tools to get the time of day and weather
-before responding to the user.
-""",
-            tools=[get_time_fn, get_weather_fn],
-        )
-
-
-# =====================================================
-# RUN
-# =====================================================
-async def main():
-    agent = GreetingAgent()
-
-    response = await agent.run(
-        "Greet me properly and tell me the weather in Parasía",
-        tool_choice="auto",   # 🔥 LLM CHOOSES TOOLS
-        stream=False,
-    )
-
-    print("\nFINAL RESPONSE:\n")
-    print(response.text)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+Rewrite it in EY / MRMG language
+Just tell me 👍
