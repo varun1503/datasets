@@ -1,10 +1,7 @@
-Great! You want to convert this to use **MCP (Model Context Protocol)** with local tools. MCP allows you to expose tools as servers that agents can connect to and use.
 
-Here's how to implement this with local MCP:
+Here's the complete code with all the MCP changes:
 
-## 1. Create MCP Server with Tools
-
-First, create a separate file `mcp_server.py` for your MCP server:
+## 1. MCP Server (`mcp_server.py`)
 
 ```python
 # mcp_server.py
@@ -91,25 +88,25 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## 2. Update Your Agent Code
-
-Now modify your main agent code to use the MCP client:
+## 2. Agent with MCP Client (`agent_with_mcp.py`)
 
 ```python
 # agent_with_mcp.py
 import asyncio
-from typing import Sequence, Any, MutableMapping, Callable, AsyncIterable
+from contextlib import AsyncExitStack
+from typing import Sequence, Any, MutableMapping, Callable, AsyncIterable, Literal
 from pydantic import BaseModel
 from langchain_core.prompts import ChatPromptTemplate
 from safechain.lcel import model
 from agent_framework import ChatAgent, BaseChatClient
-from agent_framework import ChatMessage, Role, TextContent, ChatOptions
-from agent_framework import ChatResponse
+from agent_framework import ChatMessage, Role, TextContent, ChatOptions, ToolMode
+from agent_framework import ChatResponse, ToolProtocol
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 
 def extract_text_from_message(m: ChatMessage) -> str:
+    """Extract text content from a ChatMessage."""
     if hasattr(m, "contents") and m.contents:
         c = m.contents[0]
         if hasattr(c, "text"):
@@ -122,6 +119,7 @@ def extract_text_from_message(m: ChatMessage) -> str:
 
 
 def greetings_prompt(user_input: str, time_of_day: str, weather: str) -> str:
+    """Generate greeting prompt with context."""
     return f"""
 You are a friendly, polite greeting assistant.
 
@@ -137,10 +135,64 @@ Keep the response short and friendly.
 """
 
 
+def _merge_chat_options(
+    *,
+    base_chat_options: ChatOptions | Any | None = None,
+    model_id: str | None = None,
+    allow_multiple_tool_calls: bool | None = None,
+    frequency_penalty: float | None = None,
+    logit_bias: dict[str | int, float] | None = None,
+    max_tokens: int | None = None,
+    metadata: dict[str, Any] | None = None,
+    presence_penalty: float | None = None,
+    response_format: type[BaseModel] | None = None,
+    seed: int | None = None,
+    stop: str | Sequence[str] | None = None,
+    store: bool | None = None,
+    temperature: float | None = None,
+    tool_choice: ToolMode | Literal["auto", "required", "none"] | dict[str, Any] | None = None,
+    tools: list[ToolProtocol | dict[str, Any] | Callable[..., Any]] | None = None,
+    top_p: float | None = None,
+    user: str | None = None,
+    additional_properties: dict[str, Any] | None = None,
+) -> ChatOptions:
+    """Merge base chat options with direct parameters to create a new ChatOptions instance."""
+    # Validate base_chat_options type if provided
+    if base_chat_options is not None and not isinstance(base_chat_options, ChatOptions):
+        raise TypeError("chat_options must be an instance of ChatOptions")
+
+    if base_chat_options is None:
+        base_chat_options = ChatOptions()
+
+    return base_chat_options & ChatOptions(
+        model_id=model_id,
+        allow_multiple_tool_calls=allow_multiple_tool_calls,
+        frequency_penalty=frequency_penalty,
+        logit_bias=logit_bias,
+        max_tokens=max_tokens,
+        metadata=metadata,
+        presence_penalty=presence_penalty,
+        response_format=response_format,
+        seed=seed,
+        stop=stop,
+        store=store,
+        temperature=temperature,
+        top_p=top_p,
+        tool_choice=tool_choice,
+        tools=tools,
+        user=user,
+        additional_properties=additional_properties,
+    )
+
+
+# =========================================================
+# CHAT CLIENT WITH MCP
+# =========================================================
 class MyChatClientWithMCP(BaseChatClient):
     def __init__(self):
         super().__init__()
         self.mcp_session: ClientSession | None = None
+        self.mcp_exit_stack = None
         
     async def connect_mcp(self):
         """Connect to the local MCP server."""
@@ -150,17 +202,22 @@ class MyChatClientWithMCP(BaseChatClient):
             env=None
         )
         
-        # Create stdio client connection
-        stdio_transport = await stdio_client(server_params)
-        self.stdio, self.write = stdio_transport
+        # Use AsyncExitStack to manage context
+        self.mcp_exit_stack = AsyncExitStack()
+        
+        # Enter the stdio_client context
+        stdio_transport = await self.mcp_exit_stack.enter_async_context(
+            stdio_client(server_params)
+        )
+        stdio, write = stdio_transport
         
         # Initialize MCP session
-        self.mcp_session = ClientSession(self.stdio, self.write)
+        self.mcp_session = ClientSession(stdio, write)
         await self.mcp_session.initialize()
         
-        # List available tools from MCP server
+        # List available tools
         tools_list = await self.mcp_session.list_tools()
-        print(f"Connected to MCP server. Available tools: {[t.name for t in tools_list.tools]}")
+        print(f"✅ Connected to MCP. Tools: {[t.name for t in tools_list.tools]}")
         
     async def call_mcp_tool(self, tool_name: str, arguments: dict = None) -> str:
         """Call a tool via MCP."""
@@ -178,7 +235,7 @@ class MyChatClientWithMCP(BaseChatClient):
         self,
         messages: Sequence[ChatMessage],
         *,
-        tools: Sequence[Any] | None = None,
+        tools: Sequence[ToolProtocol] | None = None,
         tool_choice: Callable[..., Any] | None = None,
         chat_options: MutableMapping[str, Any] | None = None,
         **kwargs: Any,
@@ -234,7 +291,7 @@ class MyChatClientWithMCP(BaseChatClient):
         self,
         messages: Sequence[ChatMessage],
         *,
-        tools: Sequence[Any] | None = None,
+        tools: Sequence[ToolProtocol] | None = None,
         tool_choice: Callable[..., Any] | None = None,
         chat_options: MutableMapping[str, Any] | None = None,
         **kwargs: Any,
@@ -243,8 +300,9 @@ class MyChatClientWithMCP(BaseChatClient):
     
     async def cleanup(self):
         """Cleanup MCP connection."""
-        if self.mcp_session:
-            await self.mcp_session.__aexit__(None, None, None)
+        if self.mcp_exit_stack:
+            await self.mcp_exit_stack.aclose()
+            print("✅ MCP connection closed")
 
 
 class GreetingAgentWithMCP(ChatAgent):
@@ -278,40 +336,21 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## 3. Install Required Packages
+## Key Changes Made:
+
+1. **Added import**: `from contextlib import AsyncExitStack`
+2. **Updated `__init__`**: Added `self.mcp_exit_stack = None`
+3. **Fixed `connect_mcp`**: Uses `AsyncExitStack` to properly manage the `stdio_client` context manager
+4. **Fixed `cleanup`**: Uses `aclose()` on the exit stack
+
+## To Run:
 
 ```bash
-pip install mcp
-```
+# Install dependencies
+pip install mcp agent-framework langchain-core
 
-## 4. Run Your Application
-
-```bash
-# The agent will automatically start the MCP server when needed
+# Run the agent (it will automatically start the MCP server)
 python agent_with_mcp.py
 ```
 
-## Key Benefits of This MCP Approach
-
-1. **Separation of Concerns**: Tools are in a separate MCP server process
-2. **Reusability**: The same MCP server can be used by multiple agents/clients
-3. **Standardization**: Uses the MCP protocol standard
-4. **Scalability**: Easy to add more tools to the MCP server
-5. **Local Execution**: Everything runs locally on your machine
-
-## Optional: Configuration File
-
-You can also create an MCP configuration file for easier management:
-
-```json
-{
-  "mcpServers": {
-    "greeting-tools": {
-      "command": "python",
-      "args": ["mcp_server.py"]
-    }
-  }
-}
-```
-
-This setup gives you a clean MCP architecture where tools are hosted locally and your agent communicates with them via the MCP protocol!
+The error you were getting is now fixed because we're properly handling the async context manager returned by `stdio_client()`.
