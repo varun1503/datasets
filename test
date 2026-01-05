@@ -1,178 +1,56 @@
-import asyncio
-from typing import (
-    Sequence,
-    Any,
-    MutableMapping,
-    Callable,
-)
+import json
+import sys
+from datetime import datetime
 
-from agent_framework import (
-    ChatAgent,
-    BaseChatClient,
-    MCPStreamableHTTPTool,
-    ChatMessage,
-    ChatResponse,
-    Role,
-    TextContent,
-    ChatOptions,
-    ToolProtocol,
-)
+def send(msg: dict):
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
 
-from langchain_core.prompts import ChatPromptTemplate
-from safechain.lcel import model
+def main():
+    for line in sys.stdin:
+        request = json.loads(line)
 
+        # MCP handshake
+        if request.get("type") == "handshake":
+            send({"type": "handshake_ok"})
+            continue
 
-# =========================================================
-# HELPERS
-# =========================================================
-def extract_text_from_message(m: ChatMessage) -> str:
-    if m.contents:
-        c = m.contents[0]
-        return getattr(c, "text", "") or getattr(c, "value", "") or getattr(c, "data", "")
-    return ""
+        # Tool discovery
+        if request.get("type") == "tools":
+            send({
+                "type": "tools",
+                "tools": [
+                    {"name": "get_time_of_day"},
+                    {"name": "get_weather", "parameters": {"location": "string"}},
+                ],
+            })
+            continue
 
+        # Tool invocation
+        if request.get("type") == "invoke":
+            name = request.get("name")
+            args = request.get("arguments", {})
 
-def greetings_prompt(user_input: str, time_of_day: str, weather: str) -> str:
-    return f"""
-You are a friendly, polite greeting assistant.
+            if name == "get_time_of_day":
+                hour = datetime.now().hour
+                if 5 <= hour < 12:
+                    result = "morning"
+                elif 12 <= hour < 17:
+                    result = "afternoon"
+                elif 17 <= hour < 21:
+                    result = "evening"
+                else:
+                    result = "night"
 
-Time of day: {time_of_day}
-Weather info: {weather}
+                send({"type": "result", "result": result})
+                continue
 
-User input:
-{user_input}
+            if name == "get_weather":
+                location = args.get("location", "Bangalore")
+                send({"type": "result", "result": f"Sunny in {location} 🌤️"})
+                continue
 
-Keep the response short and friendly.
-"""
-
-
-# =========================================================
-# CHAT OPTIONS MERGER
-# =========================================================
-def _merge_chat_options(
-    *,
-    base_chat_options: ChatOptions | Any | None = None,
-    tools: list[ToolProtocol | dict | Callable] | None = None,
-) -> ChatOptions:
-
-    if base_chat_options is not None and not isinstance(base_chat_options, ChatOptions):
-        base_chat_options = ChatOptions(**base_chat_options)
-
-    base_chat_options = base_chat_options or ChatOptions()
-
-    return base_chat_options & ChatOptions(
-        tools=tools,
-    )
-
-
-# =========================================================
-# CHAT CLIENT (MCP + MANUAL STYLE)
-# =========================================================
-class MyChatClient(BaseChatClient):
-
-    async def _inner_get_response(
-        self,
-        messages: Sequence[ChatMessage],
-        *,
-        tools: Sequence[ToolProtocol] | None = None,
-        tool_choice: Callable[..., Any] | None = None,
-        chat_options: MutableMapping[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> ChatResponse:
-
-        # -------------------------------------------------
-        # MERGE CHAT OPTIONS
-        # -------------------------------------------------
-        chat_option = _merge_chat_options(
-            base_chat_options=chat_options,
-            tools=tools,
-        )
-
-        time_of_day = "None"
-        weather_info = "None"
-
-        # -------------------------------------------------
-        # MCP TOOL RESOLUTION
-        # -------------------------------------------------
-        if chat_option.tools:
-            for tool in chat_option.tools:
-                if tool.name == "travel_mcp":
-
-                    # MCP tool calls (HTTP)
-                    time_of_day = await tool.invoke(
-                        name="get_time_of_day",
-                        arguments={},
-                    )
-
-                    weather_info = await tool.invoke(
-                        name="get_weather",
-                        arguments={"location": "Bangalore"},
-                    )
-
-        # -------------------------------------------------
-        # PROMPT BUILDING
-        # -------------------------------------------------
-        prompt_template = ChatPromptTemplate.from_messages(
-            [
-                (
-                    m.role.value,
-                    greetings_prompt(
-                        extract_text_from_message(m),
-                        time_of_day=time_of_day,
-                        weather=weather_info,
-                    ),
-                )
-                for m in messages
-            ]
-        )
-
-        prompt_value = prompt_template.format_prompt()
-
-        # -------------------------------------------------
-        # LLM CALL
-        # -------------------------------------------------
-        llm = model("3")
-        llm_response = llm.invoke(prompt_value)
-
-        response_message = ChatMessage(
-            role=Role.ASSISTANT,
-            contents=[TextContent(text=llm_response.content)],
-        )
-
-        return ChatResponse(messages=response_message)
-
-
-# =========================================================
-# MCP TOOL (REMOTE SERVER)
-# =========================================================
-travel_mcp = MCPStreamableHTTPTool(
-    name="travel_mcp",
-    url="http://localhost:8006",
-)
-
-
-# =========================================================
-# AGENT
-# =========================================================
-class GreetingAgent(ChatAgent):
-    def __init__(self):
-        super().__init__(
-            name="GreetingAgent",
-            chat_client=MyChatClient(),
-            instructions="Use MCP tools for time and weather when helpful.",
-            tools=[travel_mcp],
-        )
-
-
-# =========================================================
-# MAIN
-# =========================================================
-async def main():
-    agent = GreetingAgent()
-    response = await agent.run("Hi, how is the weather?")
-    print("\nFINAL RESPONSE:\n")
-    print(response.text)
-
+            send({"type": "error", "error": "Unknown tool"})
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
