@@ -1,110 +1,317 @@
+Great! You want to convert this to use **MCP (Model Context Protocol)** with local tools. MCP allows you to expose tools as servers that agents can connect to and use.
+
+Here's how to implement this with local MCP:
+
+## 1. Create MCP Server with Tools
+
+First, create a separate file `mcp_server.py` for your MCP server:
+
+```python
+# mcp_server.py
 import asyncio
-from typing import Sequence, Any
+from datetime import datetime
+from mcp.server import Server
+from mcp.server.stdio import stdio_server
+from mcp.types import Tool, TextContent
 
-from agent_framework import (
-    ChatAgent,
-    BaseChatClient,
-    MCPStdioTool,
-    ChatMessage,
-    ChatResponse,
-    Role,
-    TextContent,
-    ToolProtocol,
-)
+# Initialize MCP server
+app = Server("greeting-tools-server")
 
+@app.list_tools()
+async def list_tools() -> list[Tool]:
+    """List available tools."""
+    return [
+        Tool(
+            name="get_time_of_day",
+            description="Returns current time of day: morning, afternoon, evening, night",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        ),
+        Tool(
+            name="get_weather",
+            description="Returns current weather condition for a city",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "location": {
+                        "type": "string",
+                        "description": "City name",
+                        "default": "Bangalore"
+                    }
+                },
+                "required": []
+            }
+        )
+    ]
+
+@app.call_tool()
+async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+    """Handle tool calls."""
+    if name == "get_time_of_day":
+        hour = datetime.now().hour
+        if 5 <= hour < 12:
+            result = "morning"
+        elif 12 <= hour < 17:
+            result = "afternoon"
+        elif 17 <= hour < 21:
+            result = "evening"
+        else:
+            result = "night"
+        
+        return [TextContent(
+            type="text",
+            text=result
+        )]
+    
+    elif name == "get_weather":
+        location = arguments.get("location", "Bangalore")
+        result = f"The weather in {location} is sunny with light clouds 🌤️"
+        
+        return [TextContent(
+            type="text",
+            text=result
+        )]
+    
+    else:
+        raise ValueError(f"Unknown tool: {name}")
+
+async def main():
+    """Run the MCP server."""
+    async with stdio_server() as (read_stream, write_stream):
+        await app.run(
+            read_stream,
+            write_stream,
+            app.create_initialization_options()
+        )
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+## 2. Update Your Agent Code
+
+Now modify your main agent code to use the MCP client:
+
+```python
+# agent_with_mcp.py
+import asyncio
+from typing import Sequence, Any, MutableMapping, Callable, AsyncIterable
+from pydantic import BaseModel
 from langchain_core.prompts import ChatPromptTemplate
 from safechain.lcel import model
+from agent_framework import ChatAgent, BaseChatClient
+from agent_framework import ChatMessage, Role, TextContent, ChatOptions
+from agent_framework import ChatResponse
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 
 
 def extract_text_from_message(m: ChatMessage) -> str:
-    if m.contents:
+    if hasattr(m, "contents") and m.contents:
         c = m.contents[0]
-        return getattr(c, "text", "")
+        if hasattr(c, "text"):
+            return c.text
+        if hasattr(c, "value"):
+            return c.value
+        if hasattr(c, "data"):
+            return c.data
     return ""
 
 
 def greetings_prompt(user_input: str, time_of_day: str, weather: str) -> str:
     return f"""
-You are a friendly greeting assistant.
+You are a friendly, polite greeting assistant.
 
 Time of day: {time_of_day}
 Weather info: {weather}
 
+Greet the user appropriately using the time and weather.
+
 User input:
 {user_input}
 
-Respond briefly and politely.
+Keep the response short and friendly.
 """
 
 
-class MyChatClient(BaseChatClient):
-
+class MyChatClientWithMCP(BaseChatClient):
+    def __init__(self):
+        super().__init__()
+        self.mcp_session: ClientSession | None = None
+        
+    async def connect_mcp(self):
+        """Connect to the local MCP server."""
+        server_params = StdioServerParameters(
+            command="python",
+            args=["mcp_server.py"],
+            env=None
+        )
+        
+        # Create stdio client connection
+        stdio_transport = await stdio_client(server_params)
+        self.stdio, self.write = stdio_transport
+        
+        # Initialize MCP session
+        self.mcp_session = ClientSession(self.stdio, self.write)
+        await self.mcp_session.initialize()
+        
+        # List available tools from MCP server
+        tools_list = await self.mcp_session.list_tools()
+        print(f"Connected to MCP server. Available tools: {[t.name for t in tools_list.tools]}")
+        
+    async def call_mcp_tool(self, tool_name: str, arguments: dict = None) -> str:
+        """Call a tool via MCP."""
+        if not self.mcp_session:
+            raise RuntimeError("MCP session not initialized. Call connect_mcp() first.")
+        
+        result = await self.mcp_session.call_tool(tool_name, arguments or {})
+        
+        # Extract text from result
+        if result.content and len(result.content) > 0:
+            return result.content[0].text
+        return ""
+    
     async def _inner_get_response(
         self,
         messages: Sequence[ChatMessage],
         *,
-        tools: Sequence[ToolProtocol] | None = None,
+        tools: Sequence[Any] | None = None,
+        tool_choice: Callable[..., Any] | None = None,
+        chat_options: MutableMapping[str, Any] | None = None,
         **kwargs: Any,
     ) -> ChatResponse:
 
-        time_of_day = "None"
-        weather_info = "None"
+        # Ensure MCP connection
+        if not self.mcp_session:
+            await self.connect_mcp()
 
-        if tools:
-            for tool in tools:
-                if tool.name == "travel_mcp":
-                    time_of_day = await tool.invoke(
-                        name="get_time_of_day",
-                        arguments={}
-                    )
-                    weather_info = await tool.invoke(
-                        name="get_weather",
-                        arguments={"location": "Bangalore"}
-                    )
+        # Initialize with defaults
+        time_of_day = "unknown"
+        weather_info = "unavailable"
+        
+        # Extract user message
+        user_message = extract_text_from_message(messages[-1])
+        
+        # Call MCP tools
+        try:
+            print("🔧 Calling get_time_of_day via MCP...")
+            time_of_day = await self.call_mcp_tool("get_time_of_day")
+            print(f"✅ Time of day: {time_of_day}")
+            
+            print("🔧 Calling get_weather via MCP...")
+            weather_info = await self.call_mcp_tool("get_weather", {"location": "Bangalore"})
+            print(f"✅ Weather: {weather_info}")
+            
+        except Exception as e:
+            print(f"❌ MCP tool execution error: {e}")
 
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    m.role.value,
-                    greetings_prompt(
-                        extract_text_from_message(m),
-                        time_of_day,
-                        weather_info,
-                    ),
-                )
-                for m in messages
-            ]
-        ).format_prompt()
+        # Build prompt with tool results
+        prompt_content = greetings_prompt(
+            user_message,
+            time_of_day=time_of_day,
+            weather=weather_info,
+        )
+        
+        prompt_template = ChatPromptTemplate.from_messages([
+            (messages[-1].role.value, prompt_content)
+        ])
 
+        prompt_value = prompt_template.format_prompt()
         llm = model("3")
-        result = llm.invoke(prompt)
+        llm_response = llm.invoke(prompt_value)
 
-        return ChatResponse(
-            messages=ChatMessage(
-                role=Role.ASSISTANT,
-                contents=[TextContent(text=result.content)],
-            )
+        response_message = ChatMessage(
+            role=Role.ASSISTANT,
+            contents=[TextContent(text=llm_response.content)],
         )
 
+        return ChatResponse(messages=response_message)
 
-travel_mcp = MCPStdioTool(
-    name="travel_mcp",
-    command=["python", "mcp_server.py"],
-)
+    async def _inner_get_streaming_response(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[Any] | None = None,
+        tool_choice: Callable[..., Any] | None = None,
+        chat_options: MutableMapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterable[ChatResponse]:
+        raise NotImplementedError("Streaming not implemented")
+    
+    async def cleanup(self):
+        """Cleanup MCP connection."""
+        if self.mcp_session:
+            await self.mcp_session.__aexit__(None, None, None)
 
 
-class GreetingAgent(ChatAgent):
+class GreetingAgentWithMCP(ChatAgent):
     def __init__(self):
+        chat_client = MyChatClientWithMCP()
         super().__init__(
-            name="GreetingAgent",
-            chat_client=MyChatClient(),
-            instructions="Use local MCP tools when helpful.",
-            tools=[travel_mcp],
+            name="GreetingAgentMCP",
+            chat_client=chat_client,
+            instructions="You are a friendly greeting assistant with MCP tools.",
         )
+    
+    async def cleanup(self):
+        """Cleanup resources."""
+        await self.chat_client.cleanup()
 
 
 async def main():
-    agent = GreetingAgent()
-    response = await agent.run("Hi, how is the weather?")
-    print("\nFINAL RESPONSE:\n")
-    print(response.text)
+    agent = GreetingAgentWithMCP()
+    
+    try:
+        print("🚀 Starting greeting agent with MCP...\n")
+        response = await agent.run("Hi there!")
+        print("\n✨ FINAL RESPONSE:")
+        print(response.text)
+    finally:
+        await agent.cleanup()
+        print("\n👋 Cleaned up MCP connection")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+## 3. Install Required Packages
+
+```bash
+pip install mcp
+```
+
+## 4. Run Your Application
+
+```bash
+# The agent will automatically start the MCP server when needed
+python agent_with_mcp.py
+```
+
+## Key Benefits of This MCP Approach
+
+1. **Separation of Concerns**: Tools are in a separate MCP server process
+2. **Reusability**: The same MCP server can be used by multiple agents/clients
+3. **Standardization**: Uses the MCP protocol standard
+4. **Scalability**: Easy to add more tools to the MCP server
+5. **Local Execution**: Everything runs locally on your machine
+
+## Optional: Configuration File
+
+You can also create an MCP configuration file for easier management:
+
+```json
+{
+  "mcpServers": {
+    "greeting-tools": {
+      "command": "python",
+      "args": ["mcp_server.py"]
+    }
+  }
+}
+```
+
+This setup gives you a clean MCP architecture where tools are hosted locally and your agent communicates with them via the MCP protocol!
