@@ -1,41 +1,134 @@
 import asyncio
-import logging
-import os
-from datetime import datetime
-from fastmcp import FastMCP
+from typing import Sequence
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from pydantic import BaseModel
+from agent_framework import (
+    ChatAgent,
+    BaseChatClient,
+    MCPStreamableHTTPTool,
+    ChatMessage,
+    ChatResponse,
+    Role,
+    TextContent,
+    AIFunction,
+)
 
-mcp = FastMCP("Weather & Time MCP Server")
-
-
-@mcp.tool()
-def get_time_of_day():
-    """Return the current time of day."""
-    hour = datetime.now().hour
-    if 5 <= hour < 12:
-        return "morning"
-    elif 12 <= hour < 17:
-        return "afternoon"
-    elif 17 <= hour < 21:
-        return "evening"
-    return "night"
+from langchain_core.prompts import ChatPromptTemplate
+from safechain.lcel import model
 
 
-@mcp.tool()
-def get_weather(city: str):
-    """Return weather for a city."""
-    return f"The weather in {city} is sunny 🌤️"
+# =====================================================
+# MCP TOOL (HTTP)
+# =====================================================
+weather_time_mcp = MCPStreamableHTTPTool(
+    name="weather_time_mcp",
+    url="http://localhost:8006",
+)
+
+
+# =====================================================
+# AIFunction INPUT MODELS
+# =====================================================
+class GetWeatherInput(BaseModel):
+    city: str
+
+
+class GetTimeOfDayInput(BaseModel):
+    pass
+
+
+# =====================================================
+# AIFunction WRAPPERS (REFERENCE-CORRECT)
+# =====================================================
+async def _get_weather(city: str):
+    result = await weather_time_mcp.invoke(
+        name="get_weather",
+        city=city,
+    )
+    return result[0].text
+
+
+async def _get_time_of_day():
+    result = await weather_time_mcp.invoke(
+        name="get_time_of_day",
+    )
+    return result[0].text
+
+
+get_weather_fn = AIFunction(
+    name="get_weather",
+    description="Get the weather for a city",
+    input_model=GetWeatherInput,
+    approval_mode="never_require",
+    fn=_get_weather,
+)
+
+get_time_fn = AIFunction(
+    name="get_time_of_day",
+    description="Get the current time of day",
+    input_model=GetTimeOfDayInput,
+    approval_mode="never_require",
+    fn=_get_time_of_day,
+)
+
+
+# =====================================================
+# CHAT CLIENT (NO MANUAL TOOL CALLING)
+# =====================================================
+class MyChatClient(BaseChatClient):
+
+    async def _inner_get_response(
+        self,
+        messages: Sequence[ChatMessage],
+        **kwargs,
+    ) -> ChatResponse:
+
+        prompt = ChatPromptTemplate.from_messages(
+            [(m.role.value, m.contents[0].text) for m in messages]
+        ).format_prompt()
+
+        llm = model("3")
+        result = llm.invoke(prompt)
+
+        return ChatResponse(
+            messages=ChatMessage(
+                role=Role.ASSISTANT,
+                contents=[TextContent(text=result.content)],
+            )
+        )
+
+
+# =====================================================
+# AGENT (TOOLS ARE AIFunctions)
+# =====================================================
+class GreetingAgent(ChatAgent):
+    def __init__(self):
+        super().__init__(
+            name="GreetingAgent",
+            chat_client=MyChatClient(),
+            instructions="""
+You can use tools to get the time of day and weather
+before responding to the user.
+""",
+            tools=[get_time_fn, get_weather_fn],
+        )
+
+
+# =====================================================
+# RUN
+# =====================================================
+async def main():
+    agent = GreetingAgent()
+
+    response = await agent.run(
+        "Greet me properly and tell me the weather in Parasía",
+        tool_choice="auto",   # 🔥 LLM CHOOSES TOOLS
+        stream=False,
+    )
+
+    print("\nFINAL RESPONSE:\n")
+    print(response.text)
 
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8006))
-    logger.info(f"🚀 MCP server running on port {port}")
-    asyncio.run(
-        mcp.run_async(
-            transport="http",
-            host="0.0.0.0",
-            port=port,
-        )
-    )
+    asyncio.run(main())
