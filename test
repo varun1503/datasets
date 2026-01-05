@@ -1,173 +1,41 @@
 import asyncio
-from typing import Sequence, Any, Callable, MutableMapping, Literal
+import logging
+import os
+from datetime import datetime
+from fastmcp import FastMCP
 
-from pydantic import BaseModel
-from agent_framework import (
-    ChatAgent,
-    BaseChatClient,
-    MCPStreamableHTTPTool,
-    ChatMessage,
-    ChatResponse,
-    Role,
-    TextContent,
-    ToolProtocol,
-    ChatOptions,
-    ToolMode,
-)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-from langchain_core.prompts import ChatPromptTemplate
-from safechain.lcel import model
+mcp = FastMCP("Weather & Time MCP Server")
 
 
-# =====================================================
-# Helpers
-# =====================================================
-def extract_text_from_message(m: ChatMessage) -> str:
-    if m.contents:
-        return getattr(m.contents[0], "text", "")
-    return ""
+@mcp.tool()
+def get_time_of_day():
+    """Return the current time of day."""
+    hour = datetime.now().hour
+    if 5 <= hour < 12:
+        return "morning"
+    elif 12 <= hour < 17:
+        return "afternoon"
+    elif 17 <= hour < 21:
+        return "evening"
+    return "night"
 
 
-def build_prompt(user_input: str, time_of_day: str, weather: str) -> str:
-    return f"""
-You are a friendly assistant.
-
-Time of day: {time_of_day}
-Weather: {weather}
-
-User said:
-{user_input}
-
-Respond politely and briefly.
-"""
+@mcp.tool()
+def get_weather(city: str):
+    """Return weather for a city."""
+    return f"The weather in {city} is sunny 🌤️"
 
 
-def extract_mcp_text(result):
-    if result is None:
-        return None
-    if isinstance(result, str):
-        return result
-    if isinstance(result, list) and result:
-        first = result[0]
-        if hasattr(first, "text"):
-            return first.text
-        if isinstance(first, dict) and "text" in first:
-            return first["text"]
-    return str(result)
-
-
-def _merge_chat_options(
-    *,
-    base_chat_options: ChatOptions | None = None,
-    tools=None,
-    tool_choice="none",
-):
-    if base_chat_options is None:
-        base_chat_options = ChatOptions()
-    return base_chat_options & ChatOptions(
-        tools=tools,
-        tool_choice=tool_choice,
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 8006))
+    logger.info(f"🚀 MCP server running on port {port}")
+    asyncio.run(
+        mcp.run_async(
+            transport="http",
+            host="0.0.0.0",
+            port=port,
+        )
     )
-
-
-# =====================================================
-# Chat Client
-# =====================================================
-class MyChatClient(BaseChatClient):
-
-    async def _inner_get_response(
-        self,
-        messages: Sequence[ChatMessage],
-        *,
-        tools: Sequence[ToolProtocol] | None = None,
-        chat_options: MutableMapping[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> ChatResponse:
-
-        time_of_day = "unknown"
-        weather_info = "unknown"
-
-        chat_option = _merge_chat_options(
-            base_chat_options=chat_options,
-            tools=tools,
-            tool_choice="none",
-        )
-
-        if chat_option.tools:
-            for tool in chat_option.tools:
-                if tool.name == "weather_time_mcp":
-
-                    raw_time = await tool.invoke(name="get_time_of_day")
-                    time_of_day = extract_mcp_text(raw_time)
-
-                    raw_weather = await tool.invoke(
-                        name="get_weather",
-                        city="parasia",
-                    )
-                    weather_info = extract_mcp_text(raw_weather)
-
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    m.role.value,
-                    build_prompt(
-                        extract_text_from_message(m),
-                        time_of_day,
-                        weather_info,
-                    ),
-                )
-                for m in messages
-            ]
-        ).format_prompt()
-
-        llm = model("3")
-        result = llm.invoke(prompt)
-
-        return ChatResponse(
-            messages=ChatMessage(
-                role=Role.ASSISTANT,
-                contents=[TextContent(text=result.content)],
-            )
-        )
-
-    async def _inner_get_streaming_response(self, *args, **kwargs):
-        raise NotImplementedError("Streaming not supported")
-
-
-# =====================================================
-# MCP Tool
-# =====================================================
-weather_time_mcp = MCPStreamableHTTPTool(
-    name="weather_time_mcp",
-    url="http://localhost:8006",
-)
-
-
-# =====================================================
-# Agent
-# =====================================================
-class GreetingAgent(ChatAgent):
-    def __init__(self):
-        super().__init__(
-            name="GreetingAgent",
-            chat_client=MyChatClient(),
-            instructions="Use MCP tools to get time and weather before responding.",
-            tools=[weather_time_mcp],
-        )
-
-
-# =====================================================
-# Run
-# =====================================================
-async def main():
-    agent = GreetingAgent()
-    response = await agent.run(
-        "Hi, greet me properly",
-        tool_choice="none",
-        stream=False,
-    )
-    print("\nFINAL RESPONSE:\n")
-    print(response.text)
-
-
-await main()
