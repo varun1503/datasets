@@ -1,58 +1,73 @@
 def restructure_with_angle_tags(items: list[str]) -> list[str]:
     output = []
 
-    collecting_response = False
+    collecting = False
     buffer = []
 
-    def flush_response():
-        nonlocal buffer, collecting_response
+    def is_model_response_start(text: str) -> bool:
+        t = text.lower()
+        return (
+            "modelling team response" in t
+            or "[modelling team response]" in t
+        )
+
+    def flush():
+        nonlocal collecting, buffer
         if buffer:
             merged = " ".join(buffer).strip()
-            output.extend(["<", f"Modelling Team Response: {merged}", ">"])
+            output.extend([
+                "<",
+                f"Modelling Team Response: {merged}",
+                ">"
+            ])
         buffer = []
-        collecting_response = False
+        collecting = False
 
     for item in items:
         text = item.strip()
 
-        # ---------- CASE 1: [Modelling Team Response] (any form)
-        if "modelling team response" in text.lower():
-            # close any previous response
-            flush_response()
+        # ---- START of Modelling Team Response (both cases)
+        if is_model_response_start(text):
+            flush()
+            collecting = True
 
-            collecting_response = True
-
-            # extract content after ] or :
-            cleaned = text
-            cleaned = cleaned.replace("[", "").replace("]", "")
-            cleaned = cleaned.replace("Modelling Team Response", "", 1)
-            cleaned = cleaned.replace(":", "").strip()
-
+            # remove markers and noise
+            cleaned = (
+                text
+                .replace("[", "")
+                .replace("]", "")
+                .replace("<", "")
+                .replace(">", "")
+                .replace("Modelling Team Response", "")
+                .replace(":", "")
+                .strip()
+            )
             if cleaned:
                 buffer.append(cleaned)
-
             continue
 
-        # ---------- CASE 2: Inside Modelling Team Response
-        if collecting_response:
-            # stop if a new block clearly starts
+        # ---- CONTINUE Modelling Team Response
+        if collecting:
+            # stop if a new logical block starts
             if (
                 text.startswith("<")
                 or text.startswith("[")
                 or text.lower().startswith("f")
                 or text.lower().startswith("rfr")
             ):
-                flush_response()
+                flush()
                 output.append(text)
                 continue
 
-            buffer.append(text)
+            buffer.append(
+                text.replace("<", "").replace(">", "").strip()
+            )
             continue
 
-        # ---------- CASE 3: Normal content (unchanged)
+        # ---- NORMAL CONTENT
         output.append(text)
 
-    # safety flush
-    flush_response()
+    # ---- SAFETY FLUSH
+    flush()
 
     return output
