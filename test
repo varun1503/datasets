@@ -1,58 +1,152 @@
 import asyncio
-import logging
-import os
-from datetime import datetime
-from fastmcp import FastMCP
+from typing import Sequence, Any, Callable
 
-# --------------------------------------------------
-# Logging
-# --------------------------------------------------
-logging.basicConfig(
-    format="[%(levelname)s]: %(message)s",
-    level=logging.INFO,
+from agent_framework import (
+    ChatAgent,
+    BaseChatClient,
+    MCPStreamableHTTPTool,
+    ChatMessage,
+    ChatResponse,
+    Role,
+    TextContent,
+    ToolProtocol,
 )
-logger = logging.getLogger(__name__)
 
-# --------------------------------------------------
-# MCP Server
-# --------------------------------------------------
-mcp = FastMCP("Weather-Time MCP Server ⏰🌤️")
+from langchain_core.prompts import ChatPromptTemplate
+from safechain.lcel import model
 
 
-@mcp.tool()
-def get_time_of_day():
-    """
-    Returns the current time of day.
-    """
-    hour = datetime.now().hour
-    if 5 <= hour < 12:
-        return "morning"
-    elif 12 <= hour < 17:
-        return "afternoon"
-    elif 17 <= hour < 21:
-        return "evening"
-    return "night"
+# =====================================================
+# Helper functions
+# =====================================================
+def extract_text_from_message(m: ChatMessage) -> str:
+    if m.contents:
+        return getattr(m.contents[0], "text", "")
+    return ""
 
 
-@mcp.tool()
-def get_weather(city: str = "Bangalore"):
-    """
-    Returns mocked weather information for a city.
-    """
-    return f"The weather in {city} is sunny with light clouds 🌤️"
+def build_prompt(user_input: str, time_of_day: str, weather: str) -> str:
+    return f"""
+You are a friendly assistant.
+
+Time of day: {time_of_day}
+Weather: {weather}
+
+User said:
+{user_input}
+
+Respond politely and briefly.
+"""
 
 
-# --------------------------------------------------
-# Run MCP server
-# --------------------------------------------------
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8006))
-    logger.info(f"🚀 MCP server started on port {port}")
+# =====================================================
+# Custom Chat Client
+# =====================================================
+class MyChatClient(BaseChatClient):
 
-    asyncio.run(
-        mcp.run_async(
-            transport="http",
-            host="0.0.0.0",
-            port=port,
+    async def _inner_get_response(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[ToolProtocol] | None = None,
+        tool_choice: Callable[..., Any] | None = None,
+        **kwargs: Any,
+    ) -> ChatResponse:
+
+        time_of_day = "unknown"
+        weather_info = "unknown"
+
+        # ---------------------------------------------
+        # MCP TOOL CALLS (manual, explicit)
+        # ---------------------------------------------
+        if tools:
+            for tool in tools:
+                if tool.name == "weather_time_mcp":
+
+                    time_of_day = await tool.invoke(
+                        name="get_time_of_day",
+                        arguments={},
+                    )
+
+                    weather_info = await tool.invoke(
+                        name="get_weather",
+                        arguments={"city": "Bangalore"},
+                    )
+
+        # ---------------------------------------------
+        # Prompt building
+        # ---------------------------------------------
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    m.role.value,
+                    build_prompt(
+                        extract_text_from_message(m),
+                        time_of_day,
+                        weather_info,
+                    ),
+                )
+                for m in messages
+            ]
+        ).format_prompt()
+
+        # ---------------------------------------------
+        # LLM Call
+        # ---------------------------------------------
+        llm = model("3")
+        result = llm.invoke(prompt)
+
+        return ChatResponse(
+            messages=ChatMessage(
+                role=Role.ASSISTANT,
+                contents=[TextContent(text=result.content)],
+            )
         )
+
+    # Explicitly disable streaming (important)
+    async def _inner_get_streaming_response(self, *args, **kwargs):
+        raise NotImplementedError("Streaming not supported")
+
+
+# =====================================================
+# MCP TOOL (FastMCP HTTP server)
+# =====================================================
+weather_time_mcp = MCPStreamableHTTPTool(
+    name="weather_time_mcp",
+    url="http://localhost:8006",
+)
+
+
+# =====================================================
+# Agent
+# =====================================================
+class GreetingAgent(ChatAgent):
+    def __init__(self):
+        super().__init__(
+            name="GreetingAgent",
+            chat_client=MyChatClient(),
+            instructions="Use MCP tools to get time and weather before responding.",
+            tools=[weather_time_mcp],
+        )
+
+
+# =====================================================
+# Run
+# =====================================================
+async def main():
+    agent = GreetingAgent()
+
+    response = await agent.run(
+        "Hi, greet me properly",
+        stream=False,   # IMPORTANT
     )
+
+    print("\nFINAL RESPONSE:\n")
+    print(response.text)
+
+
+# =====================================================
+# Entry point
+# =====================================================
+if __name__ == "__main__":
+    asyncio.run(main())
