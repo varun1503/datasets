@@ -1,73 +1,56 @@
 def restructure_with_angle_tags(items: list[str]) -> list[str]:
-    """
-    Rules:
-    - Normal < ... > blocks -> single merged string
-    - Modelling Team Response -> always output as:
-        "<", "Modelling Team Response: content", ">"
-    - Works even if Modelling Team Response is on the same line as < >
-    """
     output = []
+
     buffer = []
-    inside_block = False
-    is_model_response = False
+    collecting_model_response = False
+
+    def flush_model_response():
+        nonlocal buffer, collecting_model_response
+        if buffer:
+            content = " ".join(buffer).strip()
+            output.extend(["<", content, ">"])
+        buffer = []
+        collecting_model_response = False
 
     for item in items:
         text = item.strip()
 
-        # CASE 1: Modelling Team Response fully on one line with < >
-        if (
-            "Modelling Team Response" in text
-            and text.startswith("<")
-            and text.endswith(">")
-        ):
-            content = text[1:-1].strip()
-            output.extend(["<", content, ">"])
-            continue
+        # ---------- CASE 1: Modelling Team Response (any form)
+        if "Modelling Team Response" in text:
+            # flush any previous response safely
+            flush_model_response()
 
-        # CASE 2: Modelling Team Response start (any form)
-        if "Modelling Team Response" in text and not inside_block:
-            inside_block = True
-            is_model_response = True
-            buffer = [text.replace("<", "").replace(">", "").strip()]
-            continue
-
-        # CASE 3: Start of normal < block
-        if text.startswith("<") and not inside_block:
-            inside_block = True
-            is_model_response = False
-            buffer = [text.replace("<", "").strip()]
-            continue
-
-        # CASE 4: End of block
-        if text.endswith(">") and inside_block:
+            collecting_model_response = True
             clean = text.replace("<", "").replace(">", "").strip()
-            if clean:
-                buffer.append(clean)
-
-            merged = " ".join(buffer).strip()
-
-            if is_model_response:
-                output.extend(["<", merged, ">"])
-            else:
-                output.append(f"< {merged} >")
-
-            buffer = []
-            inside_block = False
-            is_model_response = False
+            buffer.append(clean)
             continue
 
-        # CASE 5: Inside block
-        if inside_block:
-            buffer.append(text.replace("<", "").replace(">", "").strip())
-        else:
-            output.append(text)
+        # ---------- CASE 2: End of Modelling Team Response
+        if collecting_model_response:
+            # explicit closing
+            if text == ">":
+                flush_model_response()
+                continue
 
-    # SAFETY: unclosed block
-    if buffer:
-        merged = " ".join(buffer).strip()
-        if is_model_response:
-            output.extend(["<", merged, ">"])
-        else:
-            output.append(f"< {merged} >")
+            # next logical block starts → close response
+            if text.startswith("<") and "Modelling Team Response" not in text:
+                flush_model_response()
+                output.append(text)
+                continue
+
+            # normal continuation
+            buffer.append(text.replace("<", "").replace(">", "").strip())
+            continue
+
+        # ---------- CASE 3: Normal < ... > blocks (unchanged)
+        if text.startswith("<") and text.endswith(">"):
+            output.append(text)
+            continue
+
+        # ---------- CASE 4: Plain text
+        output.append(text)
+
+    # safety flush
+    flush_model_response()
 
     return output
