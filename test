@@ -1,56 +1,58 @@
 def restructure_with_angle_tags(items: list[str]) -> list[str]:
     output = []
 
+    collecting_response = False
     buffer = []
-    collecting_model_response = False
 
-    def flush_model_response():
-        nonlocal buffer, collecting_model_response
+    def flush_response():
+        nonlocal buffer, collecting_response
         if buffer:
-            content = " ".join(buffer).strip()
-            output.extend(["<", content, ">"])
+            merged = " ".join(buffer).strip()
+            output.extend(["<", f"Modelling Team Response: {merged}", ">"])
         buffer = []
-        collecting_model_response = False
+        collecting_response = False
 
     for item in items:
         text = item.strip()
 
-        # ---------- CASE 1: Modelling Team Response (any form)
-        if "Modelling Team Response" in text:
-            # flush any previous response safely
-            flush_model_response()
+        # ---------- CASE 1: [Modelling Team Response] (any form)
+        if "modelling team response" in text.lower():
+            # close any previous response
+            flush_response()
 
-            collecting_model_response = True
-            clean = text.replace("<", "").replace(">", "").strip()
-            buffer.append(clean)
+            collecting_response = True
+
+            # extract content after ] or :
+            cleaned = text
+            cleaned = cleaned.replace("[", "").replace("]", "")
+            cleaned = cleaned.replace("Modelling Team Response", "", 1)
+            cleaned = cleaned.replace(":", "").strip()
+
+            if cleaned:
+                buffer.append(cleaned)
+
             continue
 
-        # ---------- CASE 2: End of Modelling Team Response
-        if collecting_model_response:
-            # explicit closing
-            if text == ">":
-                flush_model_response()
-                continue
-
-            # next logical block starts → close response
-            if text.startswith("<") and "Modelling Team Response" not in text:
-                flush_model_response()
+        # ---------- CASE 2: Inside Modelling Team Response
+        if collecting_response:
+            # stop if a new block clearly starts
+            if (
+                text.startswith("<")
+                or text.startswith("[")
+                or text.lower().startswith("f")
+                or text.lower().startswith("rfr")
+            ):
+                flush_response()
                 output.append(text)
                 continue
 
-            # normal continuation
-            buffer.append(text.replace("<", "").replace(">", "").strip())
+            buffer.append(text)
             continue
 
-        # ---------- CASE 3: Normal < ... > blocks (unchanged)
-        if text.startswith("<") and text.endswith(">"):
-            output.append(text)
-            continue
-
-        # ---------- CASE 4: Plain text
+        # ---------- CASE 3: Normal content (unchanged)
         output.append(text)
 
     # safety flush
-    flush_model_response()
+    flush_response()
 
     return output
