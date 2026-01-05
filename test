@@ -1,110 +1,58 @@
 import asyncio
-from typing import Sequence, Any
+import logging
+import os
+from datetime import datetime
+from fastmcp import FastMCP
 
-from agent_framework import (
-    ChatAgent,
-    BaseChatClient,
-    MCPStdioTool,
-    ChatMessage,
-    ChatResponse,
-    Role,
-    TextContent,
-    ToolProtocol,
+# --------------------------------------------------
+# Logging
+# --------------------------------------------------
+logging.basicConfig(
+    format="[%(levelname)s]: %(message)s",
+    level=logging.INFO,
 )
+logger = logging.getLogger(__name__)
 
-from langchain_core.prompts import ChatPromptTemplate
-from safechain.lcel import model
-
-
-def extract_text_from_message(m: ChatMessage) -> str:
-    if m.contents:
-        c = m.contents[0]
-        return getattr(c, "text", "")
-    return ""
+# --------------------------------------------------
+# MCP Server
+# --------------------------------------------------
+mcp = FastMCP("Weather-Time MCP Server ⏰🌤️")
 
 
-def greetings_prompt(user_input: str, time_of_day: str, weather: str) -> str:
-    return f"""
-You are a friendly greeting assistant.
+@mcp.tool()
+def get_time_of_day():
+    """
+    Returns the current time of day.
+    """
+    hour = datetime.now().hour
+    if 5 <= hour < 12:
+        return "morning"
+    elif 12 <= hour < 17:
+        return "afternoon"
+    elif 17 <= hour < 21:
+        return "evening"
+    return "night"
 
-Time of day: {time_of_day}
-Weather info: {weather}
 
-User input:
-{user_input}
+@mcp.tool()
+def get_weather(city: str = "Bangalore"):
+    """
+    Returns mocked weather information for a city.
+    """
+    return f"The weather in {city} is sunny with light clouds 🌤️"
 
-Respond briefly and politely.
-"""
 
+# --------------------------------------------------
+# Run MCP server
+# --------------------------------------------------
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 8006))
+    logger.info(f"🚀 MCP server started on port {port}")
 
-class MyChatClient(BaseChatClient):
-
-    async def _inner_get_response(
-        self,
-        messages: Sequence[ChatMessage],
-        *,
-        tools: Sequence[ToolProtocol] | None = None,
-        **kwargs: Any,
-    ) -> ChatResponse:
-
-        time_of_day = "None"
-        weather_info = "None"
-
-        if tools:
-            for tool in tools:
-                if tool.name == "travel_mcp":
-                    time_of_day = await tool.invoke(
-                        name="get_time_of_day",
-                        arguments={}
-                    )
-                    weather_info = await tool.invoke(
-                        name="get_weather",
-                        arguments={"location": "Bangalore"}
-                    )
-
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    m.role.value,
-                    greetings_prompt(
-                        extract_text_from_message(m),
-                        time_of_day,
-                        weather_info,
-                    ),
-                )
-                for m in messages
-            ]
-        ).format_prompt()
-
-        llm = model("3")
-        result = llm.invoke(prompt)
-
-        return ChatResponse(
-            messages=ChatMessage(
-                role=Role.ASSISTANT,
-                contents=[TextContent(text=result.content)],
-            )
+    asyncio.run(
+        mcp.run_async(
+            transport="http",
+            host="0.0.0.0",
+            port=port,
         )
-
-
-travel_mcp = MCPStdioTool(
-    name="travel_mcp",
-    command=["python", "mcp_server.py"],
-)
-
-
-class GreetingAgent(ChatAgent):
-    def __init__(self):
-        super().__init__(
-            name="GreetingAgent",
-            chat_client=MyChatClient(),
-            instructions="Use local MCP tools when helpful.",
-            tools=[travel_mcp],
-        )
-
-
-async def main():
-    agent = GreetingAgent()
-    response = await agent.run("Hi, how is the weather?")
-    print("\nFINAL RESPONSE:\n")
-    print(response.text)
+    )
