@@ -1,3 +1,204 @@
-@Manoj Kumar Hi Manoj, Madhurima informed me that the EA playbook for Case Assist needs to be completed at the earliest. I am currently working on it and plan to complete it by the end of today. If required, I will prioritize this and take up the workflow task once it is completed; otherwise, I will start the workflow task from
+import asyncio
+from typing import Sequence, Any, MutableMapping
 
-tomorrow.
+from agent_framework import (
+    ChatAgent,
+    BaseChatClient,
+    MCPStreamableHTTPTool,
+    ChatMessage,
+    ChatResponse,
+    Role,
+    TextContent,
+    ToolProtocol,
+    ChatOptions,
+)
+
+from langchain_core.prompts import ChatPromptTemplate
+from safechain.lcel import model
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# =====================================================
+# Helpers
+# =====================================================
+def extract_text_from_message(m: ChatMessage) -> str:
+    if m.contents:
+        return getattr(m.contents[0], "text", "")
+    return ""
+
+
+def extract_mcp_text(result):
+    if result is None:
+        return None
+    if isinstance(result, str):
+        return result
+    if isinstance(result, list) and result:
+        first = result[0]
+        if hasattr(first, "text"):
+            return first.text
+        if isinstance(first, dict):
+            return first
+    return result
+
+
+def merge_chat_options(
+    *,
+    base_chat_options: ChatOptions | None = None,
+    tools=None,
+    tool_choice="none",
+):
+    if base_chat_options is None:
+        base_chat_options = ChatOptions()
+
+    return base_chat_options & ChatOptions(
+        tools=tools,
+        tool_choice=tool_choice,
+    )
+
+
+def build_flight_prompt(user_input: str, flights: list[dict]) -> str:
+    return f"""
+You are a Flight Booking Agent.
+
+Responsibilities:
+- Rank flights by price and rating
+- Respect budget and preferences
+- Select the best flight
+- Simulate booking confirmation
+
+User request:
+{user_input}
+
+Available flights:
+{flights}
+
+Choose the BEST flight and explain briefly.
+"""
+
+
+# =====================================================
+# Flight Chat Client
+# =====================================================
+class FlightChatClient(BaseChatClient):
+
+    async def _inner_get_response(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[ToolProtocol] | None = None,
+        chat_options: MutableMapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> ChatResponse:
+
+        flights = []
+
+        chat_option = merge_chat_options(
+            base_chat_options=chat_options,
+            tools=tools,
+            tool_choice="none",
+        )
+
+        # -------------------------------------------------
+        # MCP TOOL CALLS (EXPLICIT)
+        # -------------------------------------------------
+        if chat_option.tools:
+            for tool in chat_option.tools:
+
+                # 1️⃣ Search flights
+                if tool.name == "search_flights":
+                    raw = await tool.invoke(
+                        origin="NYC",
+                        destination="LAX",
+                        max_price_usd=500,
+                    )
+                    flights = extract_mcp_text(raw)
+
+                # 2️⃣ Simulate booking (optional check)
+                if tool.name == "get_flight_booking_details":
+                    await tool.invoke(
+                        start="NYC",
+                        destination="LAX",
+                    )
+
+        # -------------------------------------------------
+        # Prompt
+        # -------------------------------------------------
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    Role.USER.value,
+                    build_flight_prompt(
+                        extract_text_from_message(messages[0]),
+                        flights,
+                    ),
+                )
+            ]
+        ).format_prompt()
+
+        llm = model("3")
+        result = llm.invoke(prompt)
+
+        return ChatResponse(
+            messages=ChatMessage(
+                role=Role.ASSISTANT,
+                contents=[TextContent(text=result.content)],
+            )
+        )
+
+    async def _inner_get_streaming_response(self, *args, **kwargs):
+        raise NotImplementedError("Streaming not supported")
+
+
+# =====================================================
+# MCP TOOL (Flight Server)
+# =====================================================
+flight_mcp = MCPStreamableHTTPTool(
+    name="search_flights",
+    url="http://localhost:8006/mcp",
+)
+
+booking_mcp = MCPStreamableHTTPTool(
+    name="get_flight_booking_details",
+    url="http://localhost:8006/mcp",
+)
+
+
+# =====================================================
+# Flight Agent
+# =====================================================
+class FlightAgent(ChatAgent):
+    def __init__(self):
+        super().__init__(
+            name="FlightAgent",
+            chat_client=FlightChatClient(),
+            instructions="""
+You are a Flight Agent.
+
+Search, rank, and select flights.
+Respect user budget and preferences.
+""",
+            tools=[flight_mcp, booking_mcp],
+        )
+
+
+# =====================================================
+# Run
+# =====================================================
+async def main():
+    agent = FlightAgent()
+
+    response = await agent.run(
+        "Book a flight from NYC to LAX under $500",
+        stream=False,
+    )
+
+    print("\n✈️ FINAL FLIGHT RESPONSE:\n")
+    print(response.text)
+
+    await flight_mcp.close()
+    await booking_mcp.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
