@@ -1,95 +1,179 @@
-@mcp.tool()
-def flight_agent_healthcheck():
-    """Health check for Flight MCP server."""
-    return {"status": "flight_mcp_ok"}
-@mcp.tool()
-def simulate_flight_booking(
-    flight_id: str,
-    user_id: str,
-    total_price_usd: float,
+import asyncio
+import json
+from typing import Sequence, Any, MutableMapping
+
+from agent_framework import (
+    ChatAgent,
+    BaseChatClient,
+    MCPStreamableHTTPTool,
+    ChatMessage,
+    ChatResponse,
+    Role,
+    TextContent,
+    ToolProtocol,
+    ChatOptions,
+)
+
+from langchain_core.prompts import ChatPromptTemplate
+from safechain.lcel import model
+
+
+# =====================================================
+# SAFE STRING CONVERSION (CRITICAL FIX)
+# =====================================================
+def safe_stringify(obj) -> str:
+    """
+    Prevents KeyError like {service_type} during prompt formatting.
+    """
+    try:
+        return json.dumps(obj, indent=2)
+    except Exception:
+        return str(obj)
+
+
+# =====================================================
+# HELPERS
+# =====================================================
+def extract_text_from_message(m: ChatMessage) -> str:
+    if m.contents:
+        return getattr(m.contents[0], "text", "")
+    return ""
+
+
+def merge_chat_options(
+    *,
+    base_chat_options: ChatOptions | None = None,
+    tools=None,
+    tool_choice="none",
 ):
-    """
-    Simulates flight booking.
-    No DB write – returns confirmation only.
-    """
+    if base_chat_options is None:
+        base_chat_options = ChatOptions()
 
-    confirmation_id = f"BOOK-{flight_id}-{user_id}"
-
-    return {
-        "confirmation_id": confirmation_id,
-        "flight_id": flight_id,
-        "user_id": user_id,
-        "amount_charged_usd": total_price_usd,
-        "status": "confirmed",
-    }
-
-@mcp.tool()
-def share_selected_flight(
-    flight_id: str,
-    departure_time: str,
-    arrival_time: str,
-    origin: str,
-    destination: str,
-):
-    """
-    Shares selected flight timing with Hotel and Cab agents.
-    (Simulation only – no persistence)
-    """
-    return {
-        "flight_id": flight_id,
-        "departure_time": departure_time,
-        "arrival_time": arrival_time,
-        "origin": origin,
-        "destination": destination,
-        "status": "shared_with_hotel_and_cab",
-    }
-@mcp.tool()
-def search_flights(
-    origin: str,
-    destination: str,
-    cabin_class: str | None = None,
-    max_price_usd: float | None = None,
-    nonstop_only: bool = False,
-    earliest_departure: str | None = None,
-    latest_departure: str | None = None,
-):
-    """
-    Search and rank flights using flight_master (master.csv).
-
-    Respects:
-    - Origin & destination
-    - Cabin class (if available)
-    - Budget
-    - Non-stop preference
-    - Time window (optional)
-    """
-
-    df = pd.read_csv("master.csv")
-
-    # Base filter
-    df = df[
-        (df["service_type"] == "flight") &
-        (df["origin"] == origin) &
-        (df["destination"] == destination)
-    ]
-
-    # Budget filter
-    if max_price_usd is not None:
-        df = df[df["price_usd"] <= max_price_usd]
-
-    # Cabin class (if column exists)
-    if cabin_class and "cabin_class" in df.columns:
-        df = df[df["cabin_class"] == cabin_class]
-
-    # Non-stop preference (simple simulation)
-    if nonstop_only and "stops" in df.columns:
-        df = df[df["stops"] == 0]
-
-    # Ranking logic: cheaper + higher rating
-    df = df.sort_values(
-        by=["price_usd", "rating"],
-        ascending=[True, False],
+    return base_chat_options & ChatOptions(
+        tools=tools,
+        tool_choice=tool_choice,
     )
 
-    # Return top results
-    return df.head(5).to_dict(orient="records")
+
+def build_flight_prompt(user_input: str, flights: list[dict]) -> str:
+    return f"""
+You are a Flight Booking Agent.
+
+Responsibilities:
+- Rank flights by price and rating
+- Respect user budget
+- Select the best flight
+
+User request:
+{user_input}
+
+Available flights:
+{safe_stringify(flights)}
+
+Choose the BEST flight and explain briefly.
+"""
+
+
+# =====================================================
+# FLIGHT CHAT CLIENT
+# =====================================================
+class FlightChatClient(BaseChatClient):
+
+    async def _inner_get_response(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[ToolProtocol] | None = None,
+        chat_options: MutableMapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> ChatResponse:
+
+        flights = []
+
+        chat_option = merge_chat_options(
+            base_chat_options=chat_options,
+            tools=tools,
+        )
+
+        # -----------------------------
+        # MCP TOOL CALL
+        # -----------------------------
+        if chat_option.tools:
+            for tool in chat_option.tools:
+                if tool.name == "search_flights":
+                    flights = await tool.invoke(
+                        origin="Lakeside",
+                        destination="Hillview",
+                        max_price_usd=500,
+                    )
+
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    Role.USER.value,
+                    build_flight_prompt(
+                        extract_text_from_message(messages[0]),
+                        flights,
+                    ),
+                )
+            ]
+        ).format_prompt()
+
+        llm = model("3")
+        result = llm.invoke(prompt)
+
+        return ChatResponse(
+            messages=ChatMessage(
+                role=Role.ASSISTANT,
+                contents=[TextContent(text=result.content)],
+            )
+        )
+
+    async def _inner_get_streaming_response(self, *args, **kwargs):
+        raise NotImplementedError("Streaming not supported")
+
+
+# =====================================================
+# MCP TOOL (FLIGHT SERVER)
+# =====================================================
+flight_mcp = MCPStreamableHTTPTool(
+    name="search_flights",
+    url="http://localhost:8006/mcp",
+)
+
+
+# =====================================================
+# FLIGHT AGENT
+# =====================================================
+class FlightAgent(ChatAgent):
+    def __init__(self):
+        super().__init__(
+            name="FlightAgent",
+            chat_client=FlightChatClient(),
+            instructions="""
+You are a Flight Agent.
+Search, rank, and select the best flight.
+""",
+            tools=[flight_mcp],
+        )
+
+
+# =====================================================
+# RUN
+# =====================================================
+async def main():
+    agent = FlightAgent()
+
+    response = await agent.run(
+        "Book a flight from Lakeside to Hillview under $500",
+        stream=False,
+    )
+
+    print("\n✈️ FINAL RESPONSE:\n")
+    print(response.text)
+
+    await flight_mcp.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
