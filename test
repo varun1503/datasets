@@ -1,21 +1,173 @@
-@mcp.tool()
-def search_cabs(city: str):
-    """
-    Read cab.csv and return all cab services for a city
-    as STRING using key join method.
-    """
-    import pandas as pd
+import asyncio
+from typing import Sequence, Any, MutableMapping
 
-    df = pd.read_csv("cab.csv")
-    df = df[
-        (df["service_type"] == "cab") &
-        (df["city"].str.lower() == city.lower()) &
-        (df["availability"] == "yes")
-    ]
+from agent_framework import (
+    ChatAgent,
+    BaseChatClient,
+    MCPStreamableHTTPTool,
+    ChatMessage,
+    ChatResponse,
+    Role,
+    TextContent,
+    ToolProtocol,
+    ChatOptions,
+)
 
-    results = []
-    for _, row in df.iterrows():
-        row_str = ", ".join([f"{k}:{row[k]}" for k in df.columns])
-        results.append(row_str)
+from langchain_core.prompts import ChatPromptTemplate
+from safechain.lcel import model
 
-    return "\n".join(results)
+
+# =====================================================
+# Helpers
+# =====================================================
+def extract_text_from_message(m: ChatMessage) -> str:
+    if m.contents:
+        return getattr(m.contents[0], "text", "")
+    return ""
+
+
+def extract_mcp_text(result):
+    if isinstance(result, str):
+        return result
+    return str(result)
+
+
+def merge_chat_options(
+    *,
+    base_chat_options: ChatOptions | None = None,
+    tools=None,
+):
+    if base_chat_options is None:
+        base_chat_options = ChatOptions()
+    return base_chat_options & ChatOptions(
+        tools=tools,
+        tool_choice="none",
+    )
+
+
+# =====================================================
+# Prompt
+# =====================================================
+def cab_prompt(hotel_suggestion: str, cab_data: str) -> str:
+    return f"""
+You are a Cab Booking Assistant.
+
+Hotel Selected:
+{hotel_suggestion}
+
+Available Cab Services:
+{cab_data}
+
+Task:
+- Suggest the best cab options for hotel ↔ airport & daily travel
+- Prefer good rating and reasonable pricing
+- Output ONLY readable suggestions
+- Do NOT invent services
+"""
+
+
+# =====================================================
+# Cab Chat Client
+# =====================================================
+class CabChatClient(BaseChatClient):
+
+    async def _inner_get_response(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[ToolProtocol] | None = None,
+        chat_options: MutableMapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> ChatResponse:
+
+        hotel_output = extract_text_from_message(messages[-1])
+
+        # 🔹 VERY SIMPLE city extraction (safe)
+        city = "Newtown"
+        for line in hotel_output.splitlines():
+            if "Location:" in line:
+                city = line.split("Location:")[-1].strip()
+                break
+
+        cab_data = ""
+
+        chat_option = merge_chat_options(
+            base_chat_options=chat_options,
+            tools=tools,
+        )
+
+        if chat_option.tools:
+            for tool in chat_option.tools:
+                if tool.name == "search_cabs":
+                    raw = await tool.invoke(city=city)
+                    cab_data = extract_mcp_text(raw)
+
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    Role.USER.value,
+                    cab_prompt(hotel_output, cab_data),
+                )
+            ]
+        ).format_prompt()
+
+        llm = model("3")
+        result = llm.invoke(prompt)
+
+        return ChatResponse(
+            messages=ChatMessage(
+                role=Role.ASSISTANT,
+                contents=[TextContent(text=result.content)],
+            )
+        )
+
+    async def _inner_get_streaming_response(self, *args, **kwargs):
+        raise NotImplementedError("Streaming not supported")
+
+
+# =====================================================
+# MCP Client
+# =====================================================
+cab_search_mcp = MCPStreamableHTTPTool(
+    name="search_cabs",
+    url="http://localhost:8006/mcp",
+)
+
+
+# =====================================================
+# Cab Agent
+# =====================================================
+class CabAgent(ChatAgent):
+    def __init__(self):
+        super().__init__(
+            name="CabAgent",
+            chat_client=CabChatClient(),
+            instructions="Suggest cab options based on hotel selection.",
+            tools=[cab_search_mcp],
+        )
+
+
+# =====================================================
+# Run
+# =====================================================
+async def main():
+    hotel_output = """
+Hotel Recommendation:
+1. FinStay Plaza (4.5★)
+   Location: Newtown
+   Price: $120 per night
+"""
+
+    agent = CabAgent()
+
+    response = await agent.run(
+        hotel_output,
+        stream=False,
+    )
+
+    print("\n🚕 CAB SUGGESTIONS:\n")
+    print(response.text)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
