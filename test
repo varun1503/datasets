@@ -1,192 +1,21 @@
-import asyncio
-import json
-from typing import Sequence, Any, MutableMapping
+@mcp.tool()
+def search_cabs(city: str):
+    """
+    Read cab.csv and return all cab services for a city
+    as STRING using key join method.
+    """
+    import pandas as pd
 
-from agent_framework import (
-    ChatAgent,
-    BaseChatClient,
-    MCPStreamableHTTPTool,
-    ChatMessage,
-    ChatResponse,
-    Role,
-    TextContent,
-    ToolProtocol,
-    ChatOptions,
-)
+    df = pd.read_csv("cab.csv")
+    df = df[
+        (df["service_type"] == "cab") &
+        (df["city"].str.lower() == city.lower()) &
+        (df["availability"] == "yes")
+    ]
 
-from langchain_core.prompts import ChatPromptTemplate
-from safechain.lcel import model
+    results = []
+    for _, row in df.iterrows():
+        row_str = ", ".join([f"{k}:{row[k]}" for k in df.columns])
+        results.append(row_str)
 
-
-# =====================================================
-# Helpers
-# =====================================================
-def extract_text_from_message(m: ChatMessage) -> str:
-    if m.contents:
-        return getattr(m.contents[0], "text", "")
-    return ""
-
-
-def extract_mcp_text(result):
-    if result is None:
-        return []
-    if isinstance(result, list):
-        return result
-    return []
-
-
-def merge_chat_options(
-    *,
-    base_chat_options: ChatOptions | None = None,
-    tools=None,
-):
-    if base_chat_options is None:
-        base_chat_options = ChatOptions()
-
-    return base_chat_options & ChatOptions(
-        tools=tools,
-        tool_choice="none",
-    )
-
-
-# =====================================================
-# Prompt (PLAIN TEXT OUTPUT)
-# =====================================================
-def hotel_prompt(hotels: list[dict]) -> str:
-    if not hotels:
-        return "No suitable hotels found for your preferences."
-
-    lines = ["Here are the best hotel options for your trip:\n"]
-
-    for i, h in enumerate(hotels, 1):
-        lines.append(
-            f"{i}. {h['hotel_name']} ({h['rating']}★)\n"
-            f"   Location: {h['location']}\n"
-            f"   Price: ${h['price_per_night_usd']} per night\n"
-            f"   Available Rooms: {h['available_rooms']}\n"
-            f"   Reason: Good rating and suitable location\n"
-        )
-
-    return "\n".join(lines)
-
-
-# =====================================================
-# Hotel Chat Client
-# =====================================================
-class HotelChatClient(BaseChatClient):
-
-    async def _inner_get_response(
-        self,
-        messages: Sequence[ChatMessage],
-        *,
-        tools: Sequence[ToolProtocol] | None = None,
-        chat_options: MutableMapping[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> ChatResponse:
-
-        # Planner output JSON comes as user input
-        planner_data = json.loads(extract_text_from_message(messages[-1]))
-
-        city = planner_data.get("destination_city")
-        budget = planner_data.get("budget", 1000)
-
-        hotels = []
-
-        chat_option = merge_chat_options(
-            base_chat_options=chat_options,
-            tools=tools,
-        )
-
-        if chat_option.tools:
-            for tool in chat_option.tools:
-                if tool.name == "search_hotels":
-                    raw = await tool.invoke(
-                        city=city,
-                        min_rating=4,
-                        max_price_usd=budget / 5,  # simple per-night heuristic
-                    )
-                    hotels = extract_mcp_text(raw)
-
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    Role.USER.value,
-                    hotel_prompt(hotels),
-                )
-            ]
-        ).format_prompt()
-
-        llm = model("3")
-        result = llm.invoke(prompt)
-
-        return ChatResponse(
-            messages=ChatMessage(
-                role=Role.ASSISTANT,
-                contents=[TextContent(text=result.content)],
-            )
-        )
-
-    async def _inner_get_streaming_response(self, *args, **kwargs):
-        raise NotImplementedError("Streaming not supported")
-
-
-# =====================================================
-# MCP Tool Client
-# =====================================================
-hotel_search_mcp = MCPStreamableHTTPTool(
-    name="search_hotels",
-    url="http://localhost:8006/mcp",
-)
-
-
-# =====================================================
-# Hotel Agent
-# =====================================================
-class HotelAgent(ChatAgent):
-    def __init__(self):
-        super().__init__(
-            name="HotelAgent",
-            chat_client=HotelChatClient(),
-            instructions="""
-Pick hotel options based on planner input.
-Return human-readable hotel suggestions.
-""",
-            tools=[hotel_search_mcp],
-        )
-
-
-# =====================================================
-# Run
-# =====================================================
-async def main():
-    planner_output = """
-{
-  "intent": "travel_planning",
-  "origin_city": "Lakeside",
-  "destination_city": "Newtown",
-  "date_range": "next month (6 days)",
-  "num_travelers": 1,
-  "budget": 2500,
-  "preferences": {
-    "hotel_rating": "4-star",
-    "hotel_location": "financial district"
-  },
-  "constraints": {
-    "trip_type": "business"
-  }
-}
-"""
-
-    agent = HotelAgent()
-
-    response = await agent.run(
-        planner_output,
-        stream=False,
-    )
-
-    print("\n🏨 HOTEL SUGGESTIONS:\n")
-    print(response.text)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    return "\n".join(results)
