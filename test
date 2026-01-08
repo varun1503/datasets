@@ -18,22 +18,4 @@ def search_hotels(
     if max_price_usd is not None:
         df = df[df["price_per_night_usd"] <= max_price_usd]
 
-    return df.to_dict(orient="records")        writer.writerow(booking)
-
-    return booking
-
-
-# --------------------------------------------------
-# RUN SERVER
-# --------------------------------------------------
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8006))
-    logger.info(f"🚀 Flight MCP server running on port {port}")
-
-    asyncio.run(
-        mcp.run_async(
-            transport="http",
-            host="0.0.0.0",
-            port=port,
-        )
-    )
+    return df.to_dict(orient="records")
