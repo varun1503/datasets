@@ -1,38 +1,21 @@
 import asyncio
 import json
-from typing import Sequence, Any, MutableMapping
+from typing import Sequence, Any
 
 from agent_framework import (
     ChatAgent,
     BaseChatClient,
-    MCPStreamableHTTPTool,
     ChatMessage,
     ChatResponse,
     Role,
     TextContent,
-    ToolProtocol,
-    ChatOptions,
 )
 
-from langchain_core.prompts import ChatPromptTemplate
 from safechain.lcel import model
 
 
 # =====================================================
-# SAFE STRING CONVERSION (CRITICAL FIX)
-# =====================================================
-def safe_stringify(obj) -> str:
-    """
-    Prevents KeyError like {service_type} during prompt formatting.
-    """
-    try:
-        return json.dumps(obj, indent=2)
-    except Exception:
-        return str(obj)
-
-
-# =====================================================
-# HELPERS
+# Helper
 # =====================================================
 def extract_text_from_message(m: ChatMessage) -> str:
     if m.contents:
@@ -40,92 +23,114 @@ def extract_text_from_message(m: ChatMessage) -> str:
     return ""
 
 
-def merge_chat_options(
-    *,
-    base_chat_options: ChatOptions | None = None,
-    tools=None,
-    tool_choice="none",
-):
-    if base_chat_options is None:
-        base_chat_options = ChatOptions()
-
-    return base_chat_options & ChatOptions(
-        tools=tools,
-        tool_choice=tool_choice,
-    )
-
-
-def build_flight_prompt(user_input: str, flights: list[dict]) -> str:
+# =====================================================
+# FEW-SHOT PLANNER PROMPT
+# =====================================================
+def planner_prompt(user_query: str) -> str:
     return f"""
-You are a Flight Booking Agent.
+You are a travel planning assistant.
 
-Responsibilities:
-- Rank flights by price and rating
-- Respect user budget
-- Select the best flight
+Your task is to extract structured travel planning information
+from a user query and return ONLY valid JSON.
 
-User request:
-{user_input}
+❗ Rules:
+- Output MUST be valid JSON
+- Do NOT add explanations
+- Use null if information is missing
 
-Available flights:
-{safe_stringify(flights)}
+JSON Schema:
+{{
+  "intent": string,
+  "origin_city": string | null,
+  "destination_city": string | null,
+  "date_range": string | null,
+  "num_travelers": number | null,
+  "budget": number | null,
+  "preferences": object,
+  "constraints": object
+}}
 
-Choose the BEST flight and explain briefly.
+### Example 1
+User:
+Plan a 5-day leisure trip from Delhi to Goa for 2 people under $1500.
+
+Output:
+{{
+  "intent": "travel_planning",
+  "origin_city": "Delhi",
+  "destination_city": "Goa",
+  "date_range": "5 days",
+  "num_travelers": 2,
+  "budget": 1500,
+  "preferences": {{}},
+  "constraints": {{
+    "trip_type": "leisure"
+  }}
+}}
+
+### Example 2
+User:
+Book a business trip from New York to San Francisco next month.
+Morning flights and 4-star hotel. Budget $2500.
+
+Output:
+{{
+  "intent": "travel_planning",
+  "origin_city": "New York",
+  "destination_city": "San Francisco",
+  "date_range": "next month",
+  "num_travelers": 1,
+  "budget": 2500,
+  "preferences": {{
+    "flight_time": "morning",
+    "hotel_rating": "4-star"
+  }},
+  "constraints": {{
+    "trip_type": "business"
+  }}
+}}
+
+### Now extract for this user query.
+
+User:
+{user_query}
+
+Output ONLY valid JSON.
 """
 
 
 # =====================================================
-# FLIGHT CHAT CLIENT
+# Planner Chat Client (NO TOOLS)
 # =====================================================
-class FlightChatClient(BaseChatClient):
+class PlannerChatClient(BaseChatClient):
 
     async def _inner_get_response(
         self,
         messages: Sequence[ChatMessage],
-        *,
-        tools: Sequence[ToolProtocol] | None = None,
-        chat_options: MutableMapping[str, Any] | None = None,
         **kwargs: Any,
     ) -> ChatResponse:
 
-        flights = []
+        user_query = extract_text_from_message(messages[-1])
 
-        chat_option = merge_chat_options(
-            base_chat_options=chat_options,
-            tools=tools,
-        )
-
-        # -----------------------------
-        # MCP TOOL CALL
-        # -----------------------------
-        if chat_option.tools:
-            for tool in chat_option.tools:
-                if tool.name == "search_flights":
-                    flights = await tool.invoke(
-                        origin="Lakeside",
-                        destination="Hillview",
-                        max_price_usd=500,
-                    )
-
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    Role.USER.value,
-                    build_flight_prompt(
-                        extract_text_from_message(messages[0]),
-                        flights,
-                    ),
-                )
-            ]
-        ).format_prompt()
+        prompt = planner_prompt(user_query)
 
         llm = model("3")
         result = llm.invoke(prompt)
 
+        # Optional: validate JSON (safe guard)
+        try:
+            json.loads(result.content)
+            output_text = result.content
+        except Exception:
+            output_text = json.dumps(
+                {"error": "Invalid JSON output from model"},
+                indent=2
+            )
+
         return ChatResponse(
             messages=ChatMessage(
                 role=Role.ASSISTANT,
-                contents=[TextContent(text=result.content)],
+                contents=[TextContent(text=output_text)],
             )
         )
 
@@ -134,45 +139,37 @@ class FlightChatClient(BaseChatClient):
 
 
 # =====================================================
-# MCP TOOL (FLIGHT SERVER)
+# Planner Agent
 # =====================================================
-flight_mcp = MCPStreamableHTTPTool(
-    name="search_flights",
-    url="http://localhost:8006/mcp",
-)
-
-
-# =====================================================
-# FLIGHT AGENT
-# =====================================================
-class FlightAgent(ChatAgent):
+class PlannerAgent(ChatAgent):
     def __init__(self):
         super().__init__(
-            name="FlightAgent",
-            chat_client=FlightChatClient(),
+            name="PlannerAgent",
+            chat_client=PlannerChatClient(),
             instructions="""
-You are a Flight Agent.
-Search, rank, and select the best flight.
+You are a Planner Agent.
+Extract structured intent and travel slots from user queries.
 """,
-            tools=[flight_mcp],
+            tools=[],  # ❌ NO TOOLS
         )
 
 
 # =====================================================
-# RUN
+# Run
 # =====================================================
 async def main():
-    agent = FlightAgent()
+    agent = PlannerAgent()
 
     response = await agent.run(
-        "Book a flight from Lakeside to Hillview under $500",
+        "Plan a 6-day business trip from New York to San Francisco next month for 1 traveler. "
+        "I need morning flights, a 4-star hotel near the financial district, "
+        "and cabs for airport transfers and office commutes. "
+        "Keep the total budget under $2,500.",
         stream=False,
     )
 
-    print("\n✈️ FINAL RESPONSE:\n")
+    print("\n🧠 PLANNER OUTPUT (STRUCTURED JSON):\n")
     print(response.text)
-
-    await flight_mcp.close()
 
 
 if __name__ == "__main__":
