@@ -1,8 +1,9 @@
-I'll help you add functionality to remove those placeholder tags from the entire document. Here's the updated code with a new step to remove those tags:
+I see the issue. The placeholder tag might be styled text (with different runs/formatting) rather than plain text, which makes it harder to detect and remove. Let me update the code to handle formatted text properly:
 
 ```python
 from docx import Document
 from docx.oxml import parse_xml
+from docx.oxml.ns import qn
 import re
 
 def is_actual_caption(text, next_element_is_table_or_image):
@@ -50,13 +51,11 @@ def is_actual_caption(text, next_element_is_table_or_image):
     
     return False
 
-def remove_placeholder_tags(doc):
+def remove_placeholder_tags_from_runs(para):
     """
-    Remove placeholder tags like {Put Modeling Team's Response here} from the entire document
+    Remove placeholder tags by checking and modifying individual runs
+    This handles cases where the text has different formatting
     """
-    print("\nRemoving placeholder tags from document...")
-    removed_count = 0
-    
     # Pattern to match various placeholder formats
     placeholder_patterns = [
         r'\{[Pp]ut\s+[Mm]odeling\s+[Tt]eam\'?s?\s+[Rr]esponse\s+here\}',
@@ -65,38 +64,79 @@ def remove_placeholder_tags(doc):
         r'\[[Pp]ut\s+[Mm]odelling\s+[Tt]eam\'?s?\s+[Rr]esponse\s+here\]',
     ]
     
-    # Combine all patterns
     combined_pattern = '|'.join(placeholder_patterns)
     
-    for para in doc.paragraphs:
-        original_text = para.text
-        if re.search(combined_pattern, original_text, re.IGNORECASE):
-            # Remove the placeholder tag
-            new_text = re.sub(combined_pattern, '', original_text, flags=re.IGNORECASE)
-            # Clean up extra spaces
-            new_text = re.sub(r'\s+', ' ', new_text).strip()
-            
-            if new_text != original_text:
-                para.text = new_text
-                removed_count += 1
-                print(f"  ✓ Removed placeholder from: {original_text[:80]}...")
+    # Get full text from all runs
+    full_text = ''.join(run.text for run in para.runs)
     
-    # Also check in tables
+    # Check if placeholder exists
+    if not re.search(combined_pattern, full_text, re.IGNORECASE):
+        return False
+    
+    # Remove the placeholder
+    new_text = re.sub(combined_pattern, '', full_text, flags=re.IGNORECASE)
+    new_text = re.sub(r'\s+', ' ', new_text).strip()
+    
+    # Clear all existing runs
+    for run in para.runs:
+        run.text = ''
+    
+    # Set the cleaned text in the first run, or create a new run if none exist
+    if para.runs:
+        para.runs[0].text = new_text
+    else:
+        para.add_run(new_text)
+    
+    return True
+
+def remove_placeholder_tags(doc):
+    """
+    Remove placeholder tags like {Put Modeling Team's Response here} from the entire document
+    """
+    print("\nRemoving placeholder tags from document...")
+    removed_count = 0
+    
+    # Process all paragraphs
+    for para in doc.paragraphs:
+        if remove_placeholder_tags_from_runs(para):
+            removed_count += 1
+            print(f"  ✓ Removed placeholder from paragraph: {para.text[:80]}...")
+    
+    # Process text in tables
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for para in cell.paragraphs:
-                    original_text = para.text
-                    if re.search(combined_pattern, original_text, re.IGNORECASE):
-                        new_text = re.sub(combined_pattern, '', original_text, flags=re.IGNORECASE)
-                        new_text = re.sub(r'\s+', ' ', new_text).strip()
-                        
-                        if new_text != original_text:
-                            para.text = new_text
-                            removed_count += 1
-                            print(f"  ✓ Removed placeholder from table cell: {original_text[:80]}...")
+                    if remove_placeholder_tags_from_runs(para):
+                        removed_count += 1
+                        print(f"  ✓ Removed placeholder from table cell: {para.text[:80]}...")
     
     print(f"  ✓ Total placeholders removed: {removed_count}")
+    return removed_count
+
+def delete_empty_paragraphs(doc):
+    """
+    Delete paragraphs that only contain the placeholder tag and are now empty
+    """
+    print("\nRemoving empty paragraphs...")
+    body = doc.element.body
+    elements = list(body)
+    removed_count = 0
+    
+    for element in elements:
+        if element.tag.endswith('p'):
+            # Check if paragraph is empty or only whitespace
+            for para in doc.paragraphs:
+                if para._element == element:
+                    text = para.text.strip()
+                    if not text or text == '':
+                        # Remove empty paragraph
+                        element.getparent().remove(element)
+                        removed_count += 1
+                        print(f"  ✓ Removed empty paragraph")
+                    break
+    
+    print(f"  ✓ Total empty paragraphs removed: {removed_count}")
     return removed_count
 
 def renumber_captions(doc_path, output_path):
@@ -117,6 +157,13 @@ def renumber_captions(doc_path, output_path):
     remove_placeholder_tags(doc)
     
     # Save and reload after removing placeholders
+    doc.save(output_path)
+    doc = Document(output_path)
+    
+    # Delete empty paragraphs
+    delete_empty_paragraphs(doc)
+    
+    # Save and reload
     doc.save(output_path)
     doc = Document(output_path)
     body = doc.element.body
@@ -378,23 +425,16 @@ if __name__ == "__main__":
     renumber_captions(input_file, output_file)
 ```
 
-**Key additions:**
+**Key improvements:**
 
-1. **New `remove_placeholder_tags()` function** (Step 0):
-   - Removes tags like `{Put Modeling Team's Response here}` or `{Put Modelling Team's Response here}`
-   - Handles variations with/without apostrophes
-   - Works on both regular paragraphs and text inside tables
-   - Cleans up extra spaces after removal
+1. **`remove_placeholder_tags_from_runs()` function**: This handles text that might be split across multiple runs (which happens when text has different formatting like bold, colors, highlights, etc.)
 
-2. **Pattern matching for various formats**:
-   - `{Put Modeling Team's Response here}`
-   - `{Put Modelling Team's Response here}` (British spelling)
-   - `[Put Modeling Team's Response here]` (square brackets)
-   - Case-insensitive matching
+2. **Collects all text from runs**: Combines text from all runs in a paragraph before checking for the placeholder pattern
 
-3. **Runs before all other processing** to clean up the document first
+3. **Clears and rebuilds runs**: After finding a match, it clears all runs and sets the cleaned text
 
-The script will now:
-1. Remove all placeholder response tags from the entire document
-2. Process and renumber all tables and figures
-3. Add `{placeholder}` markers for missing captions
+4. **`delete_empty_paragraphs()` function**: Removes paragraphs that become empty after removing the placeholder tag
+
+5. **Better handling of formatted text**: Works even if "{Put Modeling Team's Response here}" has mixed formatting (like cyan highlight or different colors)
+
+This should now successfully remove those placeholder tags even if they're formatted with colors, highlights, or other styling.
