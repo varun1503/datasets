@@ -1,4 +1,4 @@
-I understand! You want the output to be `Table 1 {placeholder}`, `Table 2 {placeholder}`, etc. when captions are missing. Here's the corrected code:
+I'll help you add functionality to remove those placeholder tags from the entire document. Here's the updated code with a new step to remove those tags:
 
 ```python
 from docx import Document
@@ -50,18 +50,82 @@ def is_actual_caption(text, next_element_is_table_or_image):
     
     return False
 
+def remove_placeholder_tags(doc):
+    """
+    Remove placeholder tags like {Put Modeling Team's Response here} from the entire document
+    """
+    print("\nRemoving placeholder tags from document...")
+    removed_count = 0
+    
+    # Pattern to match various placeholder formats
+    placeholder_patterns = [
+        r'\{[Pp]ut\s+[Mm]odeling\s+[Tt]eam\'?s?\s+[Rr]esponse\s+here\}',
+        r'\{[Pp]ut\s+[Mm]odelling\s+[Tt]eam\'?s?\s+[Rr]esponse\s+here\}',
+        r'\[[Pp]ut\s+[Mm]odeling\s+[Tt]eam\'?s?\s+[Rr]esponse\s+here\]',
+        r'\[[Pp]ut\s+[Mm]odelling\s+[Tt]eam\'?s?\s+[Rr]esponse\s+here\]',
+    ]
+    
+    # Combine all patterns
+    combined_pattern = '|'.join(placeholder_patterns)
+    
+    for para in doc.paragraphs:
+        original_text = para.text
+        if re.search(combined_pattern, original_text, re.IGNORECASE):
+            # Remove the placeholder tag
+            new_text = re.sub(combined_pattern, '', original_text, flags=re.IGNORECASE)
+            # Clean up extra spaces
+            new_text = re.sub(r'\s+', ' ', new_text).strip()
+            
+            if new_text != original_text:
+                para.text = new_text
+                removed_count += 1
+                print(f"  ✓ Removed placeholder from: {original_text[:80]}...")
+    
+    # Also check in tables
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    original_text = para.text
+                    if re.search(combined_pattern, original_text, re.IGNORECASE):
+                        new_text = re.sub(combined_pattern, '', original_text, flags=re.IGNORECASE)
+                        new_text = re.sub(r'\s+', ' ', new_text).strip()
+                        
+                        if new_text != original_text:
+                            para.text = new_text
+                            removed_count += 1
+                            print(f"  ✓ Removed placeholder from table cell: {original_text[:80]}...")
+    
+    print(f"  ✓ Total placeholders removed: {removed_count}")
+    return removed_count
+
 def renumber_captions(doc_path, output_path):
     """
     Renumber all table and figure captions sequentially
     Move captions to top, handle captions on different pages
     Distinguish between captions and descriptive paragraphs
+    Remove placeholder tags from the document
     """
     doc = Document(doc_path)
     body = doc.element.body
     elements = list(body)
     
+    # Step 0: Remove placeholder tags from the entire document
+    print("="*70)
+    print("Step 0: Removing placeholder tags...")
+    print("="*70)
+    remove_placeholder_tags(doc)
+    
+    # Save and reload after removing placeholders
+    doc.save(output_path)
+    doc = Document(output_path)
+    body = doc.element.body
+    elements = list(body)
+    
     # Step 1: Move table captions from below to above
+    print("\n" + "="*70)
     print("Step 1: Processing tables...")
+    print("="*70)
     for i, element in enumerate(elements):
         if element.tag.endswith('tbl'):
             # Check if next element is a caption (within next 3 elements for different pages)
@@ -92,7 +156,9 @@ def renumber_captions(doc_path, output_path):
     elements = list(body)
     
     # Step 2: Add missing captions for tables
-    print("\nStep 2: Adding missing table captions...")
+    print("\n" + "="*70)
+    print("Step 2: Adding missing table captions...")
+    print("="*70)
     for i, element in enumerate(elements):
         if element.tag.endswith('tbl'):
             # Check if previous element is a caption
@@ -121,7 +187,9 @@ def renumber_captions(doc_path, output_path):
     elements = list(body)
     
     # Step 3: Process figures - move captions from below to above
-    print("\nStep 3: Processing figures...")
+    print("\n" + "="*70)
+    print("Step 3: Processing figures...")
+    print("="*70)
     i = 0
     while i < len(elements):
         element = elements[i]
@@ -182,7 +250,9 @@ def renumber_captions(doc_path, output_path):
     elements = list(body)
 
     # Step 4: Add missing captions for figures
-    print("\nStep 4: Adding missing figure captions...")
+    print("\n" + "="*70)
+    print("Step 4: Adding missing figure captions...")
+    print("="*70)
     for i, element in enumerate(elements):
         if element.tag.endswith('p'):
             current_para = None
@@ -219,7 +289,9 @@ def renumber_captions(doc_path, output_path):
     elements = list(body)
     
     # Step 5: Renumber all captions sequentially
-    print("\nStep 5: Renumbering all captions...")
+    print("\n" + "="*70)
+    print("Step 5: Renumbering all captions...")
+    print("="*70)
     table_num = 1
     figure_num = 1
     
@@ -289,6 +361,7 @@ def renumber_captions(doc_path, output_path):
     
     print(f"\n{'='*70}")
     print(f"✓ Document processed successfully!")
+    print(f"✓ Placeholder tags removed from document")
     print(f"✓ Table captions: {table_num - 1}")
     print(f"✓ Figure captions: {figure_num - 1}")
     print(f"✓ All captions moved to top and renumbered sequentially")
@@ -302,19 +375,26 @@ if __name__ == "__main__":
     input_file = "buisness.docx"
     output_file = "buisness_renumbered2.docx"
     
-    renumber_captions(input_file, output_path)
+    renumber_captions(input_file, output_file)
 ```
 
-**Key changes:**
+**Key additions:**
 
-1. **Added `is_placeholder` check** in Step 5 to detect if a caption was originally missing
-2. **Different output formats**:
-   - If caption was missing (PLACEHOLDER): `Table 1 {placeholder}`, `Table 2 {placeholder}`, etc.
-   - If caption exists with description: `Table 1: Description`
-   - If caption exists without description: `Table 1`
+1. **New `remove_placeholder_tags()` function** (Step 0):
+   - Removes tags like `{Put Modeling Team's Response here}` or `{Put Modelling Team's Response here}`
+   - Handles variations with/without apostrophes
+   - Works on both regular paragraphs and text inside tables
+   - Cleans up extra spaces after removal
 
-Now the output will show:
-- `Table 1 {placeholder}` - for missing table captions
-- `Table 2: Quarterly Revenue` - for existing captions with descriptions
-- `Figure 1 {placeholder}` - for missing figure captions
-- `Figure 2: Sales Chart` - for existing captions with descriptions
+2. **Pattern matching for various formats**:
+   - `{Put Modeling Team's Response here}`
+   - `{Put Modelling Team's Response here}` (British spelling)
+   - `[Put Modeling Team's Response here]` (square brackets)
+   - Case-insensitive matching
+
+3. **Runs before all other processing** to clean up the document first
+
+The script will now:
+1. Remove all placeholder response tags from the entire document
+2. Process and renumber all tables and figures
+3. Add `{placeholder}` markers for missing captions
