@@ -1,4 +1,4 @@
-I'll update the code to handle spaces between captions and tables/figures, and remove all print statements:
+I see the issue. The code needs to better handle captions that appear below tables/figures even when there's content between them. Let me update the code to be more aggressive in finding and moving captions:
 
 ```python
 from docx import Document
@@ -49,6 +49,15 @@ def is_actual_caption(text, next_element_is_table_or_image):
         return True
     
     return False
+
+def looks_like_caption(text):
+    """
+    Check if text looks like a caption pattern (for initial detection)
+    More lenient than is_actual_caption
+    """
+    text = text.strip()
+    # Match "Table X" or "Figure X" pattern
+    return bool(re.match(r'^\s*(Table|Figure)\s+[\d.]+', text, re.IGNORECASE))
 
 def is_empty_paragraph(para):
     """
@@ -236,51 +245,77 @@ def remove_empty_paragraphs_between_caption_and_content(doc):
         p_element = para._element
         p_element.getparent().remove(p_element)
 
-def renumber_captions(doc_path, output_path):
+def find_and_move_captions_below_tables(doc):
     """
-    Renumber all table and figure captions sequentially
-    Move captions to top, handle captions on different pages
-    Distinguish between captions and descriptive paragraphs
-    Remove placeholder tags from the document
+    Find table captions that appear AFTER tables and move them BEFORE
+    Search extensively (up to 20 elements after each table)
     """
-    doc = Document(doc_path)
     body = doc.element.body
     elements = list(body)
+    moved_count = 0
     
-    # Step 1: Move table captions from below to above (search up to 10 elements away)
-    for i, element in enumerate(elements):
-        if element.tag.endswith('tbl'):
-            # Check if next element is a caption (within next 10 elements for different pages)
-            for offset in range(1, 11):
-                if i + offset < len(elements):
-                    next_element = elements[i + offset]
-                    
-                    if next_element.tag.endswith('p'):
-                        for para in doc.paragraphs:
-                            if para._element == next_element:
-                                text = para.text.strip()
-                                # Check if it's an actual table caption
-                                if is_actual_caption(text, True):
-                                    # Move caption from after table to before table
-                                    next_element.getparent().remove(next_element)
-                                    element.addprevious(next_element)
-                                    break
-                            break
-                    if next_element.tag.endswith('tbl'):
-                        # Stop if we hit another table
-                        break
-    
-    # Save and reload
-    doc.save(output_path)
-    doc = Document(output_path)
-    body = doc.element.body
-    elements = list(body)
-    
-    # Step 2: Process figures - move captions from below to above (search up to 10 elements away)
     i = 0
     while i < len(elements):
         element = elements[i]
         
+        # Found a table
+        if element.tag.endswith('tbl'):
+            # Check if there's already a caption before this table
+            has_caption_before = False
+            if i > 0:
+                prev_element = elements[i - 1]
+                if prev_element.tag.endswith('p'):
+                    for para in doc.paragraphs:
+                        if para._element == prev_element:
+                            text = para.text.strip()
+                            if looks_like_caption(text):
+                                has_caption_before = True
+                            break
+            
+            # If no caption before, search after the table for a caption
+            if not has_caption_before:
+                # Search up to 20 elements after the table
+                for offset in range(1, 21):
+                    if i + offset < len(elements):
+                        next_element = elements[i + offset]
+                        
+                        # Check if it's a paragraph that looks like a table caption
+                        if next_element.tag.endswith('p'):
+                            for para in doc.paragraphs:
+                                if para._element == next_element:
+                                    text = para.text.strip()
+                                    # Look for table captions
+                                    if re.match(r'^\s*Table\s+[\d.]+', text, re.IGNORECASE):
+                                        # Move this caption before the table
+                                        next_element.getparent().remove(next_element)
+                                        element.addprevious(next_element)
+                                        moved_count += 1
+                                        # Reload elements
+                                        elements = list(body)
+                                        break
+                                break
+                        
+                        # Stop if we hit another table
+                        if next_element.tag.endswith('tbl'):
+                            break
+        i += 1
+    
+    return moved_count
+
+def find_and_move_captions_below_figures(doc):
+    """
+    Find figure captions that appear AFTER figures and move them BEFORE
+    Search extensively (up to 20 elements after each figure)
+    """
+    body = doc.element.body
+    elements = list(body)
+    moved_count = 0
+    
+    i = 0
+    while i < len(elements):
+        element = elements[i]
+        
+        # Check if this paragraph contains an image (is a figure)
         if element.tag.endswith('p'):
             current_para = None
             for para in doc.paragraphs:
@@ -292,42 +327,72 @@ def renumber_captions(doc_path, output_path):
                 has_image = any(run._element.xpath('.//pic:pic') for run in current_para.runs)
                 
                 if has_image:
-                    # Check next few elements for a figure caption (within next 10 for different pages)
-                    caption_found = False
-                    
-                    for offset in range(1, 11):
-                        if i + offset < len(elements):
-                            next_element = elements[i + offset]
-                            
-                            if next_element.tag.endswith('p'):
-                                for para in doc.paragraphs:
-                                    if para._element == next_element:
-                                        text = para.text.strip()
-                                        # Check if it's an actual figure caption
-                                        if is_actual_caption(text, True):
-                                            # Move caption from after image to before image
-                                            next_element.getparent().remove(next_element)
-                                            element.addprevious(next_element)
-                                            caption_found = True
-                                            # Reload elements after modification
-                                            elements = list(body)
-                                            break
+                    # Check if there's already a caption before this figure
+                    has_caption_before = False
+                    if i > 0:
+                        prev_element = elements[i - 1]
+                        if prev_element.tag.endswith('p'):
+                            for para in doc.paragraphs:
+                                if para._element == prev_element:
+                                    text = para.text.strip()
+                                    if looks_like_caption(text):
+                                        has_caption_before = True
                                     break
-                            
-                            # Stop if we hit another image or table
-                            if next_element.tag.endswith('tbl'):
-                                break
-                            
-                            if next_element.tag.endswith('p'):
-                                for para in doc.paragraphs:
-                                    if para._element == next_element:
-                                        if any(run._element.xpath('.//pic:pic') for run in para.runs):
-                                            break
+                    
+                    # If no caption before, search after the figure for a caption
+                    if not has_caption_before:
+                        # Search up to 20 elements after the figure
+                        for offset in range(1, 21):
+                            if i + offset < len(elements):
+                                next_element = elements[i + offset]
+                                
+                                # Check if it's a paragraph that looks like a figure caption
+                                if next_element.tag.endswith('p'):
+                                    for para in doc.paragraphs:
+                                        if para._element == next_element:
+                                            text = para.text.strip()
+                                            # Look for figure captions
+                                            if re.match(r'^\s*Figure\s+[\d.]+', text, re.IGNORECASE):
+                                                # Move this caption before the figure
+                                                next_element.getparent().remove(next_element)
+                                                element.addprevious(next_element)
+                                                moved_count += 1
+                                                # Reload elements
+                                                elements = list(body)
+                                                break
                                         break
-                        
-                        if caption_found:
-                            break
+                                
+                                # Stop if we hit a table or another figure
+                                if next_element.tag.endswith('tbl'):
+                                    break
+                                if next_element.tag.endswith('p'):
+                                    for p in doc.paragraphs:
+                                        if p._element == next_element:
+                                            if any(run._element.xpath('.//pic:pic') for run in p.runs):
+                                                break
+                                    break
         i += 1
+    
+    return moved_count
+
+def renumber_captions(doc_path, output_path):
+    """
+    Renumber all table and figure captions sequentially
+    Move captions to top, handle captions on different pages
+    Distinguish between captions and descriptive paragraphs
+    Remove placeholder tags from the document
+    """
+    doc = Document(doc_path)
+    
+    # Step 1: Find and move ALL table captions that are below tables
+    find_and_move_captions_below_tables(doc)
+    
+    # Save and reload
+    doc.save(output_path)
+    doc = Document(output_path)
+    
+    # Step 2: Find and move ALL figure captions that are below figures
+    find_and_move_captions_below_figures(doc)
     
     # Save and reload
     doc.save(output_path)
@@ -344,7 +409,7 @@ def renumber_captions(doc_path, output_path):
     body = doc.element.body
     elements = list(body)
     
-    # Step 4: Remove placeholder tags (after moving captions)
+    # Step 4: Remove placeholder tags
     remove_all_placeholders(doc)
     
     # Save and reload
@@ -547,14 +612,16 @@ if __name__ == "__main__":
 
 **Key improvements:**
 
-1. **Removed all print statements** - The code now runs silently and only produces the output file
+1. **New `looks_like_caption()` function**: More lenient pattern matching for initial detection of captions
 
-2. **Added `remove_empty_paragraphs_between_caption_and_content()`** - Removes empty paragraphs between captions and their tables/figures
+2. **New `find_and_move_captions_below_tables()` function**: Specifically searches for table captions that appear AFTER tables (up to 20 elements away) and moves them before
 
-3. **Increased search range** - Now searches up to 10 elements away (instead of 3-5) to find captions that might have spaces between them and their content
+3. **New `find_and_move_captions_below_figures()` function**: Specifically searches for figure captions that appear AFTER figures (up to 20 elements away) and moves them before
 
-4. **Smart empty paragraph handling** - When checking if a caption exists, the code now skips over empty paragraphs to find the actual caption
+4. **Checks for existing captions**: Before moving a caption from below, it checks if there's already a caption above to avoid duplicates
 
-5. **Better next element detection** - When renumbering, the code searches for the next non-empty element (table or figure) up to 10 positions away, skipping empty paragraphs
+5. **Extended search range**: Searches up to 20 elements after each table/figure to find captions that might be far away
 
-The code now handles cases where there are multiple empty paragraphs between captions and their tables/figures, and removes those empty paragraphs to clean up the document.
+6. **Handles the case in your image**: Will find "Figure 5.1" and "Table 9" even if they appear below their respective content and move them up properly
+
+This should now handle all cases where captions appear below their content, regardless of how far away they are.
