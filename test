@@ -491,4 +491,70 @@ def renumber_captions(doc_path, output_path):
                 if re.search(r'\bTable\s+(?:PLACEHOLDER|[\d.]+)', text, re.IGNORECASE):
                     if next_element is not None and next_element.tag.endswith('tbl'):
                         # Verify it's an actual caption
-                        if is_actual_capti
+                        if is_actual_caption(text, True) or 'PLACEHOLDER' in text:
+                            # Check if this was a placeholder (missing caption)
+                            is_placeholder = 'PLACEHOLDER' in text
+                            
+                            # Extract description (everything after "Table X" or "Table X:" or "Table PLACEHOLDER")
+                            match = re.search(r'\bTable\s+(?:PLACEHOLDER|[\d.]+)\s*:?\s*(.*)', text, re.IGNORECASE)
+                            description = match.group(1).strip() if match else ''
+                            
+                            if is_placeholder:
+                                # For missing captions, use {placeholder} format
+                                current_para.text = f'Table {table_num} {{placeholder}}'
+                            elif description:
+                                current_para.text = f'Table {table_num}: {description}'
+                            else:
+                                current_para.text = f'Table {table_num}'
+                            
+                            table_num += 1
+                
+                # Renumber figure captions (must be followed by image paragraph AND be actual caption)
+                elif re.search(r'\bFigure\s+(?:PLACEHOLDER|[\d.]+)', text, re.IGNORECASE):
+                    if next_element is not None and next_element.tag.endswith('p'):
+                        # Check if next paragraph contains image
+                        for para in doc.paragraphs:
+                            if para._element == next_element:
+                                has_image = any(run._element.xpath('.//pic:pic') for run in para.runs)
+                                if has_image and (is_actual_caption(text, True) or 'PLACEHOLDER' in text):
+                                    # Check if this was a placeholder (missing caption)
+                                    is_placeholder = 'PLACEHOLDER' in text
+                                    
+                                    # Extract description
+                                    match = re.search(r'\bFigure\s+(?:PLACEHOLDER|[\d.]+)\s*:?\s*(.*)', text, re.IGNORECASE)
+                                    description = match.group(1).strip() if match else ''
+                                    
+                                    if is_placeholder:
+                                        # For missing captions, use {placeholder} format
+                                        current_para.text = f'Figure {figure_num} {{placeholder}}'
+                                    elif description:
+                                        current_para.text = f'Figure {figure_num}: {description}'
+                                    else:
+                                        current_para.text = f'Figure {figure_num}'
+                                    
+                                    figure_num += 1
+                                break
+    
+    doc.save(output_path)
+
+# Usage
+if __name__ == "__main__":
+    input_file = "buisness.docx"
+    output_file = "buisness_renumbered2.docx"
+    
+    renumber_captions(input_file, output_file)
+```
+
+**Key improvements:**
+
+1. **Removed all print statements** - The code now runs silently and only produces the output file
+
+2. **Added `remove_empty_paragraphs_between_caption_and_content()`** - Removes empty paragraphs between captions and their tables/figures
+
+3. **Increased search range** - Now searches up to 10 elements away (instead of 3-5) to find captions that might have spaces between them and their content
+
+4. **Smart empty paragraph handling** - When checking if a caption exists, the code now skips over empty paragraphs to find the actual caption
+
+5. **Better next element detection** - When renumbering, the code searches for the next non-empty element (table or figure) up to 10 positions away, skipping empty paragraphs
+
+The code now handles cases where there are multiple empty paragraphs between captions and their tables/figures, and removes those empty paragraphs to clean up the document.
