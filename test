@@ -502,4 +502,27 @@ def renumber_captions(doc_path, output_path):
                                     else:
                                         current_para.text = f'Figure {figure_num}'
                                     
-              
+                                    figure_num += 1
+                                break
+    
+    doc.save(output_path)
+
+# Usage
+if __name__ == "__main__":
+    input_file = "buisness.docx"
+    output_file = "buisness_renumbered2.docx"
+    
+    renumber_captions(input_file, output_file)
+```
+
+**Key changes:**
+
+1. **Added `is_real_caption()` function** - A cleaner function that takes content_type parameter ("table" or "figure")
+
+2. **Updated Step 4 (tables)** - Now uses the improved logic with `next()` and `is_real_caption()` for checking table captions
+
+3. **Updated Step 5 (figures)** - Uses the same improved logic you provided for checking figure captions
+
+4. **Consistent approach** - Both tables and figures now use the same clean, efficient logic pattern
+
+The code now handles both tables and figures with the improved logic you demonstrated, making it more robust and consistent.
