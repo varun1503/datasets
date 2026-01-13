@@ -1,34 +1,25 @@
+Here's the updated code with the improved logic for both tables and figures:
+
+```python
 from docx import Document
 from docx.oxml import parse_xml
 import re
 
-# =========================================================
-# GLOBAL PLACEHOLDER REGEX (SINGLE SOURCE OF TRUTH)
-# =========================================================
-PLACEHOLDER_REGEX = re.compile(
-    r'[\[\{\(]?\s*'
-    r'(put|insert)?\s*'
-    r'(model(?:l?ing)?\s*team\'?s?|team\'?s?)?\s*'
-    r'response\s*here'
-    r'\s*[\]\}\)]?',
-    re.IGNORECASE
-)
-
-# =========================================================
-# CAPTION HELPERS
-# =========================================================
-def looks_like_caption(text):
-    return bool(re.match(r'^\s*(Table|Figure)\s+[\d.]+', text, re.IGNORECASE))
-
-def is_actual_caption(text, next_element_is_table_or_image=True):
+def is_actual_caption(text, next_element_is_table_or_image):
+    """
+    Determine if text is an actual caption, not just a reference or description
+    """
     text = text.strip()
-
+    
+    # Must be followed by a table or image
     if not next_element_is_table_or_image:
         return False
-
+    
+    # Caption must START with "Table X" or "Figure X" (or PLACEHOLDER)
     if not re.match(r'^\s*(Table|Figure)\s+([\d.]+|PLACEHOLDER)', text, re.IGNORECASE):
         return False
-
+    
+    # If it contains phrases like "is provided below", "is shown below", it's NOT a caption
     descriptive_phrases = [
         r'is provided below',
         r'is shown below',
@@ -38,221 +29,477 @@ def is_actual_caption(text, next_element_is_table_or_image=True):
         r'for .+ is provided',
         r'for .+ is shown'
     ]
-
+    
     for phrase in descriptive_phrases:
         if re.search(phrase, text, re.IGNORECASE):
             return False
-
+    
+    # Caption should be relatively short (not a full sentence describing context)
     if len(text) > 200:
         return False
+    
+    # If it starts with "Table X:" or "Figure X:" and has minimal text after, it's a caption
+    caption_pattern = r'^\s*(Table|Figure)\s+[\d.]+\s*:\s*(.*)$'
+    match = re.match(caption_pattern, text, re.IGNORECASE)
+    if match:
+        return True
+    
+    # If it's just "Table X" with short description (< 100 chars), it's a caption
+    if len(text) < 100:
+        return True
+    
+    return False
 
+def is_real_caption(text, content_type):
+    """
+    Check if text is a real caption for the given content type
+    content_type: "table" or "figure"
+    """
+    text = text.strip()
+    
+    if content_type == "table":
+        if not re.match(r'^\s*Table\s+([\d.]+|PLACEHOLDER)', text, re.IGNORECASE):
+            return False
+    elif content_type == "figure":
+        if not re.match(r'^\s*Figure\s+([\d.]+|PLACEHOLDER)', text, re.IGNORECASE):
+            return False
+    else:
+        return False
+    
+    # If it contains phrases like "is provided below", "is shown below", it's NOT a caption
+    descriptive_phrases = [
+        r'is provided below',
+        r'is shown below',
+        r'are provided below',
+        r'are shown below',
+        r'which underwent',
+        r'for .+ is provided',
+        r'for .+ is shown'
+    ]
+    
+    for phrase in descriptive_phrases:
+        if re.search(phrase, text, re.IGNORECASE):
+            return False
+    
+    # Caption should be relatively short
+    if len(text) > 200:
+        return False
+    
     return True
 
 def is_empty_paragraph(para):
-    return not para.text.strip()
+    """
+    Check if a paragraph is empty or contains only whitespace
+    """
+    text = para.text.strip()
+    return not text or text == ''
 
-# =========================================================
-# PLACEHOLDER REMOVAL
-# =========================================================
 def contains_placeholder_text(text):
-    return bool(PLACEHOLDER_REGEX.search(text))
-
-def clean_placeholder_text_from_runs(para):
-    full_text = para.text
-    if not contains_placeholder_text(full_text):
-        return False
-
-    new_text = PLACEHOLDER_REGEX.sub('', full_text)
-    new_text = re.sub(r'\s+', ' ', new_text).strip()
-
-    for run in para.runs:
-        run.text = ''
-
-    if new_text:
-        para.add_run(new_text)
-
-    return True
+    """
+    Check if text contains placeholder patterns
+    """
+    placeholder_patterns = [
+        r'put\s+model(?:l?ing)?\s+team\'?s?\s+response\s+here',
+        r'put\s+response\s+here',
+        r'insert\s+response\s+here',
+        r'team\'?s?\s+response\s+here'
+    ]
+    
+    text_lower = text.lower()
+    for pattern in placeholder_patterns:
+        if re.search(pattern, text_lower):
+            return True
+    return False
 
 def remove_placeholder_paragraphs(doc):
-    to_remove = []
-
+    """
+    Remove entire paragraphs that contain placeholder text
+    """
+    removed_count = 0
+    paragraphs_to_remove = []
+    
     for para in doc.paragraphs:
-        if para.text.strip() and contains_placeholder_text(para.text):
-            to_remove.append(para)
-
-    for para in to_remove:
-        para._element.getparent().remove(para._element)
-
+        text = para.text.strip()
+        if text and contains_placeholder_text(text):
+            paragraphs_to_remove.append(para)
+    
+    for para in paragraphs_to_remove:
+        p_element = para._element
+        p_element.getparent().remove(p_element)
+        removed_count += 1
+    
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
-                for para in list(cell.paragraphs):
-                    if para.text.strip() and contains_placeholder_text(para.text):
-                        para._element.getparent().remove(para._element)
+                cell_paragraphs_to_remove = []
+                for para in cell.paragraphs:
+                    text = para.text.strip()
+                    if text and contains_placeholder_text(text):
+                        cell_paragraphs_to_remove.append(para)
+                
+                for para in cell_paragraphs_to_remove:
+                    p_element = para._element
+                    p_element.getparent().remove(p_element)
+                    removed_count += 1
+    
+    return removed_count
+
+def clean_placeholder_text_from_runs(para):
+    """
+    Clean placeholder text from within a paragraph (if it's part of larger text)
+    """
+    full_text = para.text
+    
+    if not contains_placeholder_text(full_text):
+        return False
+    
+    placeholder_pattern = r'[\{\[]?\s*put\s+model(?:l?ing)?\s+team\'?s?\s+response\s+here\s*[\}\]]?'
+    
+    new_text = re.sub(placeholder_pattern, '', full_text, flags=re.IGNORECASE)
+    new_text = re.sub(r'\s+', ' ', new_text).strip()
+    
+    if new_text != full_text:
+        for run in para.runs:
+            run.text = ''
+        
+        if para.runs:
+            para.runs[0].text = new_text
+        elif new_text:
+            para.add_run(new_text)
+        
+        return True
+    
+    return False
 
 def remove_all_placeholders(doc):
+    """
+    Remove placeholder tags
+    """
     remove_placeholder_paragraphs(doc)
-
+    
     for para in doc.paragraphs:
         clean_placeholder_text_from_runs(para)
-
+    
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for para in cell.paragraphs:
                     clean_placeholder_text_from_runs(para)
 
-# =========================================================
-# CAPTION MOVEMENT LOGIC (ROBUST)
-# =========================================================
-def find_and_move_captions_below_tables(doc):
-    body = doc.element.body
-    elements = list(body)
-    moved = 0
-
-    i = 0
-    while i < len(elements):
-        element = elements[i]
-
-        if element.tag.endswith('tbl'):
-            has_caption_before = False
-
-            if i > 0 and elements[i - 1].tag.endswith('p'):
-                for p in doc.paragraphs:
-                    if p._element == elements[i - 1] and looks_like_caption(p.text):
-                        has_caption_before = True
-                        break
-
-            if not has_caption_before:
-                for offset in range(1, 21):
-                    if i + offset >= len(elements):
-                        break
-
-                    nxt = elements[i + offset]
-
-                    if nxt.tag.endswith('tbl'):
-                        break
-
-                    if nxt.tag.endswith('p'):
-                        for p in doc.paragraphs:
-                            if p._element == nxt:
-                                if re.match(r'^\s*Table\s+[\d.]+', p.text, re.IGNORECASE):
-                                    nxt.getparent().remove(nxt)
-                                    element.addprevious(nxt)
-                                    elements = list(body)
-                                    moved += 1
-                                break
-        i += 1
-
-    return moved
-
-def find_and_move_captions_below_figures(doc):
-    body = doc.element.body
-    elements = list(body)
-    moved = 0
-
-    i = 0
-    while i < len(elements):
-        element = elements[i]
-
-        if element.tag.endswith('p'):
-            para = next((p for p in doc.paragraphs if p._element == element), None)
-            if not para:
-                i += 1
-                continue
-
-            has_image = any(run._element.xpath('.//pic:pic') for run in para.runs)
-
-            if has_image:
-                has_caption_before = False
-
-                if i > 0 and elements[i - 1].tag.endswith('p'):
-                    for p in doc.paragraphs:
-                        if p._element == elements[i - 1] and looks_like_caption(p.text):
-                            has_caption_before = True
-                            break
-
-                if not has_caption_before:
-                    for offset in range(1, 21):
-                        if i + offset >= len(elements):
-                            break
-
-                        nxt = elements[i + offset]
-
-                        if nxt.tag.endswith('tbl'):
-                            break
-
-                        if nxt.tag.endswith('p'):
-                            for p in doc.paragraphs:
-                                if p._element == nxt:
-                                    if any(run._element.xpath('.//pic:pic') for run in p.runs):
-                                        break
-                                    if re.match(r'^\s*Figure\s+[\d.]+', p.text, re.IGNORECASE):
-                                        nxt.getparent().remove(nxt)
-                                        element.addprevious(nxt)
-                                        elements = list(body)
-                                        moved += 1
-                                    break
-        i += 1
-
-    return moved
-
-# =========================================================
-# CLEAN EMPTY PARAGRAPHS BETWEEN CAPTION & CONTENT
-# =========================================================
 def remove_empty_paragraphs_between_caption_and_content(doc):
+    """
+    Remove empty paragraphs between captions and their tables/figures
+    """
     body = doc.element.body
     elements = list(body)
-    to_remove = []
+    paragraphs_to_remove = []
+    
+    for i, element in enumerate(elements):
+        if element.tag.endswith('p'):
+            for para in doc.paragraphs:
+                if para._element == element:
+                    text = para.text.strip()
+                    
+                    if re.match(r'^\s*Table\s+[\d.]+', text, re.IGNORECASE):
+                        j = i + 1
+                        while j < len(elements):
+                            next_elem = elements[j]
+                            
+                            if next_elem.tag.endswith('tbl'):
+                                break
+                            
+                            if next_elem.tag.endswith('p'):
+                                for p in doc.paragraphs:
+                                    if p._element == next_elem:
+                                        if is_empty_paragraph(p):
+                                            paragraphs_to_remove.append(p)
+                                        else:
+                                            j = len(elements)
+                                        break
+                            j += 1
+                    
+                    elif re.match(r'^\s*Figure\s+[\d.]+', text, re.IGNORECASE):
+                        j = i + 1
+                        while j < len(elements):
+                            next_elem = elements[j]
+                            
+                            if next_elem.tag.endswith('p'):
+                                has_image = False
+                                for p in doc.paragraphs:
+                                    if p._element == next_elem:
+                                        has_image = any(run._element.xpath('.//pic:pic') for run in p.runs)
+                                        if has_image:
+                                            j = len(elements)
+                                        elif is_empty_paragraph(p):
+                                            paragraphs_to_remove.append(p)
+                                        else:
+                                            j = len(elements)
+                                        break
+                            
+                            if next_elem.tag.endswith('tbl'):
+                                break
+                            
+                            j += 1
+                    break
+    
+    for para in paragraphs_to_remove:
+        p_element = para._element
+        p_element.getparent().remove(p_element)
 
-    for i, el in enumerate(elements):
-        if el.tag.endswith('p'):
-            para = next((p for p in doc.paragraphs if p._element == el), None)
-            if not para:
-                continue
-
-            if looks_like_caption(para.text):
-                j = i + 1
-                while j < len(elements):
-                    nxt = elements[j]
-
-                    if nxt.tag.endswith('tbl'):
-                        break
-
-                    if nxt.tag.endswith('p'):
-                        p2 = next((p for p in doc.paragraphs if p._element == nxt), None)
-                        if p2 and is_empty_paragraph(p2):
-                            to_remove.append(p2)
-                        else:
+def move_all_misplaced_captions(doc):
+    """
+    Scan entire document and move ANY caption that appears after its content to before it
+    """
+    body = doc.element.body
+    elements = list(body)
+    
+    i = 0
+    
+    while i < len(elements):
+        element = elements[i]
+        
+        # Check if this is a table
+        if element.tag.endswith('tbl'):
+            # Check if there's already a caption immediately before
+            has_caption_before = False
+            if i > 0:
+                prev_elem = elements[i - 1]
+                if prev_elem.tag.endswith('p'):
+                    for para in doc.paragraphs:
+                        if para._element == prev_elem:
+                            if re.match(r'^\s*Table\s+[\d.]+', para.text.strip(), re.IGNORECASE):
+                                has_caption_before = True
                             break
-                    j += 1
+            
+            # If no caption before, search FORWARD up to 30 elements
+            if not has_caption_before:
+                for offset in range(1, 31):
+                    if i + offset < len(elements):
+                        check_elem = elements[i + offset]
+                        
+                        if check_elem.tag.endswith('p'):
+                            for para in doc.paragraphs:
+                                if para._element == check_elem:
+                                    text = para.text.strip()
+                                    if re.match(r'^\s*Table\s+[\d.]+', text, re.IGNORECASE):
+                                        # Found a table caption after the table - move it before
+                                        check_elem.getparent().remove(check_elem)
+                                        element.addprevious(check_elem)
+                                        # Reload elements
+                                        elements = list(body)
+                                        i = 0  # Restart from beginning
+                                        break
+                                break
+                        
+                        # Stop if we hit another table
+                        if check_elem.tag.endswith('tbl'):
+                            break
+        
+        # Check if this is a figure (paragraph with image)
+        elif element.tag.endswith('p'):
+            has_image = False
+            for para in doc.paragraphs:
+                if para._element == element:
+                    has_image = any(run._element.xpath('.//pic:pic') for run in para.runs)
+                    break
+            
+            if has_image:
+                # Check if there's already a caption immediately before
+                has_caption_before = False
+                if i > 0:
+                    prev_elem = elements[i - 1]
+                    if prev_elem.tag.endswith('p'):
+                        for para in doc.paragraphs:
+                            if para._element == prev_elem:
+                                if re.match(r'^\s*Figure\s+[\d.]+', para.text.strip(), re.IGNORECASE):
+                                    has_caption_before = True
+                                break
+                
+                # If no caption before, search FORWARD up to 30 elements
+                if not has_caption_before:
+                    for offset in range(1, 31):
+                        if i + offset < len(elements):
+                            check_elem = elements[i + offset]
+                            
+                            if check_elem.tag.endswith('p'):
+                                for para in doc.paragraphs:
+                                    if para._element == check_elem:
+                                        text = para.text.strip()
+                                        if re.match(r'^\s*Figure\s+[\d.]+', text, re.IGNORECASE):
+                                            # Found a figure caption after the figure - move it before
+                                            check_elem.getparent().remove(check_elem)
+                                            element.addprevious(check_elem)
+                                            # Reload elements
+                                            elements = list(body)
+                                            i = 0  # Restart from beginning
+                                            break
+                                    break
+                            
+                            # Stop if we hit a table or another figure
+                            if check_elem.tag.endswith('tbl'):
+                                break
+                            
+                            if check_elem.tag.endswith('p'):
+                                for p in doc.paragraphs:
+                                    if p._element == check_elem:
+                                        if any(run._element.xpath('.//pic:pic') for run in p.runs):
+                                            break
+                                    break
+        
+        i += 1
 
-    for p in to_remove:
-        p._element.getparent().remove(p._element)
-
-# =========================================================
-# MAIN ENTRY
-# =========================================================
 def renumber_captions(doc_path, output_path):
+    """
+    Renumber all table and figure captions sequentially
+    """
     doc = Document(doc_path)
-
-    find_and_move_captions_below_tables(doc)
-    doc.save(output_path)
-
-    doc = Document(output_path)
-    find_and_move_captions_below_figures(doc)
-    doc.save(output_path)
-
-    doc = Document(output_path)
+    
+    # Step 1: Move ALL misplaced captions (run multiple times to catch all cases)
+    for iteration in range(5):
+        move_all_misplaced_captions(doc)
+        doc.save(output_path)
+        doc = Document(output_path)
+    
+    # Step 2: Remove empty paragraphs
     remove_empty_paragraphs_between_caption_and_content(doc)
     doc.save(output_path)
-
     doc = Document(output_path)
+    
+    # Step 3: Remove placeholders
     remove_all_placeholders(doc)
     doc.save(output_path)
-if __name__ == "__main__":
-    input_docx = "input.docx"      # your original file
-    output_docx = "output.docx"    # cleaned file
+    doc = Document(output_path)
+    
+    body = doc.element.body
+    elements = list(body)
+    
+    # Step 4: Add missing captions for tables (using improved logic)
+    for i, element in enumerate(elements):
+        if not element.tag.endswith('tbl'):
+            continue
 
-    renumber_captions(input_docx, output_docx)
-    print("Done. Cleaned file saved as:", output_docx)
+        prev_el = elements[i - 1] if i > 0 else None
+        has_caption = False
+
+        if prev_el is not None and prev_el.tag.endswith('p'):
+            cap_para = next((p for p in doc.paragraphs if p._element == prev_el), None)
+            if cap_para and is_real_caption(cap_para.text, "table"):
+                has_caption = True
+
+        if not has_caption:
+            new_para = parse_xml(
+                r'<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                r'<w:r><w:t>Table PLACEHOLDER</w:t></w:r></w:p>'
+            )
+            element.addprevious(new_para)
+    
+    doc.save(output_path)
+    doc = Document(output_path)
+    body = doc.element.body
+    elements = list(body)
+
+    # Step 5: Add missing captions for figures (using improved logic)
+    for i, element in enumerate(elements):
+        if not element.tag.endswith('p'):
+            continue
+
+        para = next((p for p in doc.paragraphs if p._element == element), None)
+        if not para:
+            continue
+
+        has_image = any(run._element.xpath('.//pic:pic') for run in para.runs)
+        if not has_image:
+            continue
+
+        prev_el = elements[i - 1] if i > 0 else None
+        has_caption = False
+
+        if prev_el is not None and prev_el.tag.endswith('p'):
+            cap_para = next((p for p in doc.paragraphs if p._element == prev_el), None)
+            if cap_para and is_real_caption(cap_para.text, "figure"):
+                has_caption = True
+
+        if not has_caption:
+            new_para = parse_xml(
+                r'<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                r'<w:r><w:t>Figure PLACEHOLDER</w:t></w:r></w:p>'
+            )
+            element.addprevious(new_para)
+    
+    doc.save(output_path)
+    doc = Document(output_path)
+    body = doc.element.body
+    elements = list(body)
+    
+    # Step 6: Renumber all captions sequentially
+    table_num = 1
+    figure_num = 1
+    
+    for i, element in enumerate(elements):
+        if element.tag.endswith('p'):
+            current_para = None
+            for para in doc.paragraphs:
+                if para._element == element:
+                    current_para = para
+                    break
+            
+            if current_para:
+                text = current_para.text.strip()
+                
+                # Find the next non-empty element
+                next_element = None
+                for offset in range(1, 10):
+                    if i + offset < len(elements):
+                        candidate = elements[i + offset]
+                        
+                        if candidate.tag.endswith('tbl'):
+                            next_element = candidate
+                            break
+                        
+                        if candidate.tag.endswith('p'):
+                            for p in doc.paragraphs:
+                                if p._element == candidate:
+                                    if p.text.strip() or any(run._element.xpath('.//pic:pic') for run in p.runs):
+                                        next_element = candidate
+                                        break
+                            if next_element:
+                                break
+                
+                # Renumber table captions
+                if re.search(r'\bTable\s+(?:PLACEHOLDER|[\d.]+)', text, re.IGNORECASE):
+                    if next_element is not None and next_element.tag.endswith('tbl'):
+                        if is_actual_caption(text, True) or 'PLACEHOLDER' in text:
+                            is_placeholder = 'PLACEHOLDER' in text
+                            
+                            match = re.search(r'\bTable\s+(?:PLACEHOLDER|[\d.]+)\s*:?\s*(.*)', text, re.IGNORECASE)
+                            description = match.group(1).strip() if match else ''
+                            
+                            if is_placeholder:
+                                current_para.text = f'Table {table_num} {{placeholder}}'
+                            elif description:
+                                current_para.text = f'Table {table_num}: {description}'
+                            else:
+                                current_para.text = f'Table {table_num}'
+                            
+                            table_num += 1
+                
+                # Renumber figure captions
+                elif re.search(r'\bFigure\s+(?:PLACEHOLDER|[\d.]+)', text, re.IGNORECASE):
+                    if next_element is not None and next_element.tag.endswith('p'):
+                        for para in doc.paragraphs:
+                            if para._element == next_element:
+                                has_image = any(run._element.xpath('.//pic:pic') for run in para.runs)
+                                if has_image and (is_actual_caption(text, True) or 'PLACEHOLDER' in text):
+                                    is_placeholder = 'PLACEHOLDER' in text
+                                    
+                                    match = re.search(r'\bFigure\s+(?:PLACEHOLDER|[\d.]+)\s*:?\s*(.*)', text, re.IGNORECASE)
+                                    description = match.group(1).strip() if match else ''
+                                    
+                                    if is_placeholder:
+                                        current_para.text = f'Figure {figure_num} {{placeholder}}'
+                                    elif description:
+                                        current_para.text = f'Figure {figure_num}: {description}'
+                                    else:
+                                        current_para.text = f'Figure {figure_num}'
+                                    
+              
