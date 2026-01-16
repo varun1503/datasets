@@ -1,35 +1,5 @@
-def standardize_angle_brackets(line: str) -> str:
-    """
-    Standardize malformed <...> blocks.
+I noticed that the sample RFR document currently has some inconsistencies in its formatting. In several cases, when a bracket is opened, it is not properly closed, which requires handling multiple edge cases in the logic.
 
-    Rule:
-    - If a new '<' appears while a previous '<' is still open,
-      automatically close the previous block before starting the new one.
-    - Close any dangling '<' at end of line.
-    """
+I've updated the implementation so that the output is now consistent. Going forward, could you please ensure that the RFR documents follow a consistent and standard format? I've also attached a corrected sample document below for reference-kindly use the same format in future documents.
 
-    line = norm(line)
-
-    result = []
-    open_blocks = 0
-
-    for ch in line:
-        if ch == "<":
-            if open_blocks > 0:
-                # close previous block
-                result.append(">")
-                open_blocks -= 1
-            result.append("<")
-            open_blocks += 1
-        elif ch == ">" and open_blocks > 0:
-            result.append(">")
-            open_blocks -= 1
-        else:
-            result.append(ch)
-
-    # close any remaining open blocks
-    while open_blocks > 0:
-        result.append(">")
-        open_blocks -= 1
-
-    return "".join(result)
+Thanks for your support and understanding.
