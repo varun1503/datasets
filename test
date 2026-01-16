@@ -1,5 +1,14 @@
-I noticed that the sample RFR document currently has some inconsistencies in its formatting. In several cases, when a bracket is opened, it is not properly closed, which requires handling multiple edge cases in the logic.
+import json
 
-I've updated the implementation so that the output is now consistent. Going forward, could you please ensure that the RFR documents follow a consistent and standard format? I've also attached a corrected sample document below for reference-kindly use the same format in future documents.
+def convert_csv(rows, document_path):
+    file_name = os.path.basename(document_path)
 
-Thanks for your support and understanding.
+    df = pd.DataFrame(rows)
+
+    # Convert rfr dict → JSON string
+    df["rfr"] = df["rfr"].apply(lambda x: json.dumps(x, ensure_ascii=False))
+
+    df["file name"] = file_name
+    df["type"] = "rfr"
+
+    return df
