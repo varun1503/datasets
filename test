@@ -1,114 +1,411 @@
-Here's the updated code with the improved logic for both tables and figures:
-
-```python
-from docx import Document
-from docx.oxml import parse_xml
 import re
+import json
+import unicodedata
+import os
+import pandas as pd
+from typing import List, Dict, Tuple, Optional
+from docx import Document
+from collections import OrderedDict
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 
-def is_actual_caption(text, next_element_is_table_or_image):
+
+def norm(s: str) -> str:
+    """Normalize text: handle unicode, whitespace"""
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFKC", s).replace("\u00A0", " ")
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def group_blocks_from_list(
+    lines: List[str],
+    start_rx: re.Pattern,
+    stop_rx: Optional[re.Pattern] = None,
+    stop_substrings: Optional[List[str]] = None,
+    joiner: str = " ",
+    include_stop_line: bool = False,
+) -> List[Tuple[int, int, str]]:
+    """Group consecutive lines from a list into blocks."""
+    stop_substrings = stop_substrings or []
+    grouped_blocks = []
+    buf = []
+    capturing = False
+    start_idx = 0
+
+    def flush(end_idx):
+        nonlocal buf
+        if buf:
+            grouped_text = joiner.join(s.strip() for s in buf if s.strip())
+            grouped_blocks.append((start_idx, end_idx, grouped_text))
+            buf = []
+
+    for i, line in enumerate(lines):
+        s = (line or "").strip()
+        if start_rx.search(s):
+            if capturing:
+                flush(i - 1)
+            capturing = True
+            start_idx = i
+            buf = [s]
+            continue
+
+        if not capturing:
+            continue
+
+        buf.append(s)
+
+        stop_hit = False
+        if stop_rx and stop_rx.search(s):
+            stop_hit = True
+        elif any(sub in s for sub in stop_substrings):
+            stop_hit = True
+
+        if stop_hit:
+            if not include_stop_line:
+                buf.pop()
+                flush(i - 1)
+            else:
+                flush(i)
+            capturing = False
+
+    if capturing:
+        flush(len(lines) - 1)
+
+    return grouped_blocks
+
+
+def replace_blocks_in_lines(lines: List[str], grouped_blocks: List[Tuple[int, int, str]]) -> List[str]:
+    """Replace original RFR block lines with their grouped version."""
+    replaced = []
+    i = 0
+    block_map = {start: (end, text) for start, end, text in grouped_blocks}
+
+    while i < len(lines):
+        if i in block_map:
+            end_idx, text = block_map[i]
+            replaced.append(text)
+            i = end_idx + 1
+        else:
+            replaced.append(lines[i])
+            i += 1
+    return replaced
+
+
+def read_docx_lines(path: str) -> List[str]:
+    """Read Word document and return list of text lines."""
+    doc = Document(path)
+    lines: List[str] = []
+
+    for child in doc.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            p = Paragraph(child, doc)
+            t = norm(p.text)
+            if t:
+                lines.append(t)
+        elif child.tag == qn("w:tbl"):
+            tbl = Table(child, doc)
+            for row in tbl.rows:
+                row_text = []
+                for cell in row.cells:
+                    for p in cell.paragraphs:
+                        t = norm(p.text)
+                        if t:
+                            row_text.append(t)
+                if row_text:
+                    lines.append(" | ".join(row_text))
+
+    # Group RFR blocks
+    RFR_RX = re.compile(r"\s*RFR\s*\d+\s*", re.IGNORECASE)
+    STOP_SUBS = ["[Modeling Team's Response]", "[", "Modeling Team's Response"]
+    blocks = group_blocks_from_list(lines, start_rx=RFR_RX, stop_substrings=STOP_SUBS, include_stop_line=False)
+    final_lines = replace_blocks_in_lines(lines, blocks)
+
+    return final_lines
+
+
+# Patterns
+REQ_ITEMS_RX = re.compile(r"^\s*Request\s+Items\s*$", re.IGNORECASE)
+RFR_RX = re.compile(r"\s*RFR\s*\d+\s*", re.IGNORECASE)
+BRACKETS_RX = re.compile(r"<\s*([^>]+?)\s*>")
+Q_KEY_RX = re.compile(r"^\s*Q\d+\s*:\s*", re.IGNORECASE)
+RESP_HDR_RX = re.compile(r"Modeling Team['']?s Response", re.IGNORECASE)
+TEST_TAG_RX = re.compile(r"^Test\s*(\w+)", re.IGNORECASE)
+
+
+def extract_meta_from_rfr_header(line: str) -> Tuple[str, str, str]:
     """
-    Determine if text is an actual caption, not just a reference or description
+    Extract metadata from RFR header with improved logic:
+    - Handles missing '?' in IMVP questions
+    - Better section extraction
     """
-    text = text.strip()
+    q_key = ""
+    section = ""
+    imvp = ""
     
-    # Must be followed by a table or image
-    if not next_element_is_table_or_image:
-        return False
+    parts = [norm(x) for x in BRACKETS_RX.findall(line)]
     
-    # Caption must START with "Table X" or "Figure X" (or PLACEHOLDER)
-    if not re.match(r'^\s*(Table|Figure)\s+([\d.]+|PLACEHOLDER)', text, re.IGNORECASE):
-        return False
+    if not parts:
+        return q_key, section, imvp
     
-    # If it contains phrases like "is provided below", "is shown below", it's NOT a caption
-    descriptive_phrases = [
-        r'is provided below',
-        r'is shown below',
-        r'are provided below',
-        r'are shown below',
-        r'which underwent',
-        r'for .+ is provided',
-        r'for .+ is shown'
+    # Extract Q key (e.g., "Q2:")
+    for part in parts:
+        if Q_KEY_RX.match(part):
+            q_key = part
+            break
+    
+    # NEW LOGIC: Better IMVP extraction
+    # Look for longest bracketed content that's not Q-key and not short tags
+    candidates = [p for p in parts if p != q_key and len(p) > 20]
+    
+    # Prefer parts ending with '?' but accept longest if none found
+    question_parts = [p for p in candidates if p.endswith("?")]
+    if question_parts:
+        imvp = max(question_parts, key=len)
+    elif candidates:
+        # If no '?' found, take the longest substantial text
+        imvp = max(candidates, key=len)
+    
+    # Extract section: look for short descriptive tags
+    section_candidates = [
+        p for p in parts 
+        if p != q_key 
+        and p != imvp 
+        and len(p) < 50 
+        and not p.endswith("?")
     ]
     
-    for phrase in descriptive_phrases:
-        if re.search(phrase, text, re.IGNORECASE):
-            return False
+    # Common section patterns
+    section_keywords = ["validation", "data", "model", "performance", "documentation", "testing"]
+    for part in section_candidates:
+        if any(keyword in part.lower() for keyword in section_keywords):
+            section = part
+            break
     
-    # Caption should be relatively short (not a full sentence describing context)
-    if len(text) > 200:
-        return False
+    # If no section found yet, take first short non-question part
+    if not section and section_candidates:
+        section = section_candidates[0]
     
-    # If it starts with "Table X:" or "Figure X:" and has minimal text after, it's a caption
-    caption_pattern = r'^\s*(Table|Figure)\s+[\d.]+\s*:\s*(.*)$'
-    match = re.match(caption_pattern, text, re.IGNORECASE)
-    if match:
-        return True
-    
-    # If it's just "Table X" with short description (< 100 chars), it's a caption
-    if len(text) < 100:
-        return True
-    
-    return False
+    return q_key, section, imvp
 
-def is_real_caption(text, content_type):
-    """
-    Check if text is a real caption for the given content type
-    content_type: "table" or "figure"
-    """
-    text = text.strip()
-    
-    if content_type == "table":
-        if not re.match(r'^\s*Table\s+([\d.]+|PLACEHOLDER)', text, re.IGNORECASE):
-            return False
-    elif content_type == "figure":
-        if not re.match(r'^\s*Figure\s+([\d.]+|PLACEHOLDER)', text, re.IGNORECASE):
-            return False
-    else:
-        return False
-    
-    # If it contains phrases like "is provided below", "is shown below", it's NOT a caption
-    descriptive_phrases = [
-        r'is provided below',
-        r'is shown below',
-        r'are provided below',
-        r'are shown below',
-        r'which underwent',
-        r'for .+ is provided',
-        r'for .+ is shown'
-    ]
-    
-    for phrase in descriptive_phrases:
-        if re.search(phrase, text, re.IGNORECASE):
-            return False
-    
-    # Caption should be relatively short
-    if len(text) > 200:
-        return False
-    
-    return True
 
-def is_empty_paragraph(para):
-    """
-    Check if a paragraph is empty or contains only whitespace
-    """
-    text = para.text.strip()
-    return not text or text == ''
+def extract_test_tag(line: str) -> Optional[str]:
+    """Extract test tag from line."""
+    parts = [norm(x) for x in BRACKETS_RX.findall(line)]
+    for part in parts:
+        m = TEST_TAG_RX.match(part)
+        if m:
+            tag_value = m.group(1).lower()
+            return f"test{tag_value}"
+    return None
 
-def contains_placeholder_text(text):
-    """
-    Check if text contains placeholder patterns
-    """
-    placeholder_patterns = [
-        r'put\s+model(?:l?ing)?\s+team\'?s?\s+response\s+here',
-        r'put\s+response\s+here',
-        r'insert\s+response\s+here',
-        r'team\'?s?\s+response\s+here'
-    ]
+
+def clean_greater_than(lines: List[str]) -> List[str]:
+    """Remove trailing '>' from lines."""
+    return [re.sub(r'>.*$', '', s).strip() for s in lines]
+
+
+def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
+    """Parse lines into structured RFR rows."""
+    # Find start after "Request Items"
+    start = 0
+    for i, t in enumerate(lines):
+        if REQ_ITEMS_RX.search(t):
+            start = i + 1
+            break
     
-    text_lower = text.lower()
-    for pattern in placeholder_patterns:
-        if re.search(pattern, text_lower):
-            return True
+    L = lines[start:]
+    rows: List[Dict] = []
+    i = 0
+    
+    while i < len(L):
+        line = L[i]
+        if RFR_RX.search(line):
+            q_key, section, imvp_q = extract_meta_from_rfr_header(line)
+            test_tag = extract_test_tag(line)
+            
+            # Extract RFR number for fallback Q-key
+            rfr_match = re.search(r"RFR\s*(\d+)", line, re.IGNORECASE)
+            rfr_num = rfr_match.group(1) if rfr_match else "?"
+            
+            # If no Q-key found, create one from RFR number
+            if not q_key:
+                q_key = f"Q{rfr_num}:"
+            
+            responses: List[str] = []
+            i += 1
+            
+            # Collect responses
+            while i < len(L) and not RFR_RX.search(L[i]):
+                cur = L[i]
+                if RESP_HDR_RX.search(cur):
+                    i += 1
+                    block: List[str] = []
+                    while (
+                        i < len(L)
+                        and not RESP_HDR_RX.search(L[i])
+                        and not RFR_RX.search(L[i])
+                    ):
+                        block.append(L[i])
+                        i += 1
+                    resp = norm(" ".join(block))
+                    # Unwrap <...> if entire block is wrapped
+                    m = BRACKETS_RX.fullmatch(resp)
+                    if m:
+                        resp = norm(m.group(1))
+                    if resp:
+                        responses.append(resp)
+                    continue
+                i += 1
+            
+            responses = clean_greater_than(responses)
+            
+            # Build row - always include if we have IMVP or responses
+            if imvp_q or responses:
+                row = {
+                    "IMVP Question": imvp_q or "",
+                    "Section": section or "N/A",
+                    "rfr": {q_key: " ".join(responses).strip()}
+                }
+                if test_tag:
+                    row[test_tag] = imvp_q or ""
+                rows.append(row)
+            continue
+        i += 1
+    
+    return rows
+
+
+def parse_docx_to_rfr_rows(path: str) -> List[Dict]:
+    """Main entry point: parse DOCX to RFR rows."""
+    return parse_lines_after_request_items(read_docx_lines(path))
+
+
+def collapse_empty_imvp_into_previous(rows: List[Dict]) -> List[Dict]:
+    """Merge rows with empty IMVP into previous row (same section)."""
+    out: List[Dict] = []
+    last_with_imvp_by_section: dict = {}
+    
+    for r in rows:
+        imvp = (r.get("IMVP Question") or "").strip()
+        section = (r.get("Section") or "").strip()
+        
+        if imvp:
+            out.append(r)
+            last_with_imvp_by_section[section] = len(out) - 1
+        else:
+            # Empty IMVP; try to merge
+            idx = last_with_imvp_by_section.get(section)
+            if idx is not None and r.get("rfr"):
+                out[idx]["rfr"].update(r["rfr"])
+            # Skip rows that can't be merged
+    
+    return out
+
+
+def merge_rows_by_imvp(rows: List[Dict]) -> List[Dict]:
+    """Merge rows with identical IMVP questions."""
+    merged: "OrderedDict[str, Dict]" = OrderedDict()
+    
+    for r in rows:
+        imvp = (r.get("IMVP Question") or "").strip()
+        if not imvp:
+            continue
+        
+        if imvp not in merged:
+            merged[imvp] = {
+                "IMVP Question": imvp,
+                "Section": r.get("Section") or "N/A",
+                "rfr": dict(r.get("rfr") or {})
+            }
+        else:
+            merged[imvp]["rfr"].update(r.get("rfr") or {})
+            if merged[imvp]["Section"] == "N/A" and r.get("Section"):
+                merged[imvp]["Section"] = r["Section"]
+    
+    return list(merged.values())
+
+
+def flatten_rfr_for_csv(rows: List[Dict]) -> List[Dict]:
+    """Flatten rfr dict into separate columns for CSV."""
+    flattened = []
+    for r in rows:
+        base = {
+            "IMVP Question": r.get("IMVP Question", ""),
+            "Section": r.get("Section", "N/A")
+        }
+        
+        # Add test tags if present
+        for key in r:
+            if key.startswith("test"):
+                base[key] = r[key]
+        
+        # Flatten rfr dict
+        rfr_dict = r.get("rfr", {})
+        for q_key, response in rfr_dict.items():
+            row_copy = base.copy()
+            row_copy["Q_Key"] = q_key
+            row_copy["Response"] = response
+            flattened.append(row_copy)
+    
+    return flattened
+
+
+def convert_csv(rows: List[Dict], document_path: str) -> pd.DataFrame:
+    """Convert rows to DataFrame with metadata."""
+    file_name = os.path.basename(document_path)
+    
+    # Flatten for CSV
+    flattened = flatten_rfr_for_csv(rows)
+    
+    df = pd.DataFrame(flattened)
+    df["file_name"] = file_name
+    df["type"] = "rfr"
+    
+    return df
+
+
+def save_outputs(rows: List[Dict], document_path: str, json_path: str = None, csv_path: str = None):
+    """Save both JSON and CSV outputs."""
+    base_name = os.path.splitext(os.path.basename(document_path))[0]
+    
+    # Save JSON
+    if json_path is None:
+        json_path = f"{base_name}_rfr_output.json"
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(rows, f, ensure_ascii=False, indent=2)
+    print(f"✓ Saved JSON: {json_path} ({len(rows)} rows)")
+    
+    # Save CSV
+    if csv_path is None:
+        csv_path = f"{base_name}_rfr_output.csv"
+    df = convert_csv(rows, document_path)
+    df.to_csv(csv_path, index=False, encoding="utf-8")
+    print(f"✓ Saved CSV: {csv_path} ({len(df)} rows)")
+    
+    return json_path, csv_path
+
+
+if __name__ == "__main__":
+    DOCX_PATH = "sample_RFR.docx"
+    
+    # Parse document
+    rows = parse_docx_to_rfr_rows(DOCX_PATH)
+    
+    print(f"\n📄 Parsed {len(rows)} initial rows")
+    
+    # Optional: Apply merging logic
+    # rows = collapse_empty_imvp_into_previous(rows)
+    # rows = merge_rows_by_imvp(rows)
+    
+    # Save outputs
+    json_file, csv_file = save_outputs(rows, DOCX_PATH)
+    
+    # Display sample
+    print("\n📋 Sample output:")
+    print(json.dumps(rows[0] if rows else {}, indent=2, ensure_ascii=False))            return True
     return False
 
 def remove_placeholder_paragraphs(doc):
