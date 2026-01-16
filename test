@@ -4,33 +4,64 @@ import unicodedata
 import os
 import pandas as pd
 from typing import List, Dict, Tuple, Optional
-from docx import Document
 from collections import OrderedDict
-from docx.oxml import OxmlElement
+from docx import Document
 from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
+# ===================== REGEX =====================
+RFR_RX = re.compile(r"\bRFR\s*\d+\b", re.IGNORECASE)
+REQ_ITEMS_RX = re.compile(r"^\s*Request\s+Items\s*$", re.IGNORECASE)
+Q_KEY_RX = re.compile(r"^\s*Q\d+\s*:", re.IGNORECASE)
+RESP_HDR_RX = re.compile(r"Modeling Team[’']?s Response", re.IGNORECASE)
+BRACKETS_RX = re.compile(r"<\s*([^>]+?)\s*>")
+STOP_SUBS = ["[Modeling Team’s Response]", "[", "Modeling Team’s Response"]
 
+# ===================== HELPERS =====================
 def norm(s: str) -> str:
-    """Normalize text: handle unicode, whitespace"""
     if not s:
         return ""
     s = unicodedata.normalize("NFKC", s).replace("\u00A0", " ")
     return re.sub(r"\s+", " ", s).strip()
 
+def clean_greater_than(lines: List[str]) -> List[str]:
+    return [re.sub(r'>.*$', '', s).strip() for s in lines if s.strip()]
 
+# ===================== DOCX READER =====================
+def read_docx_lines(path: str) -> List[str]:
+    doc = Document(path)
+    lines: List[str] = []
+
+    for child in doc.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            p = Paragraph(child, doc)
+            t = norm(p.text)
+            if t:
+                lines.append(t)
+
+        elif child.tag == qn("w:tbl"):
+            tbl = Table(child, doc)
+            for row in tbl.rows:
+                row_text = []
+                for cell in row.cells:
+                    for p in cell.paragraphs:
+                        t = norm(p.text)
+                        if t:
+                            row_text.append(t)
+                if row_text:
+                    lines.append(" | ".join(row_text))
+
+    return lines
+
+# ===================== BLOCK GROUPING =====================
 def group_blocks_from_list(
     lines: List[str],
     start_rx: re.Pattern,
-    stop_rx: Optional[re.Pattern] = None,
     stop_substrings: Optional[List[str]] = None,
-    joiner: str = " ",
-    include_stop_line: bool = False,
 ) -> List[Tuple[int, int, str]]:
-    """Group consecutive lines from a list into blocks."""
     stop_substrings = stop_substrings or []
-    grouped_blocks = []
+    grouped = []
     buf = []
     capturing = False
     start_idx = 0
@@ -38,12 +69,12 @@ def group_blocks_from_list(
     def flush(end_idx):
         nonlocal buf
         if buf:
-            grouped_text = joiner.join(s.strip() for s in buf if s.strip())
-            grouped_blocks.append((start_idx, end_idx, grouped_text))
+            grouped.append((start_idx, end_idx, " ".join(buf)))
             buf = []
 
     for i, line in enumerate(lines):
-        s = (line or "").strip()
+        s = line.strip()
+
         if start_rx.search(s):
             if capturing:
                 flush(i - 1)
@@ -57,58 +88,165 @@ def group_blocks_from_list(
 
         buf.append(s)
 
-        stop_hit = False
-        if stop_rx and stop_rx.search(s):
-            stop_hit = True
-        elif any(sub in s for sub in stop_substrings):
-            stop_hit = True
-
-        if stop_hit:
-            if not include_stop_line:
-                buf.pop()
-                flush(i - 1)
-            else:
-                flush(i)
+        if any(sub in s for sub in stop_substrings):
+            buf.pop()
+            flush(i - 1)
             capturing = False
 
     if capturing:
         flush(len(lines) - 1)
 
-    return grouped_blocks
+    return grouped
 
-
-def replace_blocks_in_lines(lines: List[str], grouped_blocks: List[Tuple[int, int, str]]) -> List[str]:
-    """Replace original RFR block lines with their grouped version."""
-    replaced = []
+def replace_blocks_in_lines(lines, blocks):
+    out = []
     i = 0
-    block_map = {start: (end, text) for start, end, text in grouped_blocks}
+    block_map = {s: (e, t) for s, e, t in blocks}
 
     while i < len(lines):
         if i in block_map:
-            end_idx, text = block_map[i]
-            replaced.append(text)
-            i = end_idx + 1
+            e, t = block_map[i]
+            out.append(t)
+            i = e + 1
         else:
-            replaced.append(lines[i])
+            out.append(lines[i])
             i += 1
-    return replaced
+    return out
 
+# ===================== META EXTRACTION =====================
+def extract_meta_from_rfr_header(line: str) -> Tuple[str, str, str]:
+    """
+    Handles:
+    - IMVP with '?'
+    - IMVP without '?'
+    - Correct section extraction
+    """
+    q_key = ""
+    section = ""
+    imvp = ""
 
-def read_docx_lines(path: str) -> List[str]:
-    """Read Word document and return list of text lines."""
-    doc = Document(path)
-    lines: List[str] = []
+    parts = [norm(x) for x in BRACKETS_RX.findall(line)]
 
-    for child in doc.element.body.iterchildren():
-        if child.tag == qn("w:p"):
-            p = Paragraph(child, doc)
-            t = norm(p.text)
-            if t:
-                lines.append(t)
-        elif child.tag == qn("w:tbl"):
-            tbl = Table(child, doc)
-            for row in tbl.rows:
-                row_text = []
+    # Qx and IMVP
+    for part in parts:
+        if Q_KEY_RX.match(part):
+            q_key = part.split(":", 1)[0].strip()   # Q2
+            imvp = part.split(":", 1)[1].strip() if ":" in part else part
+            break
+
+    # Section
+    for part in parts:
+        if not Q_KEY_RX.match(part):
+            section = part
+            break
+
+    return q_key, section, imvp
+
+# ===================== CORE PARSER =====================
+def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
+    start = 0
+    for i, t in enumerate(lines):
+        if REQ_ITEMS_RX.search(t):
+            start = i + 1
+            break
+
+    L = lines[start:]
+    rows = []
+    i = 0
+
+    while i < len(L):
+        line = L[i]
+
+        if RFR_RX.search(line):
+            q_key, section, imvp = extract_meta_from_rfr_header(line)
+            responses = []
+            i += 1
+
+            while i < len(L) and not RFR_RX.search(L[i]):
+                if RESP_HDR_RX.search(L[i]):
+                    i += 1
+                    block = []
+                    while i < len(L) and not RESP_HDR_RX.search(L[i]) and not RFR_RX.search(L[i]):
+                        block.append(L[i])
+                        i += 1
+                    resp = norm(" ".join(block))
+                    m = BRACKETS_RX.fullmatch(resp)
+                    if m:
+                        resp = norm(m.group(1))
+                    if resp:
+                        responses.append(resp)
+                    continue
+                i += 1
+
+            responses = clean_greater_than(responses)
+
+            if imvp or responses:
+                rows.append({
+                    "IMVP Question": imvp,
+                    "Section": section,
+                    "rfr": {q_key or "Q?": " ".join(responses).strip()}
+                })
+            continue
+        i += 1
+
+    return rows
+
+# ===================== CSV CONVERTER =====================
+def convert_csv(rows, document_path):
+    file_name = os.path.basename(document_path)
+    df = pd.DataFrame(rows)
+    df["file name"] = file_name
+    df["type"] = "rfr"
+    return df
+
+# ===================== VALIDATION =====================
+def validate_rows(rows: List[Dict]) -> List[Dict]:
+    for idx, r in enumerate(rows, start=1):
+        imvp = (r.get("IMVP Question") or "").strip()
+        rfr = r.get("rfr") or {}
+
+        if not imvp:
+            raise ValueError(
+                f"Row {idx} missing IMVP Question. Expected <Qx: ...> in RFR header."
+            )
+
+        if not isinstance(rfr, dict) or not rfr:
+            raise ValueError(
+                f"Row {idx} has invalid rfr structure: {rfr}"
+            )
+
+        (_, v) = next(iter(rfr.items()))
+        if not v.strip():
+            raise ValueError(
+                f"Row {idx} has empty Modeling Team response."
+            )
+
+    return rows
+
+# ===================== ENTRY POINT =====================
+def parse_docx_to_rfr_rows(path: str) -> List[Dict]:
+    lines = read_docx_lines(path)
+    blocks = group_blocks_from_list(lines, RFR_RX, STOP_SUBS)
+    lines = replace_blocks_in_lines(lines, blocks)
+    rows = parse_lines_after_request_items(lines)
+    return validate_rows(rows)
+
+# ===================== RUN =====================
+if __name__ == "__main__":
+    DOCX_PATH = "sample_RFR.docx"
+    OUT_JSON = "rfr_rows.json"
+    OUT_CSV = "rfr_rows.csv"
+
+    rows = parse_docx_to_rfr_rows(DOCX_PATH)
+
+    with open(OUT_JSON, "w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+    df = convert_csv(rows, DOCX_PATH)
+    df.to_csv(OUT_CSV, index=False)
+
+    print(f"✅ Parsed {len(rows)} RFR rows successfully")                row_text = []
                 for cell in row.cells:
                     for p in cell.paragraphs:
                         t = norm(p.text)
