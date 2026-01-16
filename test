@@ -1,14 +1,7 @@
-import json
+Description:
 
-def convert_csv(rows, document_path):
-    file_name = os.path.basename(document_path)
+This issue focuses on improving the RFR and Finding Report extraction workflow by processing the input document to generate structured JSON output and validating the results using E3 testing. In addition, the current extraction logic includes a model document tag that is no longer required; this tag must be removed from the processing flow. The updated implementation should ensure that the final JSON output is clean, consistent, and accurately reflects the content of the source document without introducing regressions.
 
-    df = pd.DataFrame(rows)
+Acceptance Criteria:
 
-    # Convert rfr dict → JSON string
-    df["rfr"] = df["rfr"].apply(lambda x: json.dumps(x, ensure_ascii=False))
-
-    df["file name"] = file_name
-    df["type"] = "rfr"
-
-    return df
+The system successfully extracts RFRs and findings from the document and converts them into a valid JSON format that passes E3 validation. The unnecessary model document tag is fully removed and does not appear in the final output. End-to-end testing confirms that the updated logic works as expected, existing functionality remains intact, and the final output is ready for downstream consumption without manual intervention.
