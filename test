@@ -1,48 +1,35 @@
 def standardize_angle_brackets(line: str) -> str:
     """
-    Generic repair for malformed <...> blocks.
+    Standardize malformed <...> blocks.
+
     Rule:
-    - If a '<' appears while another '<...>' is still open,
-      auto-close the previous block before starting the new one.
+    - If a new '<' appears while a previous '<' is still open,
+      automatically close the previous block before starting the new one.
+    - Close any dangling '<' at end of line.
     """
 
     line = norm(line)
 
     result = []
-    open_block = False
-    buffer = ""
+    open_blocks = 0
 
-    i = 0
-    while i < len(line):
-        ch = line[i]
-
+    for ch in line:
         if ch == "<":
-            # If already inside a block, close it before starting new
-            if open_block:
-                result.append(buffer.strip() + ">")
-                buffer = ""
-
-            open_block = True
-            buffer = ""
-            i += 1
-            continue
-
-        if ch == ">" and open_block:
-            result.append(buffer.strip() + ">")
-            buffer = ""
-            open_block = False
-            i += 1
-            continue
-
-        if open_block:
-            buffer += ch
+            if open_blocks > 0:
+                # close previous block
+                result.append(">")
+                open_blocks -= 1
+            result.append("<")
+            open_blocks += 1
+        elif ch == ">" and open_blocks > 0:
+            result.append(">")
+            open_blocks -= 1
         else:
             result.append(ch)
 
-        i += 1
-
-    # Close any dangling block at end
-    if open_block and buffer.strip():
-        result.append(buffer.strip() + ">")
+    # close any remaining open blocks
+    while open_blocks > 0:
+        result.append(">")
+        open_blocks -= 1
 
     return "".join(result)
