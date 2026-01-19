@@ -1,318 +1,131 @@
-Below are three well-defined tasks for the Case Assist Playbook, followed by a one-pager summary covering scope, outcomes, and deliverables.
-This is written at EA / Technical Architecture rigor (L3) and is suitable for CTO review and sprint planning.
+Below is a clean one-page document covering the tasks shown in your Rally board, written in a formal EA / delivery-ready format.
+This can be directly added to your EA Playbook, Rally description, or shared with CTO / stakeholders.
 
 
 ---
 
-Task 1: Technical Architecture – Level 3 (L3)
+Case Assist – Annotation, Structuring & Validation One-Pager
 
 Objective
 
-Define the Level 3 Technical Architecture for the Case Assist system, covering component interactions, technology choices, deployment topology, and non-functional considerations.
-
-Scope
-
-Logical and physical architecture
-
-Service decomposition
-
-Deployment and runtime view
-
-Security and compliance alignment
-
-Scalability and availability strategy
+Deliver a stable, structured, and validated Case Assist report processing pipeline by implementing arrival-based annotation extraction, table and figure restructuring, event environment deployment, and final validation cleanup.
 
 
-Key Activities
+---
 
-Identify all system components:
+Scope of Work
 
-UI (Frontend)
+1. RFR & Finding Report Annotation Extraction
 
-API Gateway
+Enhance and modify the RFR and finding extraction logic as per the latest document structure.
 
-Orchestration Layer (LangGraph)
+Ensure annotations (sections, findings, references) are correctly parsed and ordered.
 
-Retrieval & Indexing Services
-
-LLM Inference Layer
-
-Data Stores (Vector DB, Metadata DB, Object Storage)
-
-
-Define inter-service communication (REST / async events)
-
-Map technology stack per layer
-
-Define environments (Dev / QA / Prod)
-
-Document non-functional requirements:
-
-Latency
-
-Throughput
-
-Fault tolerance
-
-Observability
-
-
-
-Deliverables
-
-L3 Technical Architecture Diagram
-
-Component responsibility matrix
-
-Technology stack mapping
-
-Deployment topology diagram
-
-NFR mapping to architecture decisions
-
-
-Acceptance Criteria
-
-Architecture aligns with EA standards
-
-Clear separation of concerns
-
-Supports future extensibility (new models, retrievers)
-
-Approved by Architecture Review Board / CTO
+Align extraction output with updated report standards.
 
 
 
 ---
 
-Task 2: Data Flow & Sequence Diagrams (System Interaction Design)
+2. Table & Figure Restructuring and Deployment
 
-Objective
+Implement robust table and figure structuring logic.
 
-Create end-to-end data flow diagrams (DFD) and sequence diagrams that explain how data and control move through Case Assist for each major use case.
+Maintain correct hierarchy, captions, and parent–child relationships.
 
-Scope
+Deploy the updated structuring logic into the event environment.
 
-Ingestion flow
-
-Query & retrieval flow
-
-LLM answer generation flow
-
-Error and retry handling flow
-
-
-Key Activities
-
-Identify core use cases:
-
-Document ingestion
-
-Index creation
-
-User query execution
-
-Answer generation with citations
-
-
-Define data inputs, outputs, and transformations
-
-Create sequence diagrams showing:
-
-Actor → UI → API → Orchestrator → Services
-
-
-Create DFDs showing:
-
-Persistent vs transient data
-
-Data stores involved at each step
-
-
-
-Deliverables
-
-High-level Data Flow Diagram
-
-Detailed Sequence Diagrams:
-
-Ingestion sequence
-
-Query → Retrieval → Generation sequence
-
-
-Data ownership and lifecycle documentation
-
-
-Acceptance Criteria
-
-Diagrams are consistent with L3 architecture
-
-Every API call and data store interaction is traceable
-
-Error paths are explicitly documented
+Validate accuracy using real report samples.
 
 
 
 ---
 
-Task 3: Detailed Design – Component, Infrastructure & API Reference
+3. Test in Event Environment & Bug Fixes
 
-Objective
+Perform end-to-end testing in the event environment.
 
-Produce a Detailed Design Document (DDD) covering component-level design, full-stack infrastructure, and API specifications.
+Identify and fix defects related to:
 
-Scope
+Annotation mismatches
 
-Component-Level Design
+Structural inconsistencies
 
-UI components (Chat, Upload, Settings)
-
-Backend services
-
-LangGraph nodes and transitions
-
-Custom retrievers and chunkers
-
-Security and auth components
+Processing failures
 
 
-Infrastructure Design
-
-Cloud resources
-
-Networking
-
-Compute and storage
-
-CI/CD and secrets management
-
-Observability stack
-
-
-API Reference
-
-REST endpoints
-
-Request/response schemas
-
-Error codes
-
-Authentication and authorization
-
-
-Key Activities
-
-Define class and module responsibilities
-
-Define interfaces between components
-
-Design infra using IaC mindset
-
-Document APIs using OpenAPI-style structure
-
-Map APIs to sequence diagrams
-
-
-Deliverables
-
-Detailed Component Design document
-
-Infrastructure Architecture & resource mapping
-
-API Reference (detailed endpoint-level documentation)
-
-Security and access control design
-
-
-Acceptance Criteria
-
-Design is implementation-ready
-
-APIs are unambiguous and testable
-
-Infrastructure supports scale and HA
-
-Security controls meet enterprise standards
+Ensure pipeline stability across multiple runs.
 
 
 
 ---
 
-One-Pager: Case Assist – Architecture & Design Workstream
+4. Final Validation Cleanup – Unnecessary Tag Removal
 
-Purpose
+Identify unnecessary or noisy tags present in the final validation report.
 
-Establish a clear, enterprise-grade architecture and design foundation for the Case Assist platform to enable scalable, secure, and maintainable GenAI capabilities.
+Remove irrelevant tags from the modeling response without impacting semantic meaning.
 
-In Scope
-
-L3 Technical Architecture
-
-Data Flow & Sequence Diagrams
-
-Detailed Component & Infrastructure Design
-
-Full API Reference
+Ensure final validation output is clean, minimal, and production-ready.
 
 
-Out of Scope
 
-UI visual design
+---
 
-Model training and fine-tuning
+Key Deliverables
 
-Business process documentation
+Updated annotation extraction logic
 
+Structured table and figure outputs
 
-Key Outcomes
+Deployed and tested event-based pipeline
 
-Clear system blueprint for developers
-
-Reduced implementation ambiguity
-
-Faster onboarding for new engineers
-
-Strong alignment with EA and CTO expectations
+Clean final validation reports with unnecessary tags removed
 
 
-Deliverables Summary
 
-Area	Output
-
-Architecture	L3 Technical Architecture
-Interaction	DFD & Sequence Diagrams
-Design	Component, Infra, API Specs
-Governance	Security & NFR alignment
-
-
-Stakeholders
-
-Engineering Team
-
-EA / Architecture Review Board
-
-CTO Office
-
-Platform & DevOps Teams
-
+---
 
 Success Criteria
 
-CTO approval without major rework
+Arrival-triggered processing works reliably
 
-Design reused directly in implementation
+Annotations, tables, and figures are correctly structured
 
-Architecture supports future GenAI expansion
+Event environment execution is stable
+
+Final validation reports contain no redundant or unnecessary tags
 
 
 
 ---
 
-If you want, I can next:
+Dependencies
 
-Convert this into JIRA-ready task descriptions
+Availability of updated report formats
 
-Create a single consolidated EA Playbook section
+Event environment readiness
 
-Provide diagram-level breakdown (what each diagram must show)
+Access to validation and test datasets
+
+
+
+---
+
+Ownership
+
+Owner: Varun Vaishy
+
+Project: E-Tech Scope ML / Case Assist
+
+
+
+---
+
+If you want next, I can:
+
+Align this exactly to Rally task descriptions
+
+Convert this into a CTO-ready EA Playbook section
+
+Add Definition of Done (DoD) for each task
