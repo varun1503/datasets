@@ -1,164 +1,57 @@
-Below is a clean, EA-grade one-pager for the Case Assist EA Playbook Continuation tasks shown in your Rally screenshot.
-This is aligned to architecture L3, data flow, sequence diagrams, and detailed design and is suitable for CTO / EA review.
+from thefuzz import fuzz
+
+def process_RFR_for_LLM(file_path):
+    rows = parse_docx_to_rfr_rows(file_path)
+    rows = collapse_empty_imvp_into_previous(rows)
+
+    output = {}
+
+    for row in rows:
+        imvp_ques = row['IMVP Question']
+        section = row['Section']
+
+        rfr = list(row['rfr'].keys())[0]
+        mt_response = row['rfr'][rfr]
+
+        matched_key = None
+        for key in output:
+            if fuzz.ratio(key, imvp_ques) > 95:
+                matched_key = key
+                break
+
+        if matched_key:
+            if not output[matched_key]['Risk pillar']:
+                output[matched_key]['Risk pillar'] = section
+
+            # ✅ append, not overwrite
+            output[matched_key]['RFR'][rfr] = mt_response
+
+        else:
+            output[imvp_ques] = {
+                "Risk pillar": section,
+                "RFR": {
+                    rfr: mt_response
+                }
+            }
+
+    return output
+import pandas as pd
+
+def rfr_key_value_to_csv(processed_data, csv_path):
+    records = []
+
+    for imvp_question, data in processed_data.items():
+        risk_pillar = data["Risk pillar"]
+
+        for rfr, mt_response in data["RFR"].items():
+            records.append({
+                "IMVP Question": imvp_question,
+                "Risk Pillar": risk_pillar,
+                "RFR": rfr,
+                "MT Response": mt_response
+            })
+
+    df = pd.DataFrame(records)
+    df.to_csv(csv_path, index=False)
+    return df
 
-
----
-
-Case Assist – EA Playbook Continuation (Architecture & Design)
-
-Objective
-
-Define and document the end-to-end technical architecture, data flow, sequence interactions, and detailed component design for the Case Assist platform to enable consistent implementation and future scalability.
-
-
----
-
-Scope of Work
-
-1. End-to-End Data Flow Diagrams
-
-Create end-to-end data flow diagrams illustrating how data moves across the Case Assist system.
-
-Cover major flows:
-
-Document ingestion
-
-Annotation and structuring
-
-Retrieval and orchestration
-
-Model inference and response generation
-
-
-Clearly identify:
-
-Data sources and sinks
-
-Persistent vs transient data
-
-Transformation stages
-
-
-
-
----
-
-2. Sequence Diagrams (3–5 Core Flows)
-
-Create detailed sequence diagrams for key Case Assist use cases.
-
-Illustrate:
-
-Control flow across UI, APIs, orchestration, services, and data stores
-
-Request–response interactions
-
-Error and retry paths
-
-
-Ensure alignment with data flow diagrams and L3 architecture.
-
-
-
----
-
-3. Detailed Design Document (DDD)
-
-Produce a Detailed Design Document covering:
-
-Component-level design
-
-Class and module responsibilities
-
-LangGraph orchestration nodes and transitions
-
-
-Define clear interfaces between components to support parallel development.
-
-
-
----
-
-4. Full-Stack Infrastructure & API Design
-
-Document full-stack infrastructure design, including:
-
-Compute, storage, networking, and security components
-
-Environment separation (Dev / Event / Prod)
-
-
-Provide detailed API reference:
-
-Endpoint definitions
-
-Request/response schemas
-
-Error handling and validation rules
-
-
-
-
----
-
-Key Deliverables
-
-End-to-end Data Flow Diagrams
-
-3–5 Detailed Sequence Diagrams
-
-Detailed Design Document (Component Level)
-
-Infrastructure Architecture Documentation
-
-API Reference (implementation-ready)
-
-
-
----
-
-Success Criteria
-
-Architecture is L3 compliant and EA-approved
-
-Diagrams are consistent across architecture, data flow, and sequence views
-
-Design is implementation-ready with no ambiguity
-
-Documentation can be directly reused by development teams
-
-
-
----
-
-Dependencies
-
-Finalized Case Assist functional scope
-
-Alignment with existing platform standards
-
-Access to current deployment and orchestration patterns
-
-
-
----
-
-Ownership
-
-Owner: Varun Vaishy
-
-Project: Case Assist – EA Playbook
-
-Track: E-Tech Scope ML
-
-
-
----
-
-If you want next, I can:
-
-Merge both one-pagers into a single EA Playbook chapter
-
-Add Definition of Done (DoD) per Rally task
-
-Convert this into a CTO review deck outline
