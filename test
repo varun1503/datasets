@@ -1,7 +1,318 @@
-Description:
+Below are three well-defined tasks for the Case Assist Playbook, followed by a one-pager summary covering scope, outcomes, and deliverables.
+This is written at EA / Technical Architecture rigor (L3) and is suitable for CTO review and sprint planning.
 
-This issue focuses on improving the RFR and Finding Report extraction workflow by processing the input document to generate structured JSON output and validating the results using E3 testing. In addition, the current extraction logic includes a model document tag that is no longer required; this tag must be removed from the processing flow. The updated implementation should ensure that the final JSON output is clean, consistent, and accurately reflects the content of the source document without introducing regressions.
 
-Acceptance Criteria:
+---
 
-The system successfully extracts RFRs and findings from the document and converts them into a valid JSON format that passes E3 validation. The unnecessary model document tag is fully removed and does not appear in the final output. End-to-end testing confirms that the updated logic works as expected, existing functionality remains intact, and the final output is ready for downstream consumption without manual intervention.
+Task 1: Technical Architecture – Level 3 (L3)
+
+Objective
+
+Define the Level 3 Technical Architecture for the Case Assist system, covering component interactions, technology choices, deployment topology, and non-functional considerations.
+
+Scope
+
+Logical and physical architecture
+
+Service decomposition
+
+Deployment and runtime view
+
+Security and compliance alignment
+
+Scalability and availability strategy
+
+
+Key Activities
+
+Identify all system components:
+
+UI (Frontend)
+
+API Gateway
+
+Orchestration Layer (LangGraph)
+
+Retrieval & Indexing Services
+
+LLM Inference Layer
+
+Data Stores (Vector DB, Metadata DB, Object Storage)
+
+
+Define inter-service communication (REST / async events)
+
+Map technology stack per layer
+
+Define environments (Dev / QA / Prod)
+
+Document non-functional requirements:
+
+Latency
+
+Throughput
+
+Fault tolerance
+
+Observability
+
+
+
+Deliverables
+
+L3 Technical Architecture Diagram
+
+Component responsibility matrix
+
+Technology stack mapping
+
+Deployment topology diagram
+
+NFR mapping to architecture decisions
+
+
+Acceptance Criteria
+
+Architecture aligns with EA standards
+
+Clear separation of concerns
+
+Supports future extensibility (new models, retrievers)
+
+Approved by Architecture Review Board / CTO
+
+
+
+---
+
+Task 2: Data Flow & Sequence Diagrams (System Interaction Design)
+
+Objective
+
+Create end-to-end data flow diagrams (DFD) and sequence diagrams that explain how data and control move through Case Assist for each major use case.
+
+Scope
+
+Ingestion flow
+
+Query & retrieval flow
+
+LLM answer generation flow
+
+Error and retry handling flow
+
+
+Key Activities
+
+Identify core use cases:
+
+Document ingestion
+
+Index creation
+
+User query execution
+
+Answer generation with citations
+
+
+Define data inputs, outputs, and transformations
+
+Create sequence diagrams showing:
+
+Actor → UI → API → Orchestrator → Services
+
+
+Create DFDs showing:
+
+Persistent vs transient data
+
+Data stores involved at each step
+
+
+
+Deliverables
+
+High-level Data Flow Diagram
+
+Detailed Sequence Diagrams:
+
+Ingestion sequence
+
+Query → Retrieval → Generation sequence
+
+
+Data ownership and lifecycle documentation
+
+
+Acceptance Criteria
+
+Diagrams are consistent with L3 architecture
+
+Every API call and data store interaction is traceable
+
+Error paths are explicitly documented
+
+
+
+---
+
+Task 3: Detailed Design – Component, Infrastructure & API Reference
+
+Objective
+
+Produce a Detailed Design Document (DDD) covering component-level design, full-stack infrastructure, and API specifications.
+
+Scope
+
+Component-Level Design
+
+UI components (Chat, Upload, Settings)
+
+Backend services
+
+LangGraph nodes and transitions
+
+Custom retrievers and chunkers
+
+Security and auth components
+
+
+Infrastructure Design
+
+Cloud resources
+
+Networking
+
+Compute and storage
+
+CI/CD and secrets management
+
+Observability stack
+
+
+API Reference
+
+REST endpoints
+
+Request/response schemas
+
+Error codes
+
+Authentication and authorization
+
+
+Key Activities
+
+Define class and module responsibilities
+
+Define interfaces between components
+
+Design infra using IaC mindset
+
+Document APIs using OpenAPI-style structure
+
+Map APIs to sequence diagrams
+
+
+Deliverables
+
+Detailed Component Design document
+
+Infrastructure Architecture & resource mapping
+
+API Reference (detailed endpoint-level documentation)
+
+Security and access control design
+
+
+Acceptance Criteria
+
+Design is implementation-ready
+
+APIs are unambiguous and testable
+
+Infrastructure supports scale and HA
+
+Security controls meet enterprise standards
+
+
+
+---
+
+One-Pager: Case Assist – Architecture & Design Workstream
+
+Purpose
+
+Establish a clear, enterprise-grade architecture and design foundation for the Case Assist platform to enable scalable, secure, and maintainable GenAI capabilities.
+
+In Scope
+
+L3 Technical Architecture
+
+Data Flow & Sequence Diagrams
+
+Detailed Component & Infrastructure Design
+
+Full API Reference
+
+
+Out of Scope
+
+UI visual design
+
+Model training and fine-tuning
+
+Business process documentation
+
+
+Key Outcomes
+
+Clear system blueprint for developers
+
+Reduced implementation ambiguity
+
+Faster onboarding for new engineers
+
+Strong alignment with EA and CTO expectations
+
+
+Deliverables Summary
+
+Area	Output
+
+Architecture	L3 Technical Architecture
+Interaction	DFD & Sequence Diagrams
+Design	Component, Infra, API Specs
+Governance	Security & NFR alignment
+
+
+Stakeholders
+
+Engineering Team
+
+EA / Architecture Review Board
+
+CTO Office
+
+Platform & DevOps Teams
+
+
+Success Criteria
+
+CTO approval without major rework
+
+Design reused directly in implementation
+
+Architecture supports future GenAI expansion
+
+
+
+---
+
+If you want, I can next:
+
+Convert this into JIRA-ready task descriptions
+
+Create a single consolidated EA Playbook section
+
+Provide diagram-level breakdown (what each diagram must show)
