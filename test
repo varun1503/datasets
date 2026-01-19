@@ -1,57 +1,17 @@
-from thefuzz import fuzz
-
-def process_RFR_for_LLM(file_path):
-    rows = parse_docx_to_rfr_rows(file_path)
-    rows = collapse_empty_imvp_into_previous(rows)
-
-    output = {}
-
-    for row in rows:
-        imvp_ques = row['IMVP Question']
-        section = row['Section']
-
-        rfr = list(row['rfr'].keys())[0]
-        mt_response = row['rfr'][rfr]
-
-        matched_key = None
-        for key in output:
-            if fuzz.ratio(key, imvp_ques) > 95:
-                matched_key = key
-                break
-
-        if matched_key:
-            if not output[matched_key]['Risk pillar']:
-                output[matched_key]['Risk pillar'] = section
-
-            # ✅ append, not overwrite
-            output[matched_key]['RFR'][rfr] = mt_response
-
-        else:
-            output[imvp_ques] = {
-                "Risk pillar": section,
-                "RFR": {
-                    rfr: mt_response
-                }
-            }
-
-    return output
 import pandas as pd
+import json
 
-def rfr_key_value_to_csv(processed_data, csv_path):
+def imvp_rfr_dict_single_row_csv(processed_data, csv_path):
     records = []
 
     for imvp_question, data in processed_data.items():
-        risk_pillar = data["Risk pillar"]
-
-        for rfr, mt_response in data["RFR"].items():
-            records.append({
-                "IMVP Question": imvp_question,
-                "Risk Pillar": risk_pillar,
-                "RFR": rfr,
-                "MT Response": mt_response
-            })
+        records.append({
+            "IMVP Question": imvp_question,
+            "Risk Pillar": data["Risk pillar"],
+            # ✅ serialize dict safely
+            "RFR": json.dumps(data["RFR"], ensure_ascii=False)
+        })
 
     df = pd.DataFrame(records)
     df.to_csv(csv_path, index=False)
     return df
-
