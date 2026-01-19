@@ -1,72 +1,101 @@
-Below is a clean one-page document covering the tasks shown in your Rally board, written in a formal EA / delivery-ready format.
-This can be directly added to your EA Playbook, Rally description, or shared with CTO / stakeholders.
+Below is a clean, EA-grade one-pager for the Case Assist EA Playbook Continuation tasks shown in your Rally screenshot.
+This is aligned to architecture L3, data flow, sequence diagrams, and detailed design and is suitable for CTO / EA review.
 
 
 ---
 
-Case Assist – Annotation, Structuring & Validation One-Pager
+Case Assist – EA Playbook Continuation (Architecture & Design)
 
 Objective
 
-Deliver a stable, structured, and validated Case Assist report processing pipeline by implementing arrival-based annotation extraction, table and figure restructuring, event environment deployment, and final validation cleanup.
+Define and document the end-to-end technical architecture, data flow, sequence interactions, and detailed component design for the Case Assist platform to enable consistent implementation and future scalability.
 
 
 ---
 
 Scope of Work
 
-1. RFR & Finding Report Annotation Extraction
+1. End-to-End Data Flow Diagrams
 
-Enhance and modify the RFR and finding extraction logic as per the latest document structure.
+Create end-to-end data flow diagrams illustrating how data moves across the Case Assist system.
 
-Ensure annotations (sections, findings, references) are correctly parsed and ordered.
+Cover major flows:
 
-Align extraction output with updated report standards.
+Document ingestion
 
+Annotation and structuring
 
+Retrieval and orchestration
 
----
-
-2. Table & Figure Restructuring and Deployment
-
-Implement robust table and figure structuring logic.
-
-Maintain correct hierarchy, captions, and parent–child relationships.
-
-Deploy the updated structuring logic into the event environment.
-
-Validate accuracy using real report samples.
+Model inference and response generation
 
 
+Clearly identify:
 
----
+Data sources and sinks
 
-3. Test in Event Environment & Bug Fixes
+Persistent vs transient data
 
-Perform end-to-end testing in the event environment.
+Transformation stages
 
-Identify and fix defects related to:
-
-Annotation mismatches
-
-Structural inconsistencies
-
-Processing failures
-
-
-Ensure pipeline stability across multiple runs.
 
 
 
 ---
 
-4. Final Validation Cleanup – Unnecessary Tag Removal
+2. Sequence Diagrams (3–5 Core Flows)
 
-Identify unnecessary or noisy tags present in the final validation report.
+Create detailed sequence diagrams for key Case Assist use cases.
 
-Remove irrelevant tags from the modeling response without impacting semantic meaning.
+Illustrate:
 
-Ensure final validation output is clean, minimal, and production-ready.
+Control flow across UI, APIs, orchestration, services, and data stores
+
+Request–response interactions
+
+Error and retry paths
+
+
+Ensure alignment with data flow diagrams and L3 architecture.
+
+
+
+---
+
+3. Detailed Design Document (DDD)
+
+Produce a Detailed Design Document covering:
+
+Component-level design
+
+Class and module responsibilities
+
+LangGraph orchestration nodes and transitions
+
+
+Define clear interfaces between components to support parallel development.
+
+
+
+---
+
+4. Full-Stack Infrastructure & API Design
+
+Document full-stack infrastructure design, including:
+
+Compute, storage, networking, and security components
+
+Environment separation (Dev / Event / Prod)
+
+
+Provide detailed API reference:
+
+Endpoint definitions
+
+Request/response schemas
+
+Error handling and validation rules
+
 
 
 
@@ -74,13 +103,15 @@ Ensure final validation output is clean, minimal, and production-ready.
 
 Key Deliverables
 
-Updated annotation extraction logic
+End-to-end Data Flow Diagrams
 
-Structured table and figure outputs
+3–5 Detailed Sequence Diagrams
 
-Deployed and tested event-based pipeline
+Detailed Design Document (Component Level)
 
-Clean final validation reports with unnecessary tags removed
+Infrastructure Architecture Documentation
+
+API Reference (implementation-ready)
 
 
 
@@ -88,13 +119,13 @@ Clean final validation reports with unnecessary tags removed
 
 Success Criteria
 
-Arrival-triggered processing works reliably
+Architecture is L3 compliant and EA-approved
 
-Annotations, tables, and figures are correctly structured
+Diagrams are consistent across architecture, data flow, and sequence views
 
-Event environment execution is stable
+Design is implementation-ready with no ambiguity
 
-Final validation reports contain no redundant or unnecessary tags
+Documentation can be directly reused by development teams
 
 
 
@@ -102,11 +133,11 @@ Final validation reports contain no redundant or unnecessary tags
 
 Dependencies
 
-Availability of updated report formats
+Finalized Case Assist functional scope
 
-Event environment readiness
+Alignment with existing platform standards
 
-Access to validation and test datasets
+Access to current deployment and orchestration patterns
 
 
 
@@ -116,7 +147,9 @@ Ownership
 
 Owner: Varun Vaishy
 
-Project: E-Tech Scope ML / Case Assist
+Project: Case Assist – EA Playbook
+
+Track: E-Tech Scope ML
 
 
 
@@ -124,8 +157,8 @@ Project: E-Tech Scope ML / Case Assist
 
 If you want next, I can:
 
-Align this exactly to Rally task descriptions
+Merge both one-pagers into a single EA Playbook chapter
 
-Convert this into a CTO-ready EA Playbook section
+Add Definition of Done (DoD) per Rally task
 
-Add Definition of Done (DoD) for each task
+Convert this into a CTO review deck outline
