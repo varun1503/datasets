@@ -1,17 +1,100 @@
-import pandas as pd
-import json
+def process_row(row, mappings, model_doc_filepath):
+    import pandas as pd
 
-def imvp_rfr_dict_single_row_csv(processed_data, csv_path):
-    records = []
+    row_id = row.name
+    section_no_raw = row
 
-    for imvp_question, data in processed_data.items():
-        records.append({
-            "IMVP Question": imvp_question,
-            "Risk Pillar": data["Risk pillar"],
-            # ✅ serialize dict safely
-            "RFR": json.dumps(data["RFR"], ensure_ascii=False)
-        })
+    # ---------- validation ----------
+    if pd.isna(section_no_raw):
+        return row_id, None, None, None, None, "No document section number was provided."
 
-    df = pd.DataFrame(records)
-    df.to_csv(csv_path, index=False)
-    return df
+    section_no = str(section_no_raw).strip()
+    if section_no == "":
+        return row_id, None, None, None, None, "No document section number was provided."
+
+    # ---------- resolve section numbers ----------
+    matching_rows = mappings.loc[
+        mappings['Section number'].astype(str).str.strip() == section_no,
+        ['Section number', 'Section Title', 'Section Search']
+    ]
+
+    sec_no_lst = [section_no]
+
+    if matching_rows.empty:
+        sec_no_lst = split_sections(section_no)
+
+        if sec_no_lst:
+            matching_rows = mappings.loc[
+                mappings['Section number'].astype(str).isin(sec_no_lst),
+                ['Section number', 'Section Title', 'Section Search']
+            ]
+        else:
+            # fallback: section title search
+            matching_rows = mappings.loc[
+                mappings['Section Title']
+                .astype(str)
+                .str.contains(section_no, case=False, regex=False, na=False),
+                ['Section number', 'Section Title', 'Section Search']
+            ]
+
+    if matching_rows.empty:
+        return row_id, None, None, None, None, "Section number not found in mappings."
+
+    # ---------- extraction ----------
+    source = ModelDoc(model_doc_filepath)
+
+    extracted_text_all = []
+    section_titles = []
+    section_numbers = []
+    section_search_keys = []
+
+    for _, r in matching_rows.iterrows():
+        sec_no = r['Section number']
+        sec_title = r['Section Title']
+        sec_search = r['Section Search']
+
+        try:
+            title, content = source.copy_content(start=sec_search)
+            text = extract_text_from_content(content, source._doc.nsmap)
+
+            # include subsections
+            subsections = mappings[
+                mappings['Section number'].astype(str).str.startswith(f"{sec_no}.")
+            ]['Section Search'].values
+
+            for subsection in subsections:
+                sub_title, sub_content = source.copy_content(start=subsection)
+                sub_text = extract_text_from_content(sub_content, source._doc.nsmap)
+                text += f"\n{sub_title}\n{sub_text}"
+
+            extracted_text_all.append(text)
+            section_titles.append(sec_title)
+            section_numbers.append(sec_no)
+            section_search_keys.append(sec_search)
+
+        except Exception as e:
+            return row_id, None, None, None, None, f"Error processing section {sec_no}: {e}"
+
+    return (
+        row_id,
+        section_numbers,
+        section_titles,
+        section_search_keys,
+        "\n\n".join(extracted_text_all),
+        None
+    )
+results = sample_docs['Business'].apply(
+    lambda r: process_row(r, mappings, filepath)
+)
+
+result_df = pd.DataFrame(
+    results.tolist(),
+    columns=[
+        "row_id",
+        "section_numbers",
+        "section_titles",
+        "section_search_keys",
+        "extracted_text",
+        "error"
+    ]
+)
