@@ -1,35 +1,31 @@
-def process_row(row, mappings, model_doc_filepath):
-    import pandas as pd
+def process_row(section_value, mappings, model_doc_filepath):
+    """
+    Processes one Business cell value
+    """
 
-    row_id = row.name
-    section_no_raw = row
+    if pd.isna(section_value):
+        return None, None, None, None, "No document section number was provided."
 
-    # ---------- validation ----------
-    if pd.isna(section_no_raw):
-        return row_id, None, None, None, None, "No document section number was provided."
-
-    section_no = str(section_no_raw).strip()
+    section_no = str(section_value).strip()
     if section_no == "":
-        return row_id, None, None, None, None, "No document section number was provided."
+        return None, None, None, None, "No document section number was provided."
 
-    # ---------- resolve section numbers ----------
+    # ---------- resolve sections ----------
     matching_rows = mappings.loc[
-        mappings['Section number'].astype(str).str.strip() == section_no,
+        mappings['Section number'] == section_no,
         ['Section number', 'Section Title', 'Section Search']
     ]
-
-    sec_no_lst = [section_no]
 
     if matching_rows.empty:
         sec_no_lst = split_sections(section_no)
 
         if sec_no_lst:
             matching_rows = mappings.loc[
-                mappings['Section number'].astype(str).isin(sec_no_lst),
+                mappings['Section number'].isin(sec_no_lst),
                 ['Section number', 'Section Title', 'Section Search']
             ]
         else:
-            # fallback: section title search
+            # fallback: title search
             matching_rows = mappings.loc[
                 mappings['Section Title']
                 .astype(str)
@@ -38,14 +34,14 @@ def process_row(row, mappings, model_doc_filepath):
             ]
 
     if matching_rows.empty:
-        return row_id, None, None, None, None, "Section number not found in mappings."
+        return None, None, None, None, f"Section not found: {section_no}"
 
     # ---------- extraction ----------
     source = ModelDoc(model_doc_filepath)
 
     extracted_text_all = []
-    section_titles = []
     section_numbers = []
+    section_titles = []
     section_search_keys = []
 
     for _, r in matching_rows.iterrows():
@@ -59,7 +55,7 @@ def process_row(row, mappings, model_doc_filepath):
 
             # include subsections
             subsections = mappings[
-                mappings['Section number'].astype(str).str.startswith(f"{sec_no}.")
+                mappings['Section number'].str.startswith(f"{sec_no}.")
             ]['Section Search'].values
 
             for subsection in subsections:
@@ -68,29 +64,33 @@ def process_row(row, mappings, model_doc_filepath):
                 text += f"\n{sub_title}\n{sub_text}"
 
             extracted_text_all.append(text)
-            section_titles.append(sec_title)
             section_numbers.append(sec_no)
+            section_titles.append(sec_title)
             section_search_keys.append(sec_search)
 
         except Exception as e:
-            return row_id, None, None, None, None, f"Error processing section {sec_no}: {e}"
+            return None, None, None, None, f"Error processing section {sec_no}: {e}"
 
     return (
-        row_id,
         section_numbers,
         section_titles,
         section_search_keys,
         "\n\n".join(extracted_text_all),
         None
     )
+filepath = r"data\3680Technical_Model_Document_v1"
+mappings = get_mappings(filepath)
+
+templatefile = r"data\Pending_items.xlsx"
+sample_docs = pd.read_excel(templatefile)
+
 results = sample_docs['Business'].apply(
-    lambda r: process_row(r, mappings, filepath)
+    lambda v: process_row(v, mappings, filepath)
 )
 
 result_df = pd.DataFrame(
     results.tolist(),
     columns=[
-        "row_id",
         "section_numbers",
         "section_titles",
         "section_search_keys",
