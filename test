@@ -1,71 +1,32 @@
-class ModelDoc:
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
+
+def call_llm(model):
+
+    PROMPT_TEMPLATE = """
+    SYSTEM INSTRUCTION:
+    You are an expert summarization assistant.
+    Summarize the user input clearly and concisely.
+    Focus only on the key points.
+
+    USER INPUT:
+    {user_input}
+
+    SUMMARY:
     """
-    Reads a DOCX model document and extracts section content
-    based on Section Search anchor text.
-    """
 
-    def __init__(self, filepath):
-        self.filepath = filepath
-        self._doc = Document(filepath)
+    prompt = PromptTemplate(
+        input_variables=["user_input"],
+        template=PROMPT_TEMPLATE
+    )
 
-    def _iter_paragraphs(self):
-        """
-        Yield (index, paragraph, raw_xml)
-        """
-        for i, p in enumerate(self._doc.paragraphs):
-            yield i, p, p._p
+    chain = LLMChain(
+        llm=model,
+        prompt=prompt
+    )
 
-    def _is_section_start(self, paragraph_text, section_search):
-        """
-        Determines if a paragraph marks the start of a section
-        """
-        if not paragraph_text:
-            return False
+    result = chain.invoke({
+        "user_input": "Text that needs to be summarized"
+    })
 
-        return paragraph_text.strip().startswith(section_search)
-
-    def _is_next_section(self, paragraph_text, current_section_no):
-        """
-        Stop condition: next section number encountered
-        """
-        if not paragraph_text:
-            return False
-
-        text = paragraph_text.strip()
-        return (
-            text.startswith(current_section_no + ".")
-            or text.startswith(current_section_no + " ")
-        )
-
-    def copy_content(self, start):
-        """
-        Extract content starting from Section Search anchor
-        until next section.
-        """
-
-        start_idx = None
-        section_no = start.split(" ", 1)[0]
-
-        # ---------- find start ----------
-        for idx, para, _ in self._iter_paragraphs():
-            if self._is_section_start(para.text, start):
-                start_idx = idx
-                section_title = para.text.strip()
-                break
-
-        if start_idx is None:
-            raise ValueError(f"Section not found: {start}")
-
-        # ---------- collect content ----------
-        collected = []
-
-        for idx, para, raw in self._iter_paragraphs():
-            if idx <= start_idx:
-                continue
-
-            if self._is_next_section(para.text, section_no):
-                break
-
-            collected.append(raw)
-
-        return section_title, collected
+    return result
