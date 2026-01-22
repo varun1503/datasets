@@ -1,32 +1,32 @@
-from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
+Below are 8 architecture-grade descriptive points taken directly from the data-flow diagram you shared, written only as points (no headings, no RAG terms, no theory, no section titles).
 
-def call_llm(model):
 
-    PROMPT_TEMPLATE = """
-    SYSTEM INSTRUCTION:
-    You are an expert summarization assistant.
-    Summarize the user input clearly and concisely.
-    Focus only on the key points.
+---
 
-    USER INPUT:
-    {user_input}
+1. The user request enters through the UI and is captured as a conversation message, which is immediately passed to the backend input processing layer for normalization, validation, and enrichment with customer and case context from SQL and document stores.
 
-    SUMMARY:
-    """
 
-    prompt = PromptTemplate(
-        input_variables=["user_input"],
-        template=PROMPT_TEMPLATE
-    )
+2. The processed input is published to the Business Vision layer through a messaging mechanism, where the system records the request, creates or updates the customer conversation ID, and triggers downstream processing through asynchronous notifications.
 
-    chain = LLMChain(
-        llm=model,
-        prompt=prompt
-    )
 
-    result = chain.invoke({
-        "user_input": "Text that needs to be summarized"
-    })
+3. The routing logic receives the enriched request and determines which business component (Credit, Fraud, CBO, or AML) should handle the query based on extracted intent and customer context.
 
-    return result
+
+4. The selected business component applies domain-specific rules and logic to interpret the request and prepares a structured business prompt that represents what information must be retrieved or reasoned about.
+
+
+5. The NLP and prompt-processing layer transforms the business prompt into a model-ready format, combining domain rules, query intent, and conversation history before invoking the reasoning engine.
+
+
+6. The reasoning engine generates a structured response by iteratively refining the prompt, calling supporting tools when required, and synthesizing the output into a format suitable for downstream evaluation.
+
+
+7. The generated response is passed through a self-reflection and evaluation stage that validates correctness, consistency, and alignment with business rules before it is approved for delivery.
+
+
+8. The final approved response is sent back through the orchestration layer to the UI, where it is rendered to the user, while the full interaction is stored in the system for audit, traceability, and future context reuse.
+
+
+
+
+---
