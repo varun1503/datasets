@@ -1,32 +1,54 @@
-Below are 8 architecture-grade descriptive points taken directly from the data-flow diagram you shared, written only as points (no headings, no RAG terms, no theory, no section titles).
+import pandas as pd
+from docx import Document
+import re
 
+# -----------------------------
+# 1. Load DataFrame
+# -----------------------------
+df = pd.read_csv("input.csv")  # or pd.read_excel(...)
 
----
+# Keep only rows where annotation exists
+df = df[df['annotation'].notna()]
 
-1. The user request enters through the UI and is captured as a conversation message, which is immediately passed to the backend input processing layer for normalization, validation, and enrichment with customer and case context from SQL and document stores.
+# Clean section names (remove numbering like "1.", "1.1")
+df['section_clean'] = (
+    df['section_name']
+    .astype(str)
+    .str.replace(r'^\d+(\.\d+)*\s*', '', regex=True)
+    .str.strip()
+)
 
+# Create mapping: section -> annotation
+section_to_annotation = dict(
+    zip(df['section_clean'], df['annotation'])
+)
 
-2. The processed input is published to the Business Vision layer through a messaging mechanism, where the system records the request, creates or updates the customer conversation ID, and triggers downstream processing through asynchronous notifications.
+# -----------------------------
+# 2. Load Word Document
+# -----------------------------
+doc = Document("input.docx")
 
+paragraphs = doc.paragraphs
 
-3. The routing logic receives the enriched request and determines which business component (Credit, Fraud, CBO, or AML) should handle the query based on extracted intent and customer context.
+# -----------------------------
+# 3. Replace placeholders
+# -----------------------------
+for i, para in enumerate(paragraphs):
+    heading_text = para.text.strip()
 
+    if heading_text in section_to_annotation:
+        annotation_text = section_to_annotation[heading_text]
 
-4. The selected business component applies domain-specific rules and logic to interpret the request and prepares a structured business prompt that represents what information must be retrieved or reasoned about.
+        # Look for next paragraph (where {} or {Placeholder} exists)
+        if i + 1 < len(paragraphs):
+            next_para = paragraphs[i + 1]
+            next_text = next_para.text.strip()
 
+            # Explicit placeholder handling
+            if next_text in ["{}", "{Placeholder}"]:
+                next_para.text = annotation_text
 
-5. The NLP and prompt-processing layer transforms the business prompt into a model-ready format, combining domain rules, query intent, and conversation history before invoking the reasoning engine.
-
-
-6. The reasoning engine generates a structured response by iteratively refining the prompt, calling supporting tools when required, and synthesizing the output into a format suitable for downstream evaluation.
-
-
-7. The generated response is passed through a self-reflection and evaluation stage that validates correctness, consistency, and alignment with business rules before it is approved for delivery.
-
-
-8. The final approved response is sent back through the orchestration layer to the UI, where it is rendered to the user, while the full interaction is stored in the system for audit, traceability, and future context reuse.
-
-
-
-
----
+# -----------------------------
+# 4. Save Output
+# -----------------------------
+doc.save("output.docx")
