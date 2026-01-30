@@ -1,48 +1,497 @@
-Perfect — here are single-line points (one line each) for every section:
+Here's the updated code using fuzzy matching to identify the Executive Summary heading:
 
+```python
+from docx import Document
+from docx.oxml import parse_xml
+import re
+from fuzzywuzzy import fuzz
 
----
+def is_actual_caption(text, next_element_is_table_or_image):
+    """
+    Determine if text is an actual caption, not just a reference or description
+    """
+    text = text.strip()
 
-4.1 Detailed Design – Level 2
+    # Must be followed by a table or image
+    if not next_element_is_table_or_image:
+        return False
 
-Designed component-level architecture and data flow for core system use cases.
+    # Caption must START with "Table X" or "Figure X" (or PLACEHOLDER)
+    if not re.match(r'^\s*(Table|Figure)\s+([\d.]+|PLACEHOLDER)', text, re.IGNORECASE):
+        return False
 
+    # If it contains phrases like "is provided below", "is shown below", it's NOT a caption
+    descriptive_phrases = [
+        r'is provided below',
+        r'is shown below',
+        r'are provided below',
+        r'are shown below',
+        r'which underwent',
+        r'for .+ is provided',
+        r'for .+ is shown'
+    ]
 
-4.2 Technology Stack
+    for phrase in descriptive_phrases:
+        if re.search(phrase, text, re.IGNORECASE):
+            return False
 
-Finalized and documented the complete technology stack for AI, backend, and storage layers.
+    # Caption should be relatively short (not a full sentence describing context)
+    if len(text) > 200:
+        return False
 
+    # If it starts with "Table X:" or "Figure X:" and has minimal text after, it's a caption
+    caption_pattern = r'^\s*(Table|Figure)\s+[\d.]+\s*:\s*(.*)$'
+    match = re.match(caption_pattern, text, re.IGNORECASE)
+    if match:
+        return True
 
-4.3 API Specification
+    # If it's just "Table X" with short description (< 100 chars), it's a caption
+    if len(text) < 100:
+        return True
 
-Defined REST API contracts with request/response schemas and error handling.
+    return False
 
+def contains_placeholder_text(text):
+    """
+    Check if text contains placeholder patterns
+    """
+    placeholder_patterns = [
+        r'put\s+model(?:l?ing)?\s+team\'?s?\s+response\s+here',
+        r'put\s+response\s+here',
+        r'insert\s+response\s+here',
+        r'team\'?s?\s+response\s+here'
+    ]
 
-5.1 Data Architecture – Data Life Cycle
+    text_lower = text.lower()
+    for pattern in placeholder_patterns:
+        if re.search(pattern, text_lower):
+            return True
+    return False
 
-Designed end-to-end data lifecycle from ingestion to retrieval in the RAG pipeline.
+def remove_placeholder_paragraphs(doc):
+    """
+    Remove entire paragraphs that contain placeholder text
+    """
+    removed_count = 0
+    paragraphs_to_remove = []
 
+    # First pass - identify paragraphs to remove
+    for para in doc.paragraphs:
+        text = para.text.strip()
 
-5.2 Logical Data Design
+        if text and ("{Put Modeling Team's Response here}" == text or "{Add modeling team response here}" == text):
+            paragraphs_to_remove.append(para)
 
-Created logical data models and metadata relationships for documents and chunks.
+    # Second pass - remove identified paragraphs
+    for para in paragraphs_to_remove:
+        p_element = para._element
+        p_element.getparent().remove(p_element)
+        removed_count += 1
 
+    # Also check in tables
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                cell_paragraphs_to_remove = []
+                for para in cell.paragraphs:
+                    text = para.text.strip()
+                    if text and contains_placeholder_text(text):
+                        cell_paragraphs_to_remove.append(para)
 
-5.3 Physical Data Design
+                for para in cell_paragraphs_to_remove:
+                    p_element = para._element
+                    p_element.getparent().remove(p_element)
+                    removed_count += 1
 
-Implemented physical storage and indexing design for vector and object databases.
+    return removed_count
 
+def clean_placeholder_text_from_runs(para):
+    """
+    Clean placeholder text from within a paragraph (if it's part of larger text)
+    """
+    full_text = para.text
 
-6. Operational Architecture
+    if not contains_placeholder_text(full_text):
+        return False
 
-Defined deployment, monitoring, and operational workflows across environments.
+    # Pattern to match the placeholder with surrounding brackets/braces
+    placeholder_pattern = r'[\{\[]?\s*put\s+model(?:l?ing)?\s+team\'?s?\s+response\s+here\s*[\}\]]?'
 
+    # Remove the placeholder
+    new_text = re.sub(placeholder_pattern, '', full_text, flags=re.IGNORECASE)
+    # Clean up extra spaces
+    new_text = re.sub(r'\s+', ' ', new_text).strip()
 
-7. Security Architecture
+    if new_text != full_text:
+        # Clear all runs and set new text
+        for run in para.runs:
+            run.text = ''
 
-Implemented authentication, RBAC, and data security controls for APIs and storage.
+        if para.runs:
+            para.runs[0].text = new_text
+        elif new_text:  # Only add run if there's text left
+            para.add_run(new_text)
 
+        return True
 
-Closeout
+    return False
 
-Completed final documentation, handover, and production readiness review.
+def remove_all_placeholders(doc):
+    """
+    Remove placeholder tags in two passes:
+    1. Remove standalone paragraphs with placeholder text
+    2. Clean placeholder text from within paragraphs
+    """
+    # First remove entire paragraphs that are just placeholders
+    removed_paras = remove_placeholder_paragraphs(doc)
+
+    # Then clean any remaining placeholder text within paragraphs
+    cleaned_count = 0
+    for para in doc.paragraphs:
+        if clean_placeholder_text_from_runs(para):
+            cleaned_count += 1
+
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    if clean_placeholder_text_from_runs(para):
+                        cleaned_count += 1
+
+def find_executive_summary_position(doc):
+    """
+    Find the position of the Executive Summary heading in the document using fuzzy matching
+    Returns the index of the first element after "Executive Summary" heading
+    """
+    body = doc.element.body
+    elements = list(body)
+    
+    # Target strings to match against
+    target_strings = [
+        "Executive Summary",
+        "EXECUTIVE SUMMARY",
+        "executive summary",
+        "Executive summary"
+    ]
+    
+    # Threshold for fuzzy matching (80% similarity)
+    threshold = 80
+    
+    for i, element in enumerate(elements):
+        if element.tag.endswith('p'):
+            for para in doc.paragraphs:
+                if para._element == element:
+                    text = para.text.strip()
+                    
+                    # Skip empty paragraphs
+                    if not text:
+                        continue
+                    
+                    # Remove common prefixes like numbers, bullets, etc.
+                    cleaned_text = re.sub(r'^\s*[\d\.]+\s*', '', text)
+                    cleaned_text = re.sub(r'^\s*[•\-\*]\s*', '', cleaned_text)
+                    cleaned_text = cleaned_text.strip()
+                    
+                    # Check fuzzy match against target strings
+                    for target in target_strings:
+                        # Use partial_ratio for better matching with extra text
+                        ratio = fuzz.partial_ratio(cleaned_text.lower(), target.lower())
+                        
+                        # Also check token_sort_ratio for word order independence
+                        token_ratio = fuzz.token_sort_ratio(cleaned_text.lower(), target.lower())
+                        
+                        # If either ratio is above threshold, we found it
+                        if ratio >= threshold or token_ratio >= threshold:
+                            print(f"Found Executive Summary at index {i}: '{text}' (ratio: {ratio}, token_ratio: {token_ratio})")
+                            return i
+                    
+                    # Direct regex check as fallback
+                    if re.search(r'executive\s+summary', text, re.IGNORECASE):
+                        print(f"Found Executive Summary at index {i} (regex): '{text}'")
+                        return i
+                    
+                    break
+    
+    # If not found, return 0 (start from beginning as fallback)
+    print("Executive Summary not found, starting from beginning")
+    return 0
+
+def renumber_captions(doc_path, output_path):
+    """
+    Renumber all table and figure captions sequentially
+    Move captions to top, handle captions on different pages
+    Distinguish between captions and descriptive paragraphs
+    Remove placeholder tags from the document
+    Start numbering from Executive Summary section onwards
+    """
+    doc = Document(doc_path)
+
+    # Step 0: Remove all placeholder tags
+    remove_all_placeholders(doc)
+
+    # Save and reload after removing placeholders
+    doc.save(output_path)
+    doc = Document(output_path)
+    body = doc.element.body
+    elements = list(body)
+
+    # Step 1: Move table captions from below to above
+    for i, element in enumerate(elements):
+        if element.tag.endswith('tbl'):
+            # Check if next element is a caption (within next 3 elements for different pages)
+            for offset in range(1, 4):
+                if i + offset < len(elements):
+                    next_element = elements[i + offset]
+
+                    if next_element.tag.endswith('p'):
+                        for para in doc.paragraphs:
+                            if para._element == next_element:
+                                text = para.text.strip()
+                                # Check if it's an actual table caption
+                                if is_actual_caption(text, True):
+                                    # Move caption from after table to before table
+                                    next_element.getparent().remove(next_element)
+                                    element.addprevious(next_element)
+                                    break
+                            break
+                    if next_element.tag.endswith('tbl'):
+                        # Stop if we hit another table
+                        break
+
+    # Save and reload
+    doc.save(output_path)
+    doc = Document(output_path)
+    body = doc.element.body
+    elements = list(body)
+
+    # Step 2: Add missing captions for tables
+    for i, element in enumerate(elements):
+        if element.tag.endswith('tbl'):
+            # Check if previous element is a caption
+            prev_element = elements[i - 1] if i > 0 else None
+            has_caption = False
+
+            if prev_element is not None and prev_element.tag.endswith('p'):
+                for para in doc.paragraphs:
+                    if para._element == prev_element:
+                        text = para.text.strip()
+                        # Check if it's an actual caption (not a descriptive paragraph)
+                        next_is_table = True
+                        if is_actual_caption(text, next_is_table):
+                            has_caption = True
+                        break
+
+            if not has_caption:
+                new_para = parse_xml(r'<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:r><w:t>Table PLACEHOLDER</w:t></w:r></w:p>')
+                element.addprevious(new_para)
+
+    # Save and reload
+    doc.save(output_path)
+    doc = Document(output_path)
+    body = doc.element.body
+    elements = list(body)
+
+    # Step 3: Process figures - move captions from below to above
+    i = 0
+    while i < len(elements):
+        element = elements[i]
+
+        if element.tag.endswith('p'):
+            current_para = None
+            for para in doc.paragraphs:
+                if para._element == element:
+                    current_para = para
+                    break
+
+            if current_para:
+                has_image = any(run._element.xpath('.//pic:pic') for run in current_para.runs)
+
+                if has_image:
+                    # Check next few elements for a figure caption (within next 5 for different pages)
+                    caption_found = False
+
+                    for offset in range(1, 6):
+                        if i + offset < len(elements):
+                            next_element = elements[i + offset]
+
+                            if next_element.tag.endswith('p'):
+                                for para in doc.paragraphs:
+                                    if para._element == next_element:
+                                        text = para.text.strip()
+                                        # Check if it's an actual figure caption
+                                        if is_actual_caption(text, True):
+                                            # Move caption from after image to before image
+                                            next_element.getparent().remove(next_element)
+                                            element.addprevious(next_element)
+
+                                            caption_found = True
+                                            # Reload elements after modification
+                                            elements = list(body)
+                                            break
+                                    break
+
+                            # Stop if we hit another image or table
+                            if next_element.tag.endswith('tbl'):
+                                break
+
+                            if next_element.tag.endswith('p'):
+                                for para in doc.paragraphs:
+                                    if para._element == next_element:
+                                        if any(run._element.xpath('.//pic:pic') for run in para.runs):
+                                            break
+                                    break
+
+                        if caption_found:
+                            break
+        i += 1
+
+    # Save and reload
+    doc.save(output_path)
+    doc = Document(output_path)
+    body = doc.element.body
+    elements = list(body)
+
+    # Step 4: Add missing captions for figures
+    for i, element in enumerate(elements):
+        if element.tag.endswith('p'):
+            current_para = None
+            for para in doc.paragraphs:
+                if para._element == element:
+                    current_para = para
+                    break
+
+            if current_para:
+                has_image = any(run._element.xpath('.//pic:pic') for run in current_para.runs)
+
+                if has_image:
+                    # Check if previous element is a caption
+                    prev_element = elements[i - 1] if i > 0 else None
+                    has_caption = False
+
+                    if prev_element is not None and prev_element.tag.endswith('p'):
+                        for para in doc.paragraphs:
+                            if para._element == prev_element:
+                                text = para.text.strip()
+                                if is_actual_caption(text, True):
+                                    has_caption = True
+                                break
+
+                    if not has_caption:
+                        new_para = parse_xml(r'<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:r><w:t>Figure PLACEHOLDER</w:t></w:r></w:p>')
+                        element.addprevious(new_para)
+
+    # Save and reload
+    doc.save(output_path)
+    doc = Document(output_path)
+    body = doc.element.body
+    elements = list(body)
+
+    # Find Executive Summary position using fuzzy matching
+    exec_summary_pos = find_executive_summary_position(doc)
+
+    # Step 5: Renumber all captions sequentially (starting from Executive Summary)
+    table_num = 1
+    figure_num = 1
+
+    for i, element in enumerate(elements):
+        # Skip elements before Executive Summary
+        if i < exec_summary_pos:
+            continue
+            
+        if element.tag.endswith('p'):
+            current_para = None
+            for para in doc.paragraphs:
+                if para._element == element:
+                    current_para = para
+                    break
+
+            if current_para:
+                text = current_para.text.strip()
+                next_element = elements[i + 1] if i + 1 < len(elements) else None
+
+                # Renumber table captions (must be followed by table AND be actual caption)
+                if re.search(r'\bTable\s+(?:PLACEHOLDER|[\d.]+)', text, re.IGNORECASE):
+                    if next_element is not None and next_element.tag.endswith('tbl'):
+                        # Verify it's an actual caption
+                        if is_actual_caption(text, True) or 'PLACEHOLDER' in text:
+                            # Check if this was a placeholder (missing caption)
+                            is_placeholder = 'PLACEHOLDER' in text
+
+                            # Extract description (everything after "Table X" or "Table X:" or "Table PLACEHOLDER")
+                            match = re.search(r'\bTable\s+(?:PLACEHOLDER|[\d.]+)\s*:?\s*(.*)', text, re.IGNORECASE)
+                            description = match.group(1).strip() if match else ''
+
+                            if is_placeholder:
+                                # For missing captions, use {placeholder} format
+                                current_para.text = f'Table {table_num} {{placeholder}}'
+                            elif description:
+                                current_para.text = f'Table {table_num}: {description}'
+                            else:
+                                current_para.text = f'Table {table_num}'
+
+                            table_num += 1
+
+                # Renumber figure captions (must be followed by image paragraph AND be actual caption)
+                elif re.search(r'\bFigure\s+(?:PLACEHOLDER|[\d.]+)', text, re.IGNORECASE):
+                    if next_element is not None and next_element.tag.endswith('p'):
+                        # Check if next paragraph contains image
+                        for para in doc.paragraphs:
+                            if para._element == next_element:
+                                has_image = any(run._element.xpath('.//pic:pic') for run in para.runs)
+                                if has_image and (is_actual_caption(text, True) or 'PLACEHOLDER' in text):
+                                    # Check if this was a placeholder (missing caption)
+                                    is_placeholder = 'PLACEHOLDER' in text
+
+                                    # Extract description
+                                    match = re.search(r'\bFigure\s+(?:PLACEHOLDER|[\d.]+)\s*:?\s*(.*)', text, re.IGNORECASE)
+                                    description = match.group(1).strip() if match else ''
+
+                                    if is_placeholder:
+                                        # For missing captions, use {placeholder} format
+                                        current_para.text = f'Figure {figure_num} {{placeholder}}'
+                                    elif description:
+                                        current_para.text = f'Figure {figure_num}: {description}'
+                                    else:
+                                        current_para.text = f'Figure {figure_num}'
+
+                                    figure_num += 1
+                                break
+
+    doc.save(output_path)
+    print(f"Document saved to {output_path}")
+    print(f"Total tables numbered: {table_num - 1}")
+    print(f"Total figures numbered: {figure_num - 1}")
+
+# Example usage
+if __name__ == "__main__":
+    renumber_captions("input_document.docx", "output_document.docx")
+```
+
+**Key changes made:**
+
+1. **Added `fuzzywuzzy` import**: `from fuzzywuzzy import fuzz`
+
+2. **Enhanced `find_executive_summary_position()` function** with fuzzy matching:
+   - Uses `fuzz.partial_ratio()` to find partial matches
+   - Uses `fuzz.token_sort_ratio()` for word order independence
+   - Sets an 80% similarity threshold for matching
+   - Removes common prefixes (numbers, bullets) before matching
+   - Includes print statements for debugging
+   - Falls back to regex matching if fuzzy matching doesn't find anything
+
+3. **Added debug output** in the main function to show:
+   - Where Executive Summary was found
+   - How many tables and figures were numbered
+
+The fuzzy matching will catch variations like:
+- "Executive Summary"
+- "1. Executive Summary"
+- "EXECUTIVE SUMMARY"
+- "Executive  Summary" (with extra spaces)
+- "Executive Summary:" (with colon)
+- And other similar variations
+
+**To install fuzzywuzzy:**
+```bash
+pip install fuzzywuzzy python-Levenshtein
+```
