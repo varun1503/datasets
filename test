@@ -1,8 +1,8 @@
-Here's the standalone function that deletes content after "Model Validation Report" and adds new details:
+Here's the updated standalone function that deletes content only until it finds the date format (mm/dd/yyyy):
 
 ```python
 from docx import Document
-from docx.shared import Pt, Inches
+from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 import re
 from datetime import datetime
@@ -10,7 +10,7 @@ from datetime import datetime
 def update_front_page(doc_path, output_path, model_id, version, model_name, date=None):
     """
     Update the front page of the document with model information.
-    Deletes all content after "Model Validation Report" and adds new details.
+    Deletes content after "Model Validation Report" until the date line (mm/dd/yyyy).
     
     Args:
         doc_path: Path to input document
@@ -39,32 +39,41 @@ def update_front_page(doc_path, output_path, model_id, version, model_name, date
     if date is None:
         date = datetime.now().strftime("%m/%d/%Y")
     
-    # Find "Model Validation Report" heading
+    # Find "Model Validation Report" heading and date line
     report_heading_index = None
+    date_line_index = None
     
     for i, para in enumerate(doc.paragraphs):
         text = para.text.strip()
-        if re.search(r'Model\s+Validation\s+Report', text, re.IGNORECASE):
+        
+        # Find "Model Validation Report"
+        if report_heading_index is None and re.search(r'Model\s+Validation\s+Report', text, re.IGNORECASE):
             report_heading_index = i
             print(f"Found 'Model Validation Report' at paragraph index {i}")
-            break
+        
+        # Find date line (mm/dd/yyyy pattern or literal "mm/dd/yyyy")
+        # Only look after we've found the report heading
+        if report_heading_index is not None and i > report_heading_index:
+            # Match actual date format or placeholder
+            if re.match(r'^\s*\d{2}/\d{2}/\d{4}\s*$', text) or text.lower() == 'mm/dd/yyyy':
+                date_line_index = i
+                print(f"Found date line at paragraph index {i}: '{text}'")
+                break
     
     if report_heading_index is None:
         print("Warning: 'Model Validation Report' heading not found!")
         doc.save(output_path)
         return False
     
-    # Delete all paragraphs after "Model Validation Report"
+    if date_line_index is None:
+        print("Warning: Date line not found!")
+        doc.save(output_path)
+        return False
+    
+    # Delete all paragraphs between "Model Validation Report" and date line (inclusive of date)
     paragraphs_to_delete = []
-    for i in range(report_heading_index + 1, len(doc.paragraphs)):
-        # Stop if we hit a section that's not the title page
-        # (you can add more conditions here based on your document structure)
-        text = doc.paragraphs[i].text.strip()
-        
-        # Stop deleting if we hit a heading that looks like a section
-        if re.match(r'^\d+\.?\s+[A-Z]', text):  # e.g., "1. Executive Summary"
-            break
-        
+    
+    for i in range(report_heading_index + 1, date_line_index + 1):
         paragraphs_to_delete.append(doc.paragraphs[i])
     
     # Remove the identified paragraphs
@@ -72,7 +81,23 @@ def update_front_page(doc_path, output_path, model_id, version, model_name, date
         p_element = para._element
         p_element.getparent().remove(p_element)
     
-    print(f"Deleted {len(paragraphs_to_delete)} paragraphs after 'Model Validation Report'")
+    print(f"Deleted {len(paragraphs_to_delete)} paragraphs (from after title to date line)")
+    
+    # Reload document to get fresh paragraph list
+    doc.save(output_path)
+    doc = Document(output_path)
+    
+    # Find "Model Validation Report" again in the fresh document
+    report_heading_index = None
+    for i, para in enumerate(doc.paragraphs):
+        text = para.text.strip()
+        if re.search(r'Model\s+Validation\s+Report', text, re.IGNORECASE):
+            report_heading_index = i
+            break
+    
+    if report_heading_index is None:
+        print("Error: Could not find report heading after deletion")
+        return False
     
     # Get the "Model Validation Report" paragraph to insert after it
     report_para = doc.paragraphs[report_heading_index]
@@ -130,43 +155,27 @@ if __name__ == "__main__":
     )
 ```
 
-**How this function works:**
+**What this function does:**
 
-1. **Finds** the "Model Validation Report" heading
-2. **Deletes** all paragraphs after it until it hits a section heading (stops at numbered sections like "1. Executive Summary")
-3. **Adds** two new paragraphs:
+1. **Finds** "Model Validation Report" heading
+2. **Finds** the date line (either "mm/dd/yyyy" placeholder or actual date like "12/15/2024")
+3. **Deletes** ALL paragraphs between these two points (including the old date line)
+4. **Adds** fresh content:
    - Model info: `EMMID v1.5: Credit Risk Model` (bold, 16pt, centered)
-   - Date: `02/02/2026` (14pt, centered)
+   - New date: `02/02/2026` (14pt, centered)
 
-**Key Features:**
+**Key features:**
 
-- Completely standalone - no dependencies on other functions
-- Deletes old placeholder content
-- Adds fresh, formatted content
-- Preserves the "Model Validation Report" title
-- Stops deletion at the first numbered section (to avoid deleting actual content)
+- Only deletes content from after "Model Validation Report" up to and including the date line
+- Preserves everything after the date
+- Detects both placeholder "mm/dd/yyyy" and actual dates like "12/15/2024"
+- Safe deletion - won't touch content beyond the date
 
-**Usage:**
-
-```python
-# Simple usage - date will be today's date
-update_front_page(
-    "my_document.docx", 
-    "updated_document.docx", 
-    "EMMID",
-    "v1.5",
-    "Credit Risk Model"
-)
-
-# With specific date
-update_front_page(
-    "my_document.docx", 
-    "updated_document.docx", 
-    "EMMID",
-    "v1.5",
-    "Credit Risk Model",
-    date="02/02/2026"
-)
+**Result:**
 ```
+Model Validation Report
+EMMID v1.5: Credit Risk Model
+02/02/2026
 
-This approach is cleaner and more reliable than trying to find and replace specific patterns!
+[Everything else in the document remains unchanged]
+```
