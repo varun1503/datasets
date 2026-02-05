@@ -519,6 +519,417 @@ def renumber_captions(doc_path, output_path):
                                         print(f"  ⏭️  Skipping logo - not incrementing figure number")
                                         break
                                 
+                                if has_image and (is_actual_caption(textdef is_logo_image(para, position_info=""):
+    """
+    Detect if an image is likely a logo based on various criteria:
+    - Size of the image (logos are typically smaller)
+    - Alignment (logos are often centered or right-aligned)
+    """
+    if not para:
+        return False
+    
+    # Check if paragraph contains an image
+    has_image = any(run._element.xpath('.//pic:pic') for run in para.runs)
+    if not has_image:
+        return False
+    
+    is_logo = False
+    width_inches = None
+    height_inches = None
+    alignment_str = "unknown"
+    size_detected = False
+    
+    # Try to get image dimensions
+    for run in para.runs:
+        pics = run._element.xpath('.//pic:pic')
+        print(f"  🔍 Found {len(pics)} pic elements in run")
+        
+        for idx, pic in enumerate(pics):
+            print(f"    Analyzing pic element {idx + 1}...")
+            width_inches, height_inches = get_image_dimensions(pic)
+            
+            if width_inches is not None and height_inches is not None:
+                size_detected = True
+                print(f"  📏 Image size: {width_inches:.2f}\" x {height_inches:.2f}\" {position_info}")
+                
+                # Logos are typically small (less than 3 inches in both dimensions)
+                if width_inches < 3 and height_inches < 2:
+                    is_logo = True
+                    print(f"  ⚠️  SMALL IMAGE DETECTED (likely logo)")
+                break
+        
+        if size_detected:
+            break
+    
+    if not size_detected:
+        print(f"  ⚠️  Could not detect image size - using other criteria")
+    
+    # Check alignment - logos are often centered or right-aligned
+    try:
+        alignment = para.alignment
+        if alignment == 0:
+            alignment_str = "left"
+        elif alignment == 1:
+            alignment_str = "center"
+        elif alignment == 2:
+            alignment_str = "right"
+        elif alignment == 3:
+            alignment_str = "justify"
+        elif alignment is None:
+            alignment_str = "default/left"
+        
+        print(f"  📐 Alignment: {alignment_str}")
+        
+        if alignment in [1, 2]:  # 1 = center, 2 = right
+            # Only mark as logo based on alignment if it's also small OR we couldn't detect size
+            if is_logo or not size_detected:
+                is_logo = True
+                print(f"  ⚠️  CENTERED/RIGHT ALIGNED (likely logo)")
+    except Exception as e:
+        print(f"  ❌ Error checking alignment: {e}")
+    
+    # Final decision
+    if is_logo:
+        print(f"  🚫 DECISION: SKIP THIS IMAGE (Logo detected)")
+        if width_inches:
+            print(f"     Reason: Size={width_inches:.2f}\"x{height_inches:.2f}\" or Alignment={alignment_str}")
+        else:
+            print(f"     Reason: Alignment={alignment_str}")
+    else:
+        print(f"  ✅ DECISION: PROCESS THIS IMAGE (Not a logo)")
+        if width_inches:
+            print(f"     Size: {width_inches:.2f}\" x {height_inches:.2f}\"")
+    
+    print()  # Empty line for readability
+    
+    return is_logo
+
+def get_paragraph_index_in_doc(doc, para):
+    """Get the index of a paragraph in the document"""
+    for i, p in enumerate(doc.paragraphs):
+        if p._element == para._element:
+            return i
+    return -1
+
+def remove_placeholder_paragraphs1(doc, threshold=90):
+    removed_count = 0
+    paragraphs_to_remove = []
+
+    placeholders = [
+        "Put Modeling Team's Response here",
+        "Add modeling team response here",
+        "Add MRMG assessment statement"
+    ]
+
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if not text:
+            continue
+
+        for placeholder in placeholders:
+            score = fuzz.partial_ratio(text.lower(), placeholder.lower())
+            if score >= threshold:
+                paragraphs_to_remove.append(para)
+                break
+
+    for para in paragraphs_to_remove:
+        p_element = para._element
+        p_element.getparent().remove(p_element)
+        removed_count += 1
+
+    return removed_count
+
+def remove_all_placeholders(doc):
+    removed_paras = remove_placeholder_paragraphs1(doc)
+
+def is_heading(para):
+    """
+    Check if a paragraph is a heading based on style
+    """
+    if para.style.name.startswith('Heading'):
+        return True
+    return False
+
+def find_executive_summary_position(doc):
+    """
+    Find the position of the Executive Summary heading in the document
+    Returns the index of the first element after "Executive Summary" heading
+    """
+    body = doc.element.body
+    elements = list(body)
+
+    for i, element in enumerate(elements):
+        if element.tag.endswith('p'):
+            for para in doc.paragraphs:
+                if para._element == element:
+                    text = para.text.strip()
+                    is_heading_style = is_heading(para)
+
+                    if is_heading_style:
+                        if re.search(r'Executive\s+Summary', text, re.IGNORECASE):
+                            return i
+
+                    if re.match(r'^\s*Executive\s+Summary\s*$', text, re.IGNORECASE):
+                        return i
+                    if re.match(r'^\s*\d+\.?\s*Executive\s+Summary\s*$', text, re.IGNORECASE):
+                        return i
+                    if re.match(r'^\s*EXECUTIVE\s+SUMMARY\s*$', text, re.IGNORECASE):
+                        return i
+                    break
+
+    return 0
+
+def renumber_captions(doc_path, output_path):
+    print("=" * 80)
+    print("STARTING CAPTION RENUMBERING PROCESS")
+    print("=" * 80)
+    
+    doc = Document(doc_path)
+    remove_all_placeholders(doc)
+    doc.save(output_path)
+    doc = Document(output_path)
+    body = doc.element.body
+    elements = list(body)
+    exec_summary_pos = find_executive_summary_position(doc)
+    print(f"\n✓ Executive Summary found at position: {exec_summary_pos}\n")
+    
+    # Statistics
+    images_found = 0
+    logos_skipped = 0
+    images_processed = 0
+    
+    for i, element in enumerate(elements):
+        if i < exec_summary_pos:
+            continue
+
+        if element.tag.endswith('tbl'):
+            for offset in range(1, 4):
+                if i + offset < len(elements):
+                    next_element = elements[i + offset]
+
+                    if next_element.tag.endswith('p'):
+                        for para in doc.paragraphs:
+                            if para._element == next_element:
+                                text = para.text.strip()
+
+                                if is_actual_caption(text, True):
+                                    next_element.getparent().remove(next_element)
+                                    element.addprevious(next_element)
+                                    break
+                            break
+                    if next_element.tag.endswith('tbl'):
+                        break
+    
+    doc.save(output_path)
+    doc = Document(output_path)
+    body = doc.element.body
+    elements = list(body)
+    exec_summary_pos = find_executive_summary_position(doc)
+    
+    for i, element in enumerate(elements):
+        if i < exec_summary_pos:
+            continue
+
+        if element.tag.endswith('tbl'):
+            prev_element = elements[i - 1] if i > 0 else None
+            has_caption = False
+
+            if prev_element is not None and prev_element.tag.endswith('p'):
+                for para in doc.paragraphs:
+                    if para._element == prev_element:
+                        text = para.text.strip()
+                        next_is_table = True
+                        if is_actual_caption(text, next_is_table):
+                            has_caption = True
+                            break
+
+            if not has_caption:
+                new_para = parse_xml(r'<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:r><w:t>Table PLACEHOLDER</w:t></w:r></w:p>')
+                element.addprevious(new_para)
+    
+    doc.save(output_path)
+    doc = Document(output_path)
+    body = doc.element.body
+    elements = list(body)
+    exec_summary_pos = find_executive_summary_position(doc)
+    
+    print("\n" + "=" * 80)
+    print("PHASE 1: MOVING CAPTIONS BEFORE IMAGES")
+    print("=" * 80 + "\n")
+    
+    i = 0
+    while i < len(elements):
+        element = elements[i]
+
+        if i < exec_summary_pos:
+            i += 1
+            continue
+
+        if element.tag.endswith('p'):
+            current_para = None
+            for para in doc.paragraphs:
+                if para._element == element:
+                    current_para = para
+                    break
+
+            if current_para:
+                has_image = any(run._element.xpath('.//pic:pic') for run in current_para.runs)
+
+                if has_image:
+                    images_found += 1
+                    print(f"🖼️  IMAGE FOUND at position {i}")
+                    
+                    # SKIP LOGO IMAGES
+                    if is_logo_image(current_para, f"at position {i}"):
+                        logos_skipped += 1
+                        i += 1
+                        continue
+                    
+                    images_processed += 1
+
+                    caption_found = False
+
+                    for offset in range(1, 6):
+                        if i + offset < len(elements):
+                            next_element = elements[i + offset]
+
+                            if next_element.tag.endswith('p'):
+                                for para in doc.paragraphs:
+                                    if para._element == next_element:
+                                        text = para.text.strip()
+
+                                        if is_actual_caption(text, True):
+                                            next_element.getparent().remove(next_element)
+                                            element.addprevious(next_element)
+                                            caption_found = True
+                                            elements = list(body)
+                                            exec_summary_pos = find_executive_summary_position(doc)
+                                            print(f"  ↑ Moved caption before image")
+                                            break
+                                    break
+
+                            if next_element.tag.endswith('tbl'):
+                                break
+
+                            if next_element.tag.endswith('p'):
+                                for para in doc.paragraphs:
+                                    if para._element == next_element:
+                                        if any(run._element.xpath('.//pic:pic') for run in para.runs):
+                                            break
+                                    break
+
+                        if caption_found:
+                            break
+        i += 1
+
+    doc.save(output_path)
+    doc = Document(output_path)
+    body = doc.element.body
+    elements = list(body)
+    exec_summary_pos = find_executive_summary_position(doc)
+
+    print("\n" + "=" * 80)
+    print("PHASE 2: ADDING MISSING CAPTIONS")
+    print("=" * 80 + "\n")
+
+    for i, element in enumerate(elements):
+        if i < exec_summary_pos + 1:
+            continue
+
+        if element.tag.endswith('p'):
+            current_para = None
+            for para in doc.paragraphs:
+                if para._element == element:
+                    current_para = para
+                    break
+
+            if current_para:
+                has_image = any(run._element.xpath('.//pic:pic') for run in current_para.runs)
+
+                if has_image:
+                    print(f"🖼️  IMAGE FOUND at position {i} (checking for missing caption)")
+                    
+                    # SKIP LOGO IMAGES
+                    if is_logo_image(current_para, f"at position {i}"):
+                        continue
+
+                    prev_element = elements[i - 1] if i > 0 else None
+                    has_caption = False
+
+                    if prev_element is not None and prev_element.tag.endswith('p'):
+                        for para in doc.paragraphs:
+                            if para._element == prev_element:
+                                text = para.text.strip()
+                                if is_actual_caption(text, True):
+                                    has_caption = True
+                                    print(f"  ✓ Caption already exists")
+                                    break
+
+                    if not has_caption:
+                        new_para = parse_xml(r'<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:r><w:t>Figure PLACEHOLDER</w:t></w:r></w:p>')
+                        element.addprevious(new_para)
+                        print(f"  ➕ Added placeholder caption")
+
+    doc.save(output_path)
+    doc = Document(output_path)
+    body = doc.element.body
+    elements = list(body)
+    exec_summary_pos = find_executive_summary_position(doc)
+
+    print("\n" + "=" * 80)
+    print("PHASE 3: RENUMBERING CAPTIONS")
+    print("=" * 80 + "\n")
+
+    table_num = 1
+    figure_num = 1
+
+    for i, element in enumerate(elements):
+        if i < exec_summary_pos:
+            continue
+
+        if element.tag.endswith('p'):
+            current_para = None
+            for para in doc.paragraphs:
+                if para._element == element:
+                    current_para = para
+                    break
+
+            if current_para:
+                text = current_para.text.strip()
+                next_element = elements[i + 1] if i + 1 < len(elements) else None
+                
+                if re.search(r'\bTable\s*(?:PLACEHOLDER|[^\s:]+)', text, re.IGNORECASE):
+                    if next_element is not None and next_element.tag.endswith('tbl'):
+                        if is_actual_caption(text, True) or 'PLACEHOLDER' in text:
+                            is_placeholder = 'PLACEHOLDER' in text
+                            match = re.search(r'\bTable\s*(?:PLACEHOLDER|[^\s:]+)\s*:?\s*(.*)', text, re.IGNORECASE)
+                            description = match.group(1).strip() if match else ''
+                            
+                            old_text = text
+                            if is_placeholder:
+                                current_para.text = f'Table {table_num} {{placeholder}}'
+                            elif description:
+                                current_para.text = f'Table {table_num}: {description}'
+                            else:
+                                current_para.text = f'Table {table_num}'
+                            
+                            print(f"📊 Table {table_num}: '{old_text[:50]}...' → '{current_para.text[:50]}...'")
+                            table_num += 1
+                
+                elif re.search(r'\bFigure\s+(?:PLACEHOLDER|[^\s:]+)', text, re.IGNORECASE):
+                    if next_element is not None and next_element.tag.endswith('p'):
+                        for para in doc.paragraphs:
+                            if para._element == next_element:
+                                has_image = any(run._element.xpath('.//pic:pic') for run in para.runs)
+                                
+                                if has_image:
+                                    print(f"\n🖼️  Checking image for Figure caption at position {i}")
+                                    
+                                    # SKIP LOGO IMAGES DURING RENUMBERING
+                                    if is_logo_image(para, f"for renumbering at position {i}"):
+                                        print(f"  ⏭️  Skipping logo - not incrementing figure number")
+                                        break
+                                
                                 if has_image and (is_actual_caption(text, True) or 'PLACEHOLDER' in text):
                                     is_placeholder = 'PLACEHOLDER' in text
                                     match = re.search(r'\bFigure\s+(?:PLACEHOLDER|[^\s:]+)\s*:?\s*(.*)', text, re.IGNORECASE)
