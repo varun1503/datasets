@@ -1,4 +1,6 @@
-I'll add detailed debug output to show you exactly what images are being processed, their sizes, and whether they're being skipped. Here's the updated code with comprehensive debugging:
+I see the issue! The `extent_elements` is returning an empty list `[]`, which means the xpath query `.//wp:extent` isn't finding the extent element. This is because the namespace prefix might not be registered or the path is incorrect.
+
+Let me provide you with a more robust solution that tries multiple methods to get the image dimensions:
 
 ```python
 from docx import Document
@@ -39,10 +41,76 @@ def is_actual_caption(text, next_element_is_table_or_image):
         return True
     return False
 
+def get_image_dimensions(pic):
+    """
+    Try multiple methods to get image dimensions from a pic element
+    Returns (width_inches, height_inches) or (None, None) if not found
+    """
+    try:
+        # Method 1: Try using qn() for qualified name
+        extent = pic.find(qn('wp:extent'))
+        if extent is not None:
+            cx = int(extent.get('cx', 0))
+            cy = int(extent.get('cy', 0))
+            width_inches = cx / 914400
+            height_inches = cy / 914400
+            return (width_inches, height_inches)
+    except Exception as e:
+        print(f"    Method 1 failed: {e}")
+    
+    try:
+        # Method 2: Try direct xpath with namespace
+        extent_elements = pic.xpath('.//{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}extent')
+        if extent_elements:
+            extent = extent_elements[0]
+            cx = int(extent.get('cx', 0))
+            cy = int(extent.get('cy', 0))
+            width_inches = cx / 914400
+            height_inches = cy / 914400
+            return (width_inches, height_inches)
+    except Exception as e:
+        print(f"    Method 2 failed: {e}")
+    
+    try:
+        # Method 3: Search in parent drawing element
+        drawing = pic.getparent()
+        while drawing is not None and not drawing.tag.endswith('drawing'):
+            drawing = drawing.getparent()
+        
+        if drawing is not None:
+            # Look for extent in inline or anchor
+            for inline_or_anchor in drawing:
+                extent = inline_or_anchor.find(qn('wp:extent'))
+                if extent is not None:
+                    cx = int(extent.get('cx', 0))
+                    cy = int(extent.get('cy', 0))
+                    width_inches = cx / 914400
+                    height_inches = cy / 914400
+                    return (width_inches, height_inches)
+    except Exception as e:
+        print(f"    Method 3 failed: {e}")
+    
+    try:
+        # Method 4: Look for spPr (shape properties) with dimensions
+        sp_pr = pic.find('.//{http://schemas.openxmlformats.org/drawingml/2006/picture}spPr')
+        if sp_pr is not None:
+            xfrm = sp_pr.find('{http://schemas.openxmlformats.org/drawingml/2006/main}xfrm')
+            if xfrm is not None:
+                ext = xfrm.find('{http://schemas.openxmlformats.org/drawingml/2006/main}ext')
+                if ext is not None:
+                    cx = int(ext.get('cx', 0))
+                    cy = int(ext.get('cy', 0))
+                    width_inches = cx / 914400
+                    height_inches = cy / 914400
+                    return (width_inches, height_inches)
+    except Exception as e:
+        print(f"    Method 4 failed: {e}")
+    
+    return (None, None)
+
 def is_logo_image(para, position_info=""):
     """
     Detect if an image is likely a logo based on various criteria:
-    - Position in document (first few paragraphs)
     - Size of the image (logos are typically smaller)
     - Alignment (logos are often centered or right-aligned)
     """
@@ -58,32 +126,32 @@ def is_logo_image(para, position_info=""):
     width_inches = None
     height_inches = None
     alignment_str = "unknown"
+    size_detected = False
     
-    try:
-        # Check image size - logos are typically smaller
-        for run in para.runs:
-            pics = run._element.xpath('.//pic:pic')
-            for pic in pics:
-                # Get image dimensions using qn() for namespace
-                extent_elements = pic.xpath('.//wp:extent')
+    # Try to get image dimensions
+    for run in para.runs:
+        pics = run._element.xpath('.//pic:pic')
+        print(f"  🔍 Found {len(pics)} pic elements in run")
+        
+        for idx, pic in enumerate(pics):
+            print(f"    Analyzing pic element {idx + 1}...")
+            width_inches, height_inches = get_image_dimensions(pic)
+            
+            if width_inches is not None and height_inches is not None:
+                size_detected = True
+                print(f"  📏 Image size: {width_inches:.2f}\" x {height_inches:.2f}\" {position_info}")
                 
-                if extent_elements:
-                    extent = extent_elements[0]
-                    cx = int(extent.get('cx', 0))  # Width in EMUs
-                    cy = int(extent.get('cy', 0))  # Height in EMUs
-                    
-                    # Convert EMUs to inches (914400 EMUs = 1 inch)
-                    width_inches = cx / 914400
-                    height_inches = cy / 914400
-                    
-                    print(f"  📏 Image size: {width_inches:.2f}\" x {height_inches:.2f}\" {position_info}")
-                    
-                    # Logos are typically small (less than 3 inches in both dimensions)
-                    if width_inches < 3 and height_inches < 2:
-                        is_logo = True
-                        print(f"  ⚠️  SMALL IMAGE DETECTED (likely logo)")
-    except Exception as e:
-        print(f"  ❌ Error checking image size: {e}")
+                # Logos are typically small (less than 3 inches in both dimensions)
+                if width_inches < 3 and height_inches < 2:
+                    is_logo = True
+                    print(f"  ⚠️  SMALL IMAGE DETECTED (likely logo)")
+                break
+        
+        if size_detected:
+            break
+    
+    if not size_detected:
+        print(f"  ⚠️  Could not detect image size - using other criteria")
     
     # Check alignment - logos are often centered or right-aligned
     try:
@@ -102,15 +170,20 @@ def is_logo_image(para, position_info=""):
         print(f"  📐 Alignment: {alignment_str}")
         
         if alignment in [1, 2]:  # 1 = center, 2 = right
-            is_logo = True
-            print(f"  ⚠️  CENTERED/RIGHT ALIGNED (likely logo)")
+            # Only mark as logo based on alignment if it's also small OR we couldn't detect size
+            if is_logo or not size_detected:
+                is_logo = True
+                print(f"  ⚠️  CENTERED/RIGHT ALIGNED (likely logo)")
     except Exception as e:
         print(f"  ❌ Error checking alignment: {e}")
     
     # Final decision
     if is_logo:
         print(f"  🚫 DECISION: SKIP THIS IMAGE (Logo detected)")
-        print(f"     Reason: Size={width_inches:.2f}\"x{height_inches:.2f}\" or Alignment={alignment_str}")
+        if width_inches:
+            print(f"     Reason: Size={width_inches:.2f}\"x{height_inches:.2f}\" or Alignment={alignment_str}")
+        else:
+            print(f"     Reason: Alignment={alignment_str}")
     else:
         print(f"  ✅ DECISION: PROCESS THIS IMAGE (Not a logo)")
         if width_inches:
@@ -446,58 +519,4 @@ def renumber_captions(doc_path, output_path):
                                         print(f"  ⏭️  Skipping logo - not incrementing figure number")
                                         break
                                 
-                                if has_image and (is_actual_caption(text, True) or 'PLACEHOLDER' in text):
-                                    is_placeholder = 'PLACEHOLDER' in text
-                                    match = re.search(r'\bFigure\s+(?:PLACEHOLDER|[^\s:]+)\s*:?\s*(.*)', text, re.IGNORECASE)
-                                    description = match.group(1).strip() if match else ''
-
-                                    old_text = text
-                                    if is_placeholder:
-                                        current_para.text = f'Figure {figure_num} {{placeholder}}'
-                                    elif description:
-                                        current_para.text = f'Figure {figure_num}: {description}'
-                                    else:
-                                        current_para.text = f'Figure {figure_num}'
-
-                                    print(f"🖼️  Figure {figure_num}: '{old_text[:50]}...' → '{current_para.text[:50]}...'")
-                                    figure_num += 1
-                                break
-
-    doc.save(output_path)
-    
-    print("\n" + "=" * 80)
-    print("SUMMARY STATISTICS")
-    print("=" * 80)
-    print(f"Total images found: {images_found}")
-    print(f"Logos skipped: {logos_skipped}")
-    print(f"Images processed: {images_processed}")
-    print(f"Final table count: {table_num - 1}")
-    print(f"Final figure count: {figure_num - 1}")
-    print("=" * 80 + "\n")
-
-input_file = r"output_file.docx"
-output_file = "buisness_renumbered2.docx"
-
-renumber_captions(input_file, output_file)
-```
-
-**What this debug version shows:**
-
-1. **For each image found:**
-   - 📏 Exact dimensions in inches (width x height)
-   - 📐 Alignment (left, center, right, justify)
-   - ⚠️ Warnings if it's small or centered/right-aligned
-   - 🚫 Final decision: SKIP (logo) or ✅ PROCESS (regular image)
-
-2. **Processing phases:**
-   - Phase 1: Moving captions before images
-   - Phase 2: Adding missing captions
-   - Phase 3: Renumbering all captions
-
-3. **Summary statistics:**
-   - Total images found
-   - How many were skipped as logos
-   - How many were processed
-   - Final table and figure counts
-
-Run this and you'll get a detailed report showing exactly which images are logos (with their sizes) and which are being processed!
+                                if has_image and (is_actual_caption(text
