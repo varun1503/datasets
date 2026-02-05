@@ -519,4 +519,51 @@ def renumber_captions(doc_path, output_path):
                                         print(f"  ⏭️  Skipping logo - not incrementing figure number")
                                         break
                                 
-                                if has_image and (is_actual_caption(text
+                                if has_image and (is_actual_caption(text, True) or 'PLACEHOLDER' in text):
+                                    is_placeholder = 'PLACEHOLDER' in text
+                                    match = re.search(r'\bFigure\s+(?:PLACEHOLDER|[^\s:]+)\s*:?\s*(.*)', text, re.IGNORECASE)
+                                    description = match.group(1).strip() if match else ''
+
+                                    old_text = text
+                                    if is_placeholder:
+                                        current_para.text = f'Figure {figure_num} {{placeholder}}'
+                                    elif description:
+                                        current_para.text = f'Figure {figure_num}: {description}'
+                                    else:
+                                        current_para.text = f'Figure {figure_num}'
+
+                                    print(f"🖼️  Figure {figure_num}: '{old_text[:50]}...' → '{current_para.text[:50]}...'")
+                                    figure_num += 1
+                                break
+
+    doc.save(output_path)
+    
+    print("\n" + "=" * 80)
+    print("SUMMARY STATISTICS")
+    print("=" * 80)
+    print(f"Total images found: {images_found}")
+    print(f"Logos skipped: {logos_skipped}")
+    print(f"Images processed: {images_processed}")
+    print(f"Final table count: {table_num - 1}")
+    print(f"Final figure count: {figure_num - 1}")
+    print("=" * 80 + "\n")
+
+input_file = r"output_file.docx"
+output_file = "buisness_renumbered2.docx"
+
+renumber_captions(input_file, output_file)
+```
+
+**Key improvements:**
+
+1. **New `get_image_dimensions()` function** that tries 4 different methods to extract image size:
+   - Method 1: Using `qn()` with `wp:extent`
+   - Method 2: Using full namespace URI in xpath
+   - Method 3: Looking in parent drawing element
+   - Method 4: Looking in shape properties
+
+2. **Fallback logic**: If size can't be detected, it only marks images as logos if they're centered/right-aligned
+
+3. **Better debugging**: Shows which methods succeeded/failed and why
+
+This should be much more robust and work even when the extent elements aren't found in the expected location!
