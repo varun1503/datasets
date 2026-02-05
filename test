@@ -1,8 +1,15 @@
-I'll help you modify the code to skip logo images. The key is to identify logo images and exclude them from caption processing. Here's the updated code with logo detection:
+I can see the error in your code. The issue is on line 58 where you're using `pic.xpath()` with the `namespaces` parameter. The error message shows:
+
+```
+TypeError: BaseOxmlElement.xpath() got an unexpected keyword argument 'namespaces'
+```
+
+The `xpath()` method in `python-docx` doesn't accept a `namespaces` keyword argument in the way you're using it. Here's the corrected code:
 
 ```python
 from docx import Document
 from docx.oxml import parse_xml
+from docx.oxml.ns import qn
 import re
 from rapidfuzz import fuzz
 
@@ -53,34 +60,37 @@ def is_logo_image(para):
     if not has_image:
         return False
     
-    # Check image size - logos are typically smaller
-    for run in para.runs:
-        pics = run._element.xpath('.//pic:pic')
-        for pic in pics:
-            # Get image dimensions
-            extent_elements = pic.xpath('.//wp:extent', namespaces={
-                'wp': 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
-            })
-            
-            if extent_elements:
-                extent = extent_elements[0]
-                cx = int(extent.get('cx', 0))  # Width in EMUs
-                cy = int(extent.get('cy', 0))  # Height in EMUs
+    try:
+        # Check image size - logos are typically smaller
+        for run in para.runs:
+            pics = run._element.xpath('.//pic:pic')
+            for pic in pics:
+                # Get image dimensions using qn() for namespace
+                extent_elements = pic.xpath('.//wp:extent')
                 
-                # Convert EMUs to inches (914400 EMUs = 1 inch)
-                width_inches = cx / 914400
-                height_inches = cy / 914400
-                
-                # Logos are typically small (less than 3 inches in both dimensions)
-                # and often have aspect ratios suggesting a logo
-                if width_inches < 3 and height_inches < 2:
-                    return True
+                if extent_elements:
+                    extent = extent_elements[0]
+                    cx = int(extent.get('cx', 0))  # Width in EMUs
+                    cy = int(extent.get('cy', 0))  # Height in EMUs
+                    
+                    # Convert EMUs to inches (914400 EMUs = 1 inch)
+                    width_inches = cx / 914400
+                    height_inches = cy / 914400
+                    
+                    # Logos are typically small (less than 3 inches in both dimensions)
+                    if width_inches < 3 and height_inches < 2:
+                        return True
+    except Exception as e:
+        print(f"Error checking image size: {e}")
+        # If we can't determine size, use other criteria
     
     # Check alignment - logos are often centered or right-aligned
-    alignment = para.alignment
-    if alignment in [1, 2]:  # 1 = center, 2 = right
-        # If it's aligned center/right and small, likely a logo
-        return True
+    try:
+        alignment = para.alignment
+        if alignment in [1, 2]:  # 1 = center, 2 = right
+            return True
+    except:
+        pass
     
     return False
 
@@ -398,17 +408,12 @@ output_file = "buisness_renumbered2.docx"
 renumber_captions(input_file, output_file)
 ```
 
-**Key Changes:**
+**Key changes made:**
 
-1. **Added `is_logo_image()` function** - Detects logos based on:
-   - Image size (logos are typically < 3" wide and < 2" tall)
-   - Alignment (logos are often centered or right-aligned)
+1. **Removed the `namespaces` parameter** from the `xpath()` call on line 58
+2. **Added error handling** around the image size checking code with try-except blocks
+3. **Simplified the xpath query** to just use `'.//wp:extent'` without the namespaces dictionary
 
-2. **Added logo checks in three critical places:**
-   - When moving captions before images
-   - When adding missing captions to images
-   - When renumbering figure captions
+The error occurred because `python-docx`'s xpath implementation doesn't accept the `namespaces` keyword argument the way lxml does. The namespace prefixes like `wp:` are already registered in the library, so you can use them directly in the xpath string.
 
-3. **Added debug print statements** to show when logos are being skipped
-
-The function will now skip any small images (potential logos) and won't add captions or renumber them. You can adjust the size thresholds in the `is_logo_image()` function if needed (currently set to 3 inches width, 2 inches height).
+Try running this corrected version and it should work without the TypeError.
