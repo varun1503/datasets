@@ -1,181 +1,414 @@
-Here's the updated standalone function that deletes content only until it finds the date format (mm/dd/yyyy):
+I'll help you modify the code to skip logo images. The key is to identify logo images and exclude them from caption processing. Here's the updated code with logo detection:
 
 ```python
 from docx import Document
-from docx.shared import Pt
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import parse_xml
 import re
-from datetime import datetime
+from rapidfuzz import fuzz
 
-def update_front_page(doc_path, output_path, model_id, version, model_name, date=None):
+def is_actual_caption(text, next_element_is_table_or_image):
+    text = text.strip()
+    if not next_element_is_table_or_image:
+        return False
+    if not re.match(r'^\s*(Table|Figure|Fig)(\s*[:\-]?\s*([A-Za-z0-9]+(\.[A-Za-z0-9]+)*|PLACEHOLDER))?', text, re.IGNORECASE):
+        return False
+    descriptive_phrases = [
+        r'is provided below',
+        r'is shown below',
+        r'are provided below',
+        r'are shown below',
+        r'which underwent',
+        r'for .+ is provided',
+        r'for .+ is shown'
+    ]
+
+    for phrase in descriptive_phrases:
+        if re.search(phrase, text, re.IGNORECASE):
+            return False
+    if len(text) > 200:
+        return False
+    caption_pattern = re.compile(
+        r'^\s*(Table|Figure|Fig)(\s*[:\-]?\s*([A-Za-z0-9]+(\.[A-Za-z0-9]+)*|PLACEHOLDER))?',
+        re.IGNORECASE
+    )
+    match = caption_pattern.match(text)
+    if match:
+        return True
+    if len(text) < 100:
+        return True
+    return False
+
+def is_logo_image(para):
     """
-    Update the front page of the document with model information.
-    Deletes content after "Model Validation Report" until the date line (mm/dd/yyyy).
-    
-    Args:
-        doc_path: Path to input document
-        output_path: Path to save output document
-        model_id: Model ID (e.g., "EMMID")
-        version: Version number (e.g., "v1.x")
-        model_name: Name of the model
-        date: Date in format "mm/dd/yyyy". If None, uses current date
-    
-    Returns:
-        bool: True if updates were made, False otherwise
-    
-    Example:
-        update_front_page(
-            "input.docx", 
-            "output.docx", 
-            model_id="EMMID",
-            version="v1.5",
-            model_name="Credit Risk Model",
-            date="12/15/2024"
-        )
+    Detect if an image is likely a logo based on various criteria:
+    - Position in document (first few paragraphs)
+    - Size of the image (logos are typically smaller)
+    - Alignment (logos are often centered or right-aligned)
     """
-    doc = Document(doc_path)
+    if not para:
+        return False
     
-    # If date not provided, use current date
-    if date is None:
-        date = datetime.now().strftime("%m/%d/%Y")
+    # Check if paragraph contains an image
+    has_image = any(run._element.xpath('.//pic:pic') for run in para.runs)
+    if not has_image:
+        return False
     
-    # Find "Model Validation Report" heading and date line
-    report_heading_index = None
-    date_line_index = None
+    # Check image size - logos are typically smaller
+    for run in para.runs:
+        pics = run._element.xpath('.//pic:pic')
+        for pic in pics:
+            # Get image dimensions
+            extent_elements = pic.xpath('.//wp:extent', namespaces={
+                'wp': 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
+            })
+            
+            if extent_elements:
+                extent = extent_elements[0]
+                cx = int(extent.get('cx', 0))  # Width in EMUs
+                cy = int(extent.get('cy', 0))  # Height in EMUs
+                
+                # Convert EMUs to inches (914400 EMUs = 1 inch)
+                width_inches = cx / 914400
+                height_inches = cy / 914400
+                
+                # Logos are typically small (less than 3 inches in both dimensions)
+                # and often have aspect ratios suggesting a logo
+                if width_inches < 3 and height_inches < 2:
+                    return True
     
-    for i, para in enumerate(doc.paragraphs):
+    # Check alignment - logos are often centered or right-aligned
+    alignment = para.alignment
+    if alignment in [1, 2]:  # 1 = center, 2 = right
+        # If it's aligned center/right and small, likely a logo
+        return True
+    
+    return False
+
+def get_paragraph_index_in_doc(doc, para):
+    """Get the index of a paragraph in the document"""
+    for i, p in enumerate(doc.paragraphs):
+        if p._element == para._element:
+            return i
+    return -1
+
+def remove_placeholder_paragraphs1(doc, threshold=90):
+    removed_count = 0
+    paragraphs_to_remove = []
+
+    placeholders = [
+        "Put Modeling Team's Response here",
+        "Add modeling team response here",
+        "Add MRMG assessment statement"
+    ]
+
+    for para in doc.paragraphs:
         text = para.text.strip()
-        
-        # Find "Model Validation Report"
-        if report_heading_index is None and re.search(r'Model\s+Validation\s+Report', text, re.IGNORECASE):
-            report_heading_index = i
-            print(f"Found 'Model Validation Report' at paragraph index {i}")
-        
-        # Find date line (mm/dd/yyyy pattern or literal "mm/dd/yyyy")
-        # Only look after we've found the report heading
-        if report_heading_index is not None and i > report_heading_index:
-            # Match actual date format or placeholder
-            if re.match(r'^\s*\d{2}/\d{2}/\d{4}\s*$', text) or text.lower() == 'mm/dd/yyyy':
-                date_line_index = i
-                print(f"Found date line at paragraph index {i}: '{text}'")
+        if not text:
+            continue
+
+        for placeholder in placeholders:
+            score = fuzz.partial_ratio(text.lower(), placeholder.lower())
+            if score >= threshold:
+                paragraphs_to_remove.append(para)
                 break
-    
-    if report_heading_index is None:
-        print("Warning: 'Model Validation Report' heading not found!")
-        doc.save(output_path)
-        return False
-    
-    if date_line_index is None:
-        print("Warning: Date line not found!")
-        doc.save(output_path)
-        return False
-    
-    # Delete all paragraphs between "Model Validation Report" and date line (inclusive of date)
-    paragraphs_to_delete = []
-    
-    for i in range(report_heading_index + 1, date_line_index + 1):
-        paragraphs_to_delete.append(doc.paragraphs[i])
-    
-    # Remove the identified paragraphs
-    for para in paragraphs_to_delete:
+
+    for para in paragraphs_to_remove:
         p_element = para._element
         p_element.getparent().remove(p_element)
-    
-    print(f"Deleted {len(paragraphs_to_delete)} paragraphs (from after title to date line)")
-    
-    # Reload document to get fresh paragraph list
+        removed_count += 1
+
+    return removed_count
+
+def remove_all_placeholders(doc):
+    removed_paras = remove_placeholder_paragraphs1(doc)
+
+def is_heading(para):
+    """
+    Check if a paragraph is a heading based on style
+    """
+    if para.style.name.startswith('Heading'):
+        return True
+    return False
+
+def find_executive_summary_position(doc):
+    """
+    Find the position of the Executive Summary heading in the document
+    Returns the index of the first element after "Executive Summary" heading
+    """
+    body = doc.element.body
+    elements = list(body)
+
+    for i, element in enumerate(elements):
+        if element.tag.endswith('p'):
+            for para in doc.paragraphs:
+                if para._element == element:
+                    text = para.text.strip()
+                    is_heading_style = is_heading(para)
+
+                    if is_heading_style:
+                        if re.search(r'Executive\s+Summary', text, re.IGNORECASE):
+                            return i
+
+                    if re.match(r'^\s*Executive\s+Summary\s*$', text, re.IGNORECASE):
+                        return i
+                    if re.match(r'^\s*\d+\.?\s*Executive\s+Summary\s*$', text, re.IGNORECASE):
+                        return i
+                    if re.match(r'^\s*EXECUTIVE\s+SUMMARY\s*$', text, re.IGNORECASE):
+                        return i
+                    break
+
+    return 0
+
+def renumber_captions(doc_path, output_path):
+    doc = Document(doc_path)
+    remove_all_placeholders(doc)
     doc.save(output_path)
     doc = Document(output_path)
+    body = doc.element.body
+    elements = list(body)
+    exec_summary_pos = find_executive_summary_position(doc)
+    print(f"Executive Summary found at position: {exec_summary_pos}")
     
-    # Find "Model Validation Report" again in the fresh document
-    report_heading_index = None
-    for i, para in enumerate(doc.paragraphs):
-        text = para.text.strip()
-        if re.search(r'Model\s+Validation\s+Report', text, re.IGNORECASE):
-            report_heading_index = i
-            break
-    
-    if report_heading_index is None:
-        print("Error: Could not find report heading after deletion")
-        return False
-    
-    # Get the "Model Validation Report" paragraph to insert after it
-    report_para = doc.paragraphs[report_heading_index]
-    report_element = report_para._element
-    parent = report_element.getparent()
-    
-    # Add model info line: "EMMID v1.5: Credit Risk Model"
-    model_info_para = doc.add_paragraph()
-    model_info_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = model_info_para.add_run(f'{model_id} {version}: {model_name}')
-    run.font.size = Pt(16)
-    run.font.bold = True
-    
-    # Move the new paragraph to be right after "Model Validation Report"
-    model_info_element = model_info_para._element
-    parent.insert(parent.index(report_element) + 1, model_info_element)
-    
-    # Add date line
-    date_para = doc.add_paragraph()
-    date_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = date_para.add_run(date)
-    run.font.size = Pt(14)
-    
-    # Move the date paragraph right after model info
-    date_element = date_para._element
-    parent.insert(parent.index(model_info_element) + 1, date_element)
-    
-    print(f"Added model info: {model_id} {version}: {model_name}")
-    print(f"Added date: {date}")
+    for i, element in enumerate(elements):
+        if i < exec_summary_pos:
+            continue
+
+        if element.tag.endswith('tbl'):
+            for offset in range(1, 4):
+                if i + offset < len(elements):
+                    next_element = elements[i + offset]
+
+                    if next_element.tag.endswith('p'):
+                        for para in doc.paragraphs:
+                            if para._element == next_element:
+                                text = para.text.strip()
+
+                                if is_actual_caption(text, True):
+                                    next_element.getparent().remove(next_element)
+                                    element.addprevious(next_element)
+                                    break
+                            break
+                    if next_element.tag.endswith('tbl'):
+                        break
     
     doc.save(output_path)
-    print(f"Front page updated and saved to {output_path}")
-    return True
-
-
-# Example usage
-if __name__ == "__main__":
-    # Example 1: With current date (automatic)
-    update_front_page(
-        "input_document.docx", 
-        "output_document.docx", 
-        model_id="EMMID",
-        version="v1.5",
-        model_name="Credit Risk Assessment Model"
-    )
+    doc = Document(output_path)
+    body = doc.element.body
+    elements = list(body)
+    exec_summary_pos = find_executive_summary_position(doc)
     
-    # Example 2: With specific date
-    update_front_page(
-        "input_document.docx", 
-        "output_document.docx", 
-        model_id="EMMID",
-        version="v2.0",
-        model_name="Market Risk Model",
-        date="01/15/2025"
-    )
+    for i, element in enumerate(elements):
+        if i < exec_summary_pos:
+            continue
+
+        if element.tag.endswith('tbl'):
+            prev_element = elements[i - 1] if i > 0 else None
+            has_caption = False
+
+            if prev_element is not None and prev_element.tag.endswith('p'):
+                for para in doc.paragraphs:
+                    if para._element == prev_element:
+                        text = para.text.strip()
+                        next_is_table = True
+                        if is_actual_caption(text, next_is_table):
+                            print(text)
+                            has_caption = True
+                        break
+
+            if not has_caption:
+                new_para = parse_xml(r'<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:r><w:t>Table PLACEHOLDER</w:t></w:r></w:p>')
+                element.addprevious(new_para)
+    
+    doc.save(output_path)
+    doc = Document(output_path)
+    body = doc.element.body
+    elements = list(body)
+    exec_summary_pos = find_executive_summary_position(doc)
+    
+    i = 0
+    while i < len(elements):
+        element = elements[i]
+
+        if i < exec_summary_pos:
+            i += 1
+            continue
+
+        if element.tag.endswith('p'):
+            current_para = None
+            for para in doc.paragraphs:
+                if para._element == element:
+                    current_para = para
+                    break
+
+            if current_para:
+                has_image = any(run._element.xpath('.//pic:pic') for run in current_para.runs)
+
+                # SKIP LOGO IMAGES
+                if has_image and is_logo_image(current_para):
+                    print(f"Skipping logo image at position {i}")
+                    i += 1
+                    continue
+
+                if has_image:
+                    caption_found = False
+
+                    for offset in range(1, 6):
+                        if i + offset < len(elements):
+                            next_element = elements[i + offset]
+
+                            if next_element.tag.endswith('p'):
+                                for para in doc.paragraphs:
+                                    if para._element == next_element:
+                                        text = para.text.strip()
+
+                                        if is_actual_caption(text, True):
+                                            next_element.getparent().remove(next_element)
+                                            element.addprevious(next_element)
+                                            caption_found = True
+                                            elements = list(body)
+                                            exec_summary_pos = find_executive_summary_position(doc)
+                                            break
+                                    break
+
+                            if next_element.tag.endswith('tbl'):
+                                break
+
+                            if next_element.tag.endswith('p'):
+                                for para in doc.paragraphs:
+                                    if para._element == next_element:
+                                        if any(run._element.xpath('.//pic:pic') for run in para.runs):
+                                            break
+                                    break
+
+                        if caption_found:
+                            break
+        i += 1
+
+    doc.save(output_path)
+    doc = Document(output_path)
+    body = doc.element.body
+    elements = list(body)
+    exec_summary_pos = find_executive_summary_position(doc)
+
+    for i, element in enumerate(elements):
+        if i < exec_summary_pos + 1:
+            continue
+
+        if element.tag.endswith('p'):
+            current_para = None
+            for para in doc.paragraphs:
+                if para._element == element:
+                    current_para = para
+                    break
+
+            if current_para:
+                has_image = any(run._element.xpath('.//pic:pic') for run in current_para.runs)
+
+                # SKIP LOGO IMAGES
+                if has_image and is_logo_image(current_para):
+                    print(f"Skipping logo image for caption addition at position {i}")
+                    continue
+
+                if has_image:
+                    prev_element = elements[i - 1] if i > 0 else None
+                    has_caption = False
+
+                    if prev_element is not None and prev_element.tag.endswith('p'):
+                        for para in doc.paragraphs:
+                            if para._element == prev_element:
+                                text = para.text.strip()
+                                if is_actual_caption(text, True):
+                                    has_caption = True
+                                break
+
+                    if not has_caption:
+                        new_para = parse_xml(r'<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:r><w:t>Figure PLACEHOLDER</w:t></w:r></w:p>')
+                        element.addprevious(new_para)
+
+    doc.save(output_path)
+    doc = Document(output_path)
+    body = doc.element.body
+    elements = list(body)
+    exec_summary_pos = find_executive_summary_position(doc)
+
+    table_num = 1
+    figure_num = 1
+
+    for i, element in enumerate(elements):
+        if i < exec_summary_pos:
+            continue
+
+        if element.tag.endswith('p'):
+            current_para = None
+            for para in doc.paragraphs:
+                if para._element == element:
+                    current_para = para
+                    break
+
+            if current_para:
+                text = current_para.text.strip()
+                next_element = elements[i + 1] if i + 1 < len(elements) else None
+                
+                if re.search(r'\bTable\s*(?:PLACEHOLDER|[^\s:]+)', text, re.IGNORECASE):
+                    if next_element is not None and next_element.tag.endswith('tbl'):
+                        if is_actual_caption(text, True) or 'PLACEHOLDER' in text:
+                            is_placeholder = 'PLACEHOLDER' in text
+                            match = re.search(r'\bTable\s*(?:PLACEHOLDER|[^\s:]+)\s*:?\s*(.*)', text, re.IGNORECASE)
+                            description = match.group(1).strip() if match else ''
+                            
+                            if is_placeholder:
+                                current_para.text = f'Table {table_num} {{placeholder}}'
+                            elif description:
+                                current_para.text = f'Table {table_num}: {description}'
+                            else:
+                                current_para.text = f'Table {table_num}'
+                            table_num += 1
+                
+                elif re.search(r'\bFigure\s+(?:PLACEHOLDER|[^\s:]+)', text, re.IGNORECASE):
+                    if next_element is not None and next_element.tag.endswith('p'):
+                        for para in doc.paragraphs:
+                            if para._element == next_element:
+                                has_image = any(run._element.xpath('.//pic:pic') for run in para.runs)
+                                
+                                # SKIP LOGO IMAGES DURING RENUMBERING
+                                if has_image and is_logo_image(para):
+                                    print(f"Skipping logo image during renumbering")
+                                    break
+                                
+                                if has_image and (is_actual_caption(text, True) or 'PLACEHOLDER' in text):
+                                    is_placeholder = 'PLACEHOLDER' in text
+                                    match = re.search(r'\bFigure\s+(?:PLACEHOLDER|[^\s:]+)\s*:?\s*(.*)', text, re.IGNORECASE)
+                                    description = match.group(1).strip() if match else ''
+
+                                    if is_placeholder:
+                                        current_para.text = f'Figure {figure_num} {{placeholder}}'
+                                    elif description:
+                                        current_para.text = f'Figure {figure_num}: {description}'
+                                    else:
+                                        current_para.text = f'Figure {figure_num}'
+
+                                    figure_num += 1
+                                break
+
+    doc.save(output_path)
+
+input_file = r"output_file.docx"
+output_file = "buisness_renumbered2.docx"
+
+renumber_captions(input_file, output_file)
 ```
 
-**What this function does:**
+**Key Changes:**
 
-1. **Finds** "Model Validation Report" heading
-2. **Finds** the date line (either "mm/dd/yyyy" placeholder or actual date like "12/15/2024")
-3. **Deletes** ALL paragraphs between these two points (including the old date line)
-4. **Adds** fresh content:
-   - Model info: `EMMID v1.5: Credit Risk Model` (bold, 16pt, centered)
-   - New date: `02/02/2026` (14pt, centered)
+1. **Added `is_logo_image()` function** - Detects logos based on:
+   - Image size (logos are typically < 3" wide and < 2" tall)
+   - Alignment (logos are often centered or right-aligned)
 
-**Key features:**
+2. **Added logo checks in three critical places:**
+   - When moving captions before images
+   - When adding missing captions to images
+   - When renumbering figure captions
 
-- Only deletes content from after "Model Validation Report" up to and including the date line
-- Preserves everything after the date
-- Detects both placeholder "mm/dd/yyyy" and actual dates like "12/15/2024"
-- Safe deletion - won't touch content beyond the date
+3. **Added debug print statements** to show when logos are being skipped
 
-**Result:**
-```
-Model Validation Report
-EMMID v1.5: Credit Risk Model
-02/02/2026
-
-[Everything else in the document remains unchanged]
-```
+The function will now skip any small images (potential logos) and won't add captions or renumber them. You can adjust the size thresholds in the `is_logo_image()` function if needed (currently set to 3 inches width, 2 inches height).
