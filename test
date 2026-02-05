@@ -1,10 +1,4 @@
-I can see the error in your code. The issue is on line 58 where you're using `pic.xpath()` with the `namespaces` parameter. The error message shows:
-
-```
-TypeError: BaseOxmlElement.xpath() got an unexpected keyword argument 'namespaces'
-```
-
-The `xpath()` method in `python-docx` doesn't accept a `namespaces` keyword argument in the way you're using it. Here's the corrected code:
+I'll add detailed debug output to show you exactly what images are being processed, their sizes, and whether they're being skipped. Here's the updated code with comprehensive debugging:
 
 ```python
 from docx import Document
@@ -45,7 +39,7 @@ def is_actual_caption(text, next_element_is_table_or_image):
         return True
     return False
 
-def is_logo_image(para):
+def is_logo_image(para, position_info=""):
     """
     Detect if an image is likely a logo based on various criteria:
     - Position in document (first few paragraphs)
@@ -59,6 +53,11 @@ def is_logo_image(para):
     has_image = any(run._element.xpath('.//pic:pic') for run in para.runs)
     if not has_image:
         return False
+    
+    is_logo = False
+    width_inches = None
+    height_inches = None
+    alignment_str = "unknown"
     
     try:
         # Check image size - logos are typically smaller
@@ -77,22 +76,49 @@ def is_logo_image(para):
                     width_inches = cx / 914400
                     height_inches = cy / 914400
                     
+                    print(f"  📏 Image size: {width_inches:.2f}\" x {height_inches:.2f}\" {position_info}")
+                    
                     # Logos are typically small (less than 3 inches in both dimensions)
                     if width_inches < 3 and height_inches < 2:
-                        return True
+                        is_logo = True
+                        print(f"  ⚠️  SMALL IMAGE DETECTED (likely logo)")
     except Exception as e:
-        print(f"Error checking image size: {e}")
-        # If we can't determine size, use other criteria
+        print(f"  ❌ Error checking image size: {e}")
     
     # Check alignment - logos are often centered or right-aligned
     try:
         alignment = para.alignment
+        if alignment == 0:
+            alignment_str = "left"
+        elif alignment == 1:
+            alignment_str = "center"
+        elif alignment == 2:
+            alignment_str = "right"
+        elif alignment == 3:
+            alignment_str = "justify"
+        elif alignment is None:
+            alignment_str = "default/left"
+        
+        print(f"  📐 Alignment: {alignment_str}")
+        
         if alignment in [1, 2]:  # 1 = center, 2 = right
-            return True
-    except:
-        pass
+            is_logo = True
+            print(f"  ⚠️  CENTERED/RIGHT ALIGNED (likely logo)")
+    except Exception as e:
+        print(f"  ❌ Error checking alignment: {e}")
     
-    return False
+    # Final decision
+    if is_logo:
+        print(f"  🚫 DECISION: SKIP THIS IMAGE (Logo detected)")
+        print(f"     Reason: Size={width_inches:.2f}\"x{height_inches:.2f}\" or Alignment={alignment_str}")
+    else:
+        print(f"  ✅ DECISION: PROCESS THIS IMAGE (Not a logo)")
+        if width_inches:
+            print(f"     Size: {width_inches:.2f}\" x {height_inches:.2f}\"")
+    
+    print()  # Empty line for readability
+    
+    return is_logo
 
 def get_paragraph_index_in_doc(doc, para):
     """Get the index of a paragraph in the document"""
@@ -170,6 +196,10 @@ def find_executive_summary_position(doc):
     return 0
 
 def renumber_captions(doc_path, output_path):
+    print("=" * 80)
+    print("STARTING CAPTION RENUMBERING PROCESS")
+    print("=" * 80)
+    
     doc = Document(doc_path)
     remove_all_placeholders(doc)
     doc.save(output_path)
@@ -177,7 +207,12 @@ def renumber_captions(doc_path, output_path):
     body = doc.element.body
     elements = list(body)
     exec_summary_pos = find_executive_summary_position(doc)
-    print(f"Executive Summary found at position: {exec_summary_pos}")
+    print(f"\n✓ Executive Summary found at position: {exec_summary_pos}\n")
+    
+    # Statistics
+    images_found = 0
+    logos_skipped = 0
+    images_processed = 0
     
     for i, element in enumerate(elements):
         if i < exec_summary_pos:
@@ -221,9 +256,8 @@ def renumber_captions(doc_path, output_path):
                         text = para.text.strip()
                         next_is_table = True
                         if is_actual_caption(text, next_is_table):
-                            print(text)
                             has_caption = True
-                        break
+                            break
 
             if not has_caption:
                 new_para = parse_xml(r'<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:r><w:t>Table PLACEHOLDER</w:t></w:r></w:p>')
@@ -234,6 +268,10 @@ def renumber_captions(doc_path, output_path):
     body = doc.element.body
     elements = list(body)
     exec_summary_pos = find_executive_summary_position(doc)
+    
+    print("\n" + "=" * 80)
+    print("PHASE 1: MOVING CAPTIONS BEFORE IMAGES")
+    print("=" * 80 + "\n")
     
     i = 0
     while i < len(elements):
@@ -253,13 +291,18 @@ def renumber_captions(doc_path, output_path):
             if current_para:
                 has_image = any(run._element.xpath('.//pic:pic') for run in current_para.runs)
 
-                # SKIP LOGO IMAGES
-                if has_image and is_logo_image(current_para):
-                    print(f"Skipping logo image at position {i}")
-                    i += 1
-                    continue
-
                 if has_image:
+                    images_found += 1
+                    print(f"🖼️  IMAGE FOUND at position {i}")
+                    
+                    # SKIP LOGO IMAGES
+                    if is_logo_image(current_para, f"at position {i}"):
+                        logos_skipped += 1
+                        i += 1
+                        continue
+                    
+                    images_processed += 1
+
                     caption_found = False
 
                     for offset in range(1, 6):
@@ -277,6 +320,7 @@ def renumber_captions(doc_path, output_path):
                                             caption_found = True
                                             elements = list(body)
                                             exec_summary_pos = find_executive_summary_position(doc)
+                                            print(f"  ↑ Moved caption before image")
                                             break
                                     break
 
@@ -300,6 +344,10 @@ def renumber_captions(doc_path, output_path):
     elements = list(body)
     exec_summary_pos = find_executive_summary_position(doc)
 
+    print("\n" + "=" * 80)
+    print("PHASE 2: ADDING MISSING CAPTIONS")
+    print("=" * 80 + "\n")
+
     for i, element in enumerate(elements):
         if i < exec_summary_pos + 1:
             continue
@@ -314,12 +362,13 @@ def renumber_captions(doc_path, output_path):
             if current_para:
                 has_image = any(run._element.xpath('.//pic:pic') for run in current_para.runs)
 
-                # SKIP LOGO IMAGES
-                if has_image and is_logo_image(current_para):
-                    print(f"Skipping logo image for caption addition at position {i}")
-                    continue
-
                 if has_image:
+                    print(f"🖼️  IMAGE FOUND at position {i} (checking for missing caption)")
+                    
+                    # SKIP LOGO IMAGES
+                    if is_logo_image(current_para, f"at position {i}"):
+                        continue
+
                     prev_element = elements[i - 1] if i > 0 else None
                     has_caption = False
 
@@ -329,17 +378,23 @@ def renumber_captions(doc_path, output_path):
                                 text = para.text.strip()
                                 if is_actual_caption(text, True):
                                     has_caption = True
-                                break
+                                    print(f"  ✓ Caption already exists")
+                                    break
 
                     if not has_caption:
                         new_para = parse_xml(r'<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:r><w:t>Figure PLACEHOLDER</w:t></w:r></w:p>')
                         element.addprevious(new_para)
+                        print(f"  ➕ Added placeholder caption")
 
     doc.save(output_path)
     doc = Document(output_path)
     body = doc.element.body
     elements = list(body)
     exec_summary_pos = find_executive_summary_position(doc)
+
+    print("\n" + "=" * 80)
+    print("PHASE 3: RENUMBERING CAPTIONS")
+    print("=" * 80 + "\n")
 
     table_num = 1
     figure_num = 1
@@ -366,12 +421,15 @@ def renumber_captions(doc_path, output_path):
                             match = re.search(r'\bTable\s*(?:PLACEHOLDER|[^\s:]+)\s*:?\s*(.*)', text, re.IGNORECASE)
                             description = match.group(1).strip() if match else ''
                             
+                            old_text = text
                             if is_placeholder:
                                 current_para.text = f'Table {table_num} {{placeholder}}'
                             elif description:
                                 current_para.text = f'Table {table_num}: {description}'
                             else:
                                 current_para.text = f'Table {table_num}'
+                            
+                            print(f"📊 Table {table_num}: '{old_text[:50]}...' → '{current_para.text[:50]}...'")
                             table_num += 1
                 
                 elif re.search(r'\bFigure\s+(?:PLACEHOLDER|[^\s:]+)', text, re.IGNORECASE):
@@ -380,16 +438,20 @@ def renumber_captions(doc_path, output_path):
                             if para._element == next_element:
                                 has_image = any(run._element.xpath('.//pic:pic') for run in para.runs)
                                 
-                                # SKIP LOGO IMAGES DURING RENUMBERING
-                                if has_image and is_logo_image(para):
-                                    print(f"Skipping logo image during renumbering")
-                                    break
+                                if has_image:
+                                    print(f"\n🖼️  Checking image for Figure caption at position {i}")
+                                    
+                                    # SKIP LOGO IMAGES DURING RENUMBERING
+                                    if is_logo_image(para, f"for renumbering at position {i}"):
+                                        print(f"  ⏭️  Skipping logo - not incrementing figure number")
+                                        break
                                 
                                 if has_image and (is_actual_caption(text, True) or 'PLACEHOLDER' in text):
                                     is_placeholder = 'PLACEHOLDER' in text
                                     match = re.search(r'\bFigure\s+(?:PLACEHOLDER|[^\s:]+)\s*:?\s*(.*)', text, re.IGNORECASE)
                                     description = match.group(1).strip() if match else ''
 
+                                    old_text = text
                                     if is_placeholder:
                                         current_para.text = f'Figure {figure_num} {{placeholder}}'
                                     elif description:
@@ -397,10 +459,21 @@ def renumber_captions(doc_path, output_path):
                                     else:
                                         current_para.text = f'Figure {figure_num}'
 
+                                    print(f"🖼️  Figure {figure_num}: '{old_text[:50]}...' → '{current_para.text[:50]}...'")
                                     figure_num += 1
                                 break
 
     doc.save(output_path)
+    
+    print("\n" + "=" * 80)
+    print("SUMMARY STATISTICS")
+    print("=" * 80)
+    print(f"Total images found: {images_found}")
+    print(f"Logos skipped: {logos_skipped}")
+    print(f"Images processed: {images_processed}")
+    print(f"Final table count: {table_num - 1}")
+    print(f"Final figure count: {figure_num - 1}")
+    print("=" * 80 + "\n")
 
 input_file = r"output_file.docx"
 output_file = "buisness_renumbered2.docx"
@@ -408,12 +481,23 @@ output_file = "buisness_renumbered2.docx"
 renumber_captions(input_file, output_file)
 ```
 
-**Key changes made:**
+**What this debug version shows:**
 
-1. **Removed the `namespaces` parameter** from the `xpath()` call on line 58
-2. **Added error handling** around the image size checking code with try-except blocks
-3. **Simplified the xpath query** to just use `'.//wp:extent'` without the namespaces dictionary
+1. **For each image found:**
+   - 📏 Exact dimensions in inches (width x height)
+   - 📐 Alignment (left, center, right, justify)
+   - ⚠️ Warnings if it's small or centered/right-aligned
+   - 🚫 Final decision: SKIP (logo) or ✅ PROCESS (regular image)
 
-The error occurred because `python-docx`'s xpath implementation doesn't accept the `namespaces` keyword argument the way lxml does. The namespace prefixes like `wp:` are already registered in the library, so you can use them directly in the xpath string.
+2. **Processing phases:**
+   - Phase 1: Moving captions before images
+   - Phase 2: Adding missing captions
+   - Phase 3: Renumbering all captions
 
-Try running this corrected version and it should work without the TypeError.
+3. **Summary statistics:**
+   - Total images found
+   - How many were skipped as logos
+   - How many were processed
+   - Final table and figure counts
+
+Run this and you'll get a detailed report showing exactly which images are logos (with their sizes) and which are being processed!
