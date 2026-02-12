@@ -1,6 +1,90 @@
-I'll help you add level detection to your code. Looking at your document structure, you need to identify the numbering levels (4, 4.1, 4.1.1, etc.) and add them to your output.
+I see the issue. The problem is in the `parse_lines_after_request_items` function. When we updated it to accept `levels`, we're losing the responses. Let me trace through the logic and fix it:
 
-Here's the modified code with level detection:
+```python
+def parse_lines_after_request_items(lines: List[str], levels: List[int]) -> List[Dict]:
+    """
+    Parse lines with level information included.
+    """
+    # start after "Request Items" if present
+    start = 0
+    for i, t in enumerate(lines):
+        if REQ_ITEMS_RX.search(t):
+            start = i + 1
+            break
+
+    L = lines[start:]
+    L_levels = levels[start:]
+
+    rows: List[Dict] = []
+    i = 0
+
+    while i < len(L):
+        line = L[i]
+        current_level = L_levels[i] if i < len(L_levels) else 0
+
+        if RFR_RX.search(line):
+            q_key, section, imvp_q = extract_meta_from_rfr_header(line)
+            test_tag = extract_test_tag(line)
+            
+            # Extract number prefix for cleaner level identification
+            num_prefix, _ = extract_number_prefix(line)
+
+            responses: List[str] = []
+            i += 1
+
+            # First, collect everything until next RFR
+            while i < len(L) and not RFR_RX.search(L[i]):
+                cur = L[i]
+                
+                if RESP_HDR_RX.search(cur):
+                    # Found "Modeling Team's Response"
+                    i += 1
+                    block: List[str] = []
+                    
+                    # Collect response lines until next header or RFR
+                    while (
+                        i < len(L)
+                        and not RESP_HDR_RX.search(L[i])
+                        and not RFR_RX.search(L[i])
+                    ):
+                        block.append(L[i])
+                        i += 1
+                    
+                    resp = norm(" ".join(block))
+                    m = BRACKETS_RX.fullmatch(resp)
+                    if m:
+                        resp = norm(m.group(1))
+                    if resp:
+                        responses.append(resp)
+                else:
+                    # Not a response header, just move forward
+                    i += 1
+
+            responses = clean_greater_than(responses)
+            
+            if (imvp_q and imvp_q.strip()) or responses:
+                row = {
+                    "IMVP Question": imvp_q or "",
+                    "Section": section or "",
+                    "level": current_level,
+                    "number_prefix": num_prefix,
+                    "rfr": {(q_key or "Q?"): " ".join(responses).strip()},
+                }
+                
+                if test_tag:
+                    row[test_tag] = imvp_q or ""
+                
+                rows.append(row)
+            continue
+        
+        i += 1
+
+    return rows
+```
+
+Wait, I see the actual issue now. The logic looks correct, but let me add some debug prints to see what's happening. Can you also share what the actual output looks like vs what you expect?
+
+Let me provide a complete corrected version with better debugging:
 
 ```python
 import re
@@ -109,6 +193,432 @@ def get_paragraph_level(p: Paragraph) -> Optional[int]:
     Extract the numbering level from a paragraph.
     Returns None if paragraph is not part of a numbered list.
     """
+    if p._element.pPr is not None:
+        numPr = p._element.pPr.numPr
+        if numPr is not None:
+            ilvl = numPr.ilvl
+            if ilvl is not None:
+                return int(ilvl.val)
+    return None
+
+
+def extract_number_prefix(text: str) -> Tuple[Optional[str], int]:
+    """
+    Extract numbering prefix like '4.', '4.1', '4.1.1' from text.
+    Returns (number_string, level) where level is count of dots + 1.
+    Examples:
+        '4.' -> ('4', 1)
+        '4.1' -> ('4.1', 2)
+        '4.1.1' -> ('4.1.1', 3)
+    """
+    # Match patterns like: 4. or 4.1 or 4.1.1 at the start
+    pattern = r'^(\d+(?:\.\d+)*)\.'
+    match = re.match(pattern, text.strip())
+    
+    if match:
+        num_str = match.group(1)
+        level = num_str.count('.') + 1
+        return num_str, level
+    
+    return None, 0
+
+
+def read_docx_lines_with_levels(path: str) -> Tuple[List[str], List[int]]:
+    """
+    Read docx and return both lines and their corresponding levels.
+    Returns: (lines, levels) where levels[i] is the level of lines[i]
+    """
+    doc = Document(path)
+    lines: List[str] = []
+    levels: List[int] = []
+
+    # Walk through document body in order
+    for child in doc.element.body.iterchildren():
+        if child.tag == qn("w:p"):  # Paragraph
+            p = Paragraph(child, doc)
+            t = norm(p.text)
+            if t:
+                lines.append(t)
+                
+                # Try to get level from paragraph properties
+                para_level = get_paragraph_level(p)
+                
+                # If no level from properties, try to extract from text
+                if para_level is None:
+                    num_prefix, text_level = extract_number_prefix(t)
+                    levels.append(text_level if text_level > 0 else 0)
+                else:
+                    levels.append(para_level + 1)  # ilvl is 0-indexed, we want 1-indexed
+
+        elif child.tag == qn("w:tbl"):  # Table
+            tbl = Table(child, doc)
+            for row in tbl.rows:
+                row_text = []
+                for cell in row.cells:
+                    for p in cell.paragraphs:
+                        t = norm(p.text)
+                        if t:
+                            row_text.append(t)
+                if row_text:
+                    lines.append(" | ".join(row_text))
+                    levels.append(0)  # Tables have no level
+    
+    return lines, levels
+
+
+def read_docx_lines(path: str) -> List[str]:
+    """
+    Original function that returns lines with RFR blocks grouped.
+    This maintains backward compatibility.
+    """
+    lines, levels = read_docx_lines_with_levels(path)
+    
+    print("Sample lines before grouping:")
+    for i, line in enumerate(lines[:20]):
+        print(f"{i}: {line[:100]}")
+    
+    blocks = group_blocks_from_list(lines, start_rx=RFR_RX, stop_substrings=STOP_SUBS, include_stop_line=False)
+    final_lines = replace_blocks_in_lines(lines, blocks)
+    
+    print("\nSample lines after grouping:")
+    for i, line in enumerate(final_lines[:20]):
+        print(f"{i}: {line[:100]}")
+    
+    return final_lines
+
+
+# ---------- patterns ----------
+REQ_ITEMS_RX = re.compile(r"^\s*Request\s+Items\s*$", re.IGNORECASE)
+RFR_RX = re.compile(r"\s*RFR\s*\d+\s*", re.IGNORECASE)
+BRACKETS_RX = re.compile(r"<\s*([^>]+?)\s*>")
+Q_KEY_RX = re.compile(r"^\s*Q\d+\s*:\s*", re.IGNORECASE)
+RESP_HDR_RX = re.compile(r"Modeling Team['']?s Response", re.IGNORECASE)
+TEST_TAG_RX = re.compile(r"^Test\s*(\w+)", re.IGNORECASE)
+STOP_SUBS = ["[Modeling Team's Response]", "[", "Modeling Team's Response"]
+
+
+def standardize_angle_brackets(line: str) -> str:
+    """
+    Standardize malformed <...> blocks.
+    """
+    line = norm(line)
+    result = []
+    open_blocks = 0
+
+    for ch in line:
+        if ch == "<":
+            if open_blocks > 0:
+                result.append(">")
+                open_blocks -= 1
+            result.append("<")
+            open_blocks += 1
+        elif ch == ">" and open_blocks > 0:
+            result.append(">")
+            open_blocks -= 1
+        else:
+            result.append(ch)
+
+    while open_blocks > 0:
+        result.append(">")
+        open_blocks -= 1
+
+    return "".join(result)
+
+
+def extract_meta_from_rfr_header(line: str) -> Tuple[str, str, str]:
+    q_key = ""
+    section = ""
+    imvp = ""
+
+    line = standardize_angle_brackets(line)
+    parts = [norm(x) for x in BRACKETS_RX.findall(line)]
+
+    for part in parts:
+        if Q_KEY_RX.match(part):
+            q_key = part
+            break
+
+    candidates = [p for p in parts if p != q_key and len(p) > 20]
+    question_parts = [p for p in candidates if p.endswith("?")]
+    
+    if question_parts:
+        imvp = max(question_parts, key=len)
+    elif candidates:
+        imvp = max(candidates, key=len)
+
+    section_candidates = [
+        p for p in parts 
+        if p != q_key 
+        and p != imvp 
+        and len(p) < 50 
+        and not p.endswith("?")
+    ]
+
+    section_keywords = ["validation", "data", "model", "performance", "documentation", "testing"]
+    for part in section_candidates:
+        if any(keyword in part.lower() for keyword in section_keywords):
+            section = part
+            break
+
+    if not section and section_candidates:
+        section = section_candidates[0]
+
+    return q_key, section, imvp
+
+
+def clean_greater_than(lines):
+    return [re.sub(r'>.*$', '', s).strip() for s in lines]
+
+
+def extract_test_tag(line: str) -> Optional[str]:
+    """Extract test tag from line"""
+    parts = [norm(x) for x in BRACKETS_RX.findall(line)]
+    for part in parts:
+        m = TEST_TAG_RX.match(part)
+        if m:
+            tag_value = m.group(1).lower()
+            return f"test{tag_value}"
+    return None
+
+
+def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
+    """
+    Parse lines and extract RFR data with levels.
+    Now reads levels directly from the document.
+    """
+    # Get lines with levels from document
+    # We need to read the document again to get levels aligned with the grouped lines
+    # This is a workaround - ideally we'd pass levels through grouping
+    
+    # start after "Request Items" if present
+    start = 0
+    for i, t in enumerate(lines):
+        if REQ_ITEMS_RX.search(t):
+            start = i + 1
+            break
+
+    L = lines[start:]
+
+    rows: List[Dict] = []
+    i = 0
+
+    while i < len(L):
+        line = L[i]
+        
+        # Extract level from the line itself
+        num_prefix, current_level = extract_number_prefix(line)
+
+        if RFR_RX.search(line):
+            print(f"\n=== Processing RFR at line {i} ===")
+            print(f"Line: {line[:150]}")
+            
+            q_key, section, imvp_q = extract_meta_from_rfr_header(line)
+            test_tag = extract_test_tag(line)
+            
+            print(f"Q_Key: {q_key}")
+            print(f"Section: {section}")
+            print(f"IMVP: {imvp_q[:100] if imvp_q else 'None'}")
+            print(f"Level: {current_level}, Prefix: {num_prefix}")
+
+            responses: List[str] = []
+            i += 1
+
+            # Collect all lines until next RFR
+            while i < len(L) and not RFR_RX.search(L[i]):
+                cur = L[i]
+                print(f"  Checking line {i}: {cur[:80]}")
+                
+                if RESP_HDR_RX.search(cur):
+                    print(f"  -> Found response header at line {i}")
+                    i += 1
+                    block: List[str] = []
+                    
+                    # Collect response lines
+                    while (
+                        i < len(L)
+                        and not RESP_HDR_RX.search(L[i])
+                        and not RFR_RX.search(L[i])
+                    ):
+                        print(f"    Adding to response block: {L[i][:80]}")
+                        block.append(L[i])
+                        i += 1
+                    
+                    resp = norm(" ".join(block))
+                    print(f"  -> Response block: {resp[:100]}")
+                    
+                    # Unwrap if entire response is in brackets
+                    m = BRACKETS_RX.fullmatch(resp)
+                    if m:
+                        resp = norm(m.group(1))
+                        print(f"  -> Unwrapped: {resp[:100]}")
+                    
+                    if resp:
+                        responses.append(resp)
+                else:
+                    i += 1
+
+            responses = clean_greater_than(responses)
+            print(f"Final responses ({len(responses)}): {responses}")
+            
+            if (imvp_q and imvp_q.strip()) or responses:
+                row = {
+                    "IMVP Question": imvp_q or "",
+                    "Section": section or "",
+                    "level": current_level,
+                    "number_prefix": num_prefix,
+                    "rfr": {(q_key or "Q?"): " ".join(responses).strip()},
+                }
+                
+                if test_tag:
+                    row[test_tag] = imvp_q or ""
+                
+                print(f"Created row: {json.dumps(row, indent=2)}")
+                rows.append(row)
+            continue
+        
+        i += 1
+
+    return rows
+
+
+def parse_docx_to_rfr_rows(path: str) -> List[Dict]:
+    lines = read_docx_lines(path)
+    return parse_lines_after_request_items(lines)
+
+
+def collapse_empty_imvp_into_previous(rows: List[Dict]) -> List[Dict]:
+    out: List[Dict] = []
+    last_with_imvp_by_section: dict = {}
+
+    for r in rows:
+        imvp = (r.get("IMVP Question") or "").strip()
+        section = (r.get("Section") or "").strip()
+
+        if imvp:
+            out.append(r)
+            last_with_imvp_by_section[section] = len(out) - 1
+        else:
+            idx = last_with_imvp_by_section.get(section)
+            if idx is not None and r.get("rfr"):
+                out[idx]["rfr"].update(r["rfr"])
+
+    return out
+
+
+def merge_rows_by_imvp(rows: List[Dict]) -> List[Dict]:
+    """
+    Merge rows with identical non-empty IMVP Question.
+    Keep the minimum level when merging.
+    """
+    merged: "OrderedDict[str, Dict]" = OrderedDict()
+    
+    for r in rows:
+        imvp = (r.get("IMVP Question") or "").strip()
+        if not imvp:
+            continue
+        
+        if imvp not in merged:
+            merged[imvp] = {
+                "IMVP Question": imvp,
+                "Section": r.get("Section") or "",
+                "level": r.get("level", 0),
+                "number_prefix": r.get("number_prefix"),
+                "rfr": dict(r.get("rfr") or {})
+            }
+        else:
+            merged[imvp]["rfr"].update(r.get("rfr") or {})
+            # Keep the minimum level
+            if r.get("level", 999) < merged[imvp]["level"]:
+                merged[imvp]["level"] = r.get("level", 0)
+                merged[imvp]["number_prefix"] = r.get("number_prefix")
+            if not merged[imvp]["Section"] and (r.get("Section") or ""):
+                merged[imvp]["Section"] = r["Section"]
+
+    return list(merged.values())
+
+
+def flatten_rfr_for_csv(rows: List[Dict]) -> List[Dict]:
+    """Flatten rfr dict into separate columns for CSV."""
+    flattened = []
+    
+    for r in rows:
+        base = {
+            "IMVP Question": r.get("IMVP Question", ""),
+            "Section": r.get("Section", "N/A"),
+            "level": r.get("level", 0),
+            "number_prefix": r.get("number_prefix", "")
+        }
+
+        # Add test tags if present
+        for key in r:
+            if key.startswith("test"):
+                base[key] = r[key]
+
+        # Flatten rfr dict
+        rfr_dict = r.get("rfr", {})
+        for q_key, response in rfr_dict.items():
+            row_copy = base.copy()
+            row_copy["Q_Key"] = q_key
+            row_copy["Response"] = response
+            flattened.append(row_copy)
+
+    return flattened
+
+
+def convert_csv(rows: List[Dict], document_path: str) -> pd.DataFrame:
+    """Convert rows to DataFrame with metadata."""
+    file_name = os.path.basename(document_path)
+
+    flattened = flatten_rfr_for_csv(rows)
+    df = pd.DataFrame(flattened)
+    df["file_name"] = file_name
+    df["type"] = "rfr"
+
+    return df
+
+
+def save_outputs(rows: List[Dict], document_path: str, json_path: str = None, csv_path: str = None):
+    """Save both JSON and CSV outputs."""
+    base_name = os.path.splitext(os.path.basename(document_path))[0]
+
+    # Save JSON
+    if json_path is None:
+        json_path = f"{base_name}_rfr_output.json"
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(rows, f, ensure_ascii=False, indent=2)
+    print(f"✓ Saved JSON: {json_path} ({len(rows)} rows)")
+
+    # Save CSV
+    if csv_path is None:
+        csv_path = f"{base_name}_rfr_output.csv"
+    df = convert_csv(rows, document_path)
+    df.to_csv(csv_path, index=False, encoding="utf-8")
+    print(f"✓ Saved CSV: {csv_path} ({len(df)} rows)")
+
+    return json_path, csv_file
+
+
+if __name__ == "__main__":
+    DOCX_PATH = "new_rfr_finding/sample_RFR (1).docx"
+
+    rows = parse_docx_to_rfr_rows(DOCX_PATH)
+    
+    json_file, csv_file = save_outputs(rows, DOCX_PATH)
+```
+
+The key changes:
+
+1. **Removed the `levels` parameter** from `parse_lines_after_request_items` - instead, it extracts the level directly from each line using `extract_number_prefix()`
+2. **Added extensive debug printing** to see exactly what's happening at each step
+3. **Kept all the original logic intact** - just added level extraction
+
+The debug output will show you:
+- Which lines are being processed
+- When response headers are found
+- What responses are being collected
+- The final row structure
+
+Run this and share the debug output so we can see where the responses are getting lost!    """
     if p._element.pPr is not None:
         numPr = p._element.pPr.numPr
         if numPr is not None:
