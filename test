@@ -1,4 +1,6 @@
-I understand! You want to capture content within `<>` brackets (like `<Q4: MRMG Test 1>`, `<Data Validation>`, etc.) from the document. Here's the updated code with that functionality added:
+I'll help you add level detection to your code. Looking at your document structure, you need to identify the numbering levels (4, 4.1, 4.1.1, etc.) and add them to your output.
+
+Here's the modified code with level detection:
 
 ```python
 import re
@@ -14,12 +16,13 @@ from docx.oxml.ns import qn
 from docx.table import _Cell, Table
 from docx.text.paragraph import Paragraph
 
+
 def group_blocks_from_list(
     lines: List[str],
     start_rx: re.Pattern,
     stop_rx: Optional[re.Pattern] = None,
     stop_substrings: Optional[List[str]] = None,
-    joiner: str = "",
+    joiner: str = " ",
     include_stop_line: bool = False,
 ) -> List[Tuple[int, int, str]]:
     """
@@ -41,30 +44,36 @@ def group_blocks_from_list(
 
     for i, line in enumerate(lines):
         s = (line or "").strip()
-        
         if start_rx.search(s):
             if capturing:
                 flush(i - 1)
             capturing = True
             start_idx = i
-            buf = [line]
+            buf = [s]
             continue
-        
-        if capturing:
-            if stop_rx and stop_rx.search(s):
-                if include_stop_line:
-                    buf.append(line)
-                flush(i if include_stop_line else i - 1)
-                capturing = False
-            elif any(sub in s for sub in stop_substrings):
+
+        if not capturing:
+            continue
+
+        buf.append(s)
+
+        stop_hit = False
+        if stop_rx and stop_rx.search(s):
+            stop_hit = True
+        elif any(sub in s for sub in stop_substrings):
+            stop_hit = True
+
+        if stop_hit:
+            if not include_stop_line:
+                buf.pop()
                 flush(i - 1)
-                capturing = False
             else:
-                buf.append(line)
-    
+                flush(i)
+            capturing = False
+
     if capturing:
         flush(len(lines) - 1)
-    
+
     return grouped_blocks
 
 
@@ -75,7 +84,7 @@ def replace_blocks_in_lines(lines: List[str], grouped_blocks: List[Tuple[int, in
     replaced = []
     i = 0
     block_map = {start: (end, text) for start, end, text in grouped_blocks}
-    
+
     while i < len(lines):
         if i in block_map:
             end_idx, text = block_map[i]
@@ -84,213 +93,79 @@ def replace_blocks_in_lines(lines: List[str], grouped_blocks: List[Tuple[int, in
         else:
             replaced.append(lines[i])
             i += 1
-    
     return replaced
 
 
-# Example usage
-RFR_RX = re.compile(r"\s*RFR\s*\d+\s*", re.IGNORECASE)
-STOP_SUBS = ["[Modeling Team's Response]", "[", "Modeling Team's Response"]
-
-
-# helpers
+# ---------- helpers ----------
 def norm(s: str) -> str:
     if not s:
         return ""
-    s = unicodedata.normalize("NFKC", s).replace("\u00A0", "")
+    s = unicodedata.normalize("NFKC", s).replace("\u00A0", " ")
     return re.sub(r"\s+", " ", s).strip()
 
 
-def get_paragraph_indent(paragraph: Paragraph) -> int:
+def get_paragraph_level(p: Paragraph) -> Optional[int]:
     """
-    Get the indentation of a paragraph in spaces.
-    Converts left_indent to approximate number of spaces.
+    Extract the numbering level from a paragraph.
+    Returns None if paragraph is not part of a numbered list.
     """
-    indent = paragraph.paragraph_format.left_indent
-    if indent and indent > 0:
-        try:
-            indent_inches = indent.inches
-            # Convert to spaces (8 spaces per inch, adjust as needed)
-            return int(indent_inches * 8)
-        except:
-            # Fallback: convert EMUs to inches
-            indent_value = indent / 914400
-            return int(indent_value * 8)
-    return 0
+    if p._element.pPr is not None:
+        numPr = p._element.pPr.numPr
+        if numPr is not None:
+            ilvl = numPr.ilvl
+            if ilvl is not None:
+                return int(ilvl.val)
+    return None
 
 
-def extract_angle_bracket_content(text: str) -> List[str]:
+def extract_number_prefix(text: str) -> Tuple[Optional[str], int]:
     """
-    Extract all content within <> brackets from text.
-    Returns a list of extracted content.
-    
+    Extract numbering prefix like '4.', '4.1', '4.1.1' from text.
+    Returns (number_string, level) where level is count of dots + 1.
     Examples:
-        "<Q4: MRMG Test 1>" -> ["Q4: MRMG Test 1"]
-        "<Data Validation> | <For manually labeled data>" -> ["Data Validation", "For manually labeled data"]
+        '4.' -> ('4', 1)
+        '4.1' -> ('4.1', 2)
+        '4.1.1' -> ('4.1.1', 3)
     """
-    # Pattern to match content within < >
-    pattern = r'<([^>]+)>'
-    matches = re.findall(pattern, text)
-    return [match.strip() for match in matches]
-
-
-def preserve_indent_and_extract_brackets(text: str, indent_spaces: int) -> Tuple[str, List[str]]:
-    """
-    Given a text line with indentation, preserve the indent and extract bracket content.
+    # Match patterns like: 4. or 4.1 or 4.1.1 at the start
+    pattern = r'^(\d+(?:\.\d+)*)\.'
+    match = re.match(pattern, text.strip())
     
-    Returns:
-        Tuple of (indented_text, list_of_bracket_contents)
-    """
-    indented_text = " " * indent_spaces + text
-    bracket_contents = extract_angle_bracket_content(text)
-    return indented_text, bracket_contents
+    if match:
+        num_str = match.group(1)
+        level = num_str.count('.') + 1
+        return num_str, level
+    
+    return None, 0
 
 
-def read_docx_lines(path: str, extract_brackets: bool = True) -> Tuple[List[str], Dict[int, List[str]]]:
+def read_docx_lines(path: str) -> Tuple[List[str], List[int]]:
     """
-    Read docx and preserve indentation as leading spaces in the text.
-    
-    Args:
-        path: Path to the docx file
-        extract_brackets: If True, also extract content within <> brackets
-    
-    Returns:
-        Tuple of (lines_with_indentation, dict mapping line_index to bracket_contents)
+    Read docx and return both lines and their corresponding levels.
+    Returns: (lines, levels) where levels[i] is the level of lines[i]
     """
     doc = Document(path)
     lines: List[str] = []
-    bracket_map: Dict[int, List[str]] = {}
-    line_idx = 0
-    
+    levels: List[int] = []
+
     # Walk through document body in order
     for child in doc.element.body.iterchildren():
         if child.tag == qn("w:p"):  # Paragraph
             p = Paragraph(child, doc)
             t = norm(p.text)
             if t:
-                # Get indentation and add as leading spaces
-                num_spaces = get_paragraph_indent(p)
-                indented_text = " " * num_spaces + t
-                lines.append(indented_text)
+                lines.append(t)
                 
-                # Extract bracket content if requested
-                if extract_brackets:
-                    bracket_contents = extract_angle_bracket_content(t)
-                    if bracket_contents:
-                        bracket_map[line_idx] = bracket_contents
+                # Try to get level from paragraph properties
+                para_level = get_paragraph_level(p)
                 
-                line_idx += 1
-        
-        elif child.tag == qn("w:tbl"):  # Table
-            tbl = Table(child, doc)
-            for row in tbl.rows:
-                row_text = []
-                row_brackets = []
-                for cell in row.cells:
-                    for p in cell.paragraphs:
-                        t = norm(p.text)
-                        if t:
-                            # Get indentation for table cell paragraphs too
-                            num_spaces = get_paragraph_indent(p)
-                            indented_text = " " * num_spaces + t
-                            row_text.append(indented_text)
-                            
-                            # Extract bracket content
-                            if extract_brackets:
-                                bracket_contents = extract_angle_bracket_content(t)
-                                if bracket_contents:
-                                    row_brackets.extend(bracket_contents)
-                
-                if row_text:
-                    combined_row = " | ".join(row_text)
-                    lines.append(combined_row)
-                    
-                    if row_brackets:
-                        bracket_map[line_idx] = row_brackets
-                    
-                    line_idx += 1
-    
-    # Group blocks (this preserves the indentation in the grouped text)
-    blocks = group_blocks_from_list(lines, start_rx=RFR_RX, stop_substrings=STOP_SUBS)
-    final_lines = replace_blocks_in_lines(lines, blocks)
-    
-    return final_lines, bracket_map
+                # If no level from properties, try to extract from text
+                if para_level is None:
+                    num_prefix, text_level = extract_number_prefix(t)
+                    levels.append(text_level if text_level > 0 else 0)
+                else:
+                    levels.append(para_level + 1)  # ilvl is 0-indexed, we want 1-indexed
 
-
-# Example usage:
-if __name__ == "__main__":
-    # Read lines with indentation and extract bracket content
-    lines, bracket_content = read_docx_lines("your_document.docx", extract_brackets=True)
-    
-    # Print lines with preserved indentation
-    for i, line in enumerate(lines):
-        print(line)
-        
-        # If this line has bracket content, print it
-        if i in bracket_content:
-            print(f"  -> Bracket content: {bracket_content[i]}")
-    
-    # Or just print lines
-    print("\n--- Just Lines ---")
-    for line in lines:
-        print(line)
-    
-    # Or access bracket content separately
-    print("\n--- Bracket Contents ---")
-    for line_idx, contents in bracket_content.items():
-        print(f"Line {line_idx}: {contents}")
-```
-
-## Output Example:
-
-```
-4. [RFR1]: <Q4: MRMG Test 1>
-  -> Bracket content: ['Q4: MRMG Test 1']
-    a. Subtest a
-        i. Sub2test >| <Data Validation> | <For manually labeled data, is observer bias appropriately controlled...>
-  -> Bracket content: ['Data Validation', 'For manually labeled data, is observer bias appropriately controlled...']
-```
-
-## Key Features Added:
-
-1. **`extract_angle_bracket_content()`**: Extracts all content within `<>` brackets using regex
-2. **`preserve_indent_and_extract_brackets()`**: Helper to do both operations
-3. **Modified `read_docx_lines()`**: 
-   - Now returns a tuple: `(lines, bracket_map)`
-   - `bracket_map` is a dictionary mapping line index to list of bracket contents
-   - Extracts brackets from both regular paragraphs and table cells
-
-You can use it in two ways:
-- Get both lines and bracket content separately
-- Just get the lines if you set `extract_brackets=False`        try:
-            indent_inches = indent.inches
-            # Convert to spaces (8 spaces per inch, adjust as needed)
-            return int(indent_inches * 8)
-        except:
-            # Fallback: convert EMUs to inches
-            indent_value = indent / 914400
-            return int(indent_value * 8)
-    return 0
-
-
-def read_docx_lines(path: str) -> List[str]:
-    """
-    Read docx and preserve indentation as leading spaces in the text.
-    """
-    doc = Document(path)
-    lines: List[str] = []
-    
-    # Walk through document body in order
-    for child in doc.element.body.iterchildren():
-        if child.tag == qn("w:p"):  # Paragraph
-            p = Paragraph(child, doc)
-            t = norm(p.text)
-            if t:
-                # Get indentation and add as leading spaces
-                num_spaces = get_paragraph_indent(p)
-                indented_text = " " * num_spaces + t
-                lines.append(indented_text)
-        
         elif child.tag == qn("w:tbl"):  # Table
             tbl = Table(child, doc)
             for row in tbl.rows:
@@ -299,36 +174,349 @@ def read_docx_lines(path: str) -> List[str]:
                     for p in cell.paragraphs:
                         t = norm(p.text)
                         if t:
-                            # Get indentation for table cell paragraphs too
-                            num_spaces = get_paragraph_indent(p)
-                            indented_text = " " * num_spaces + t
-                            row_text.append(indented_text)
+                            row_text.append(t)
                 if row_text:
                     lines.append(" | ".join(row_text))
+                    levels.append(0)  # Tables have no level
     
-    # Group blocks (this preserves the indentation in the grouped text)
-    blocks = group_blocks_from_list(lines, start_rx=RFR_RX, stop_substrings=STOP_SUBS)
+    print("Lines with levels:")
+    for line, level in zip(lines, levels):
+        if level > 0:
+            print(f"Level {level}: {line[:80]}")
+    
+    blocks = group_blocks_from_list(lines, start_rx=RFR_RX, stop_substrings=STOP_SUBS, include_stop_line=False)
     final_lines = replace_blocks_in_lines(lines, blocks)
     
-    return final_lines
+    # Update levels after grouping
+    final_levels = []
+    i = 0
+    block_map = {start: (end, text) for start, end, text in blocks}
+    
+    while i < len(lines):
+        if i in block_map:
+            end_idx, text = block_map[i]
+            final_levels.append(levels[i])  # Keep the level of the first line in the block
+            i = end_idx + 1
+        else:
+            final_levels.append(levels[i])
+            i += 1
+
+    return final_lines, final_levels
 
 
-# Example usage:
+# ---------- patterns ----------
+REQ_ITEMS_RX = re.compile(r"^\s*Request\s+Items\s*$", re.IGNORECASE)
+RFR_RX = re.compile(r"\s*RFR\s*\d+\s*", re.IGNORECASE)
+BRACKETS_RX = re.compile(r"<\s*([^>]+?)\s*>")
+Q_KEY_RX = re.compile(r"^\s*Q\d+\s*:\s*", re.IGNORECASE)
+RESP_HDR_RX = re.compile(r"Modeling Team['']?s Response", re.IGNORECASE)
+TEST_TAG_RX = re.compile(r"^Test\s*(\w+)", re.IGNORECASE)
+STOP_SUBS = ["[Modeling Team's Response]", "[", "Modeling Team's Response"]
+
+
+def standardize_angle_brackets(line: str) -> str:
+    """
+    Standardize malformed <...> blocks.
+    """
+    line = norm(line)
+    result = []
+    open_blocks = 0
+
+    for ch in line:
+        if ch == "<":
+            if open_blocks > 0:
+                result.append(">")
+                open_blocks -= 1
+            result.append("<")
+            open_blocks += 1
+        elif ch == ">" and open_blocks > 0:
+            result.append(">")
+            open_blocks -= 1
+        else:
+            result.append(ch)
+
+    while open_blocks > 0:
+        result.append(">")
+        open_blocks -= 1
+
+    return "".join(result)
+
+
+def extract_meta_from_rfr_header(line: str) -> Tuple[str, str, str]:
+    q_key = ""
+    section = ""
+    imvp = ""
+
+    line = standardize_angle_brackets(line)
+    parts = [norm(x) for x in BRACKETS_RX.findall(line)]
+
+    for part in parts:
+        if Q_KEY_RX.match(part):
+            q_key = part
+            break
+
+    candidates = [p for p in parts if p != q_key and len(p) > 20]
+    question_parts = [p for p in candidates if p.endswith("?")]
+    
+    if question_parts:
+        imvp = max(question_parts, key=len)
+    elif candidates:
+        imvp = max(candidates, key=len)
+
+    section_candidates = [
+        p for p in parts 
+        if p != q_key 
+        and p != imvp 
+        and len(p) < 50 
+        and not p.endswith("?")
+    ]
+
+    section_keywords = ["validation", "data", "model", "performance", "documentation", "testing"]
+    for part in section_candidates:
+        if any(keyword in part.lower() for keyword in section_keywords):
+            section = part
+            break
+
+    if not section and section_candidates:
+        section = section_candidates[0]
+
+    return q_key, section, imvp
+
+
+def clean_greater_than(lines):
+    return [re.sub(r'>.*$', '', s).strip() for s in lines]
+
+
+def extract_test_tag(line: str) -> Optional[str]:
+    """Extract test tag from line"""
+    parts = [norm(x) for x in BRACKETS_RX.findall(line)]
+    for part in parts:
+        m = TEST_TAG_RX.match(part)
+        if m:
+            tag_value = m.group(1).lower()
+            return f"test{tag_value}"
+    return None
+
+
+def parse_lines_after_request_items(lines: List[str], levels: List[int]) -> List[Dict]:
+    """
+    Parse lines with level information included.
+    """
+    # start after "Request Items" if present
+    start = 0
+    for i, t in enumerate(lines):
+        if REQ_ITEMS_RX.search(t):
+            start = i + 1
+            break
+
+    L = lines[start:]
+    L_levels = levels[start:]
+
+    rows: List[Dict] = []
+    i = 0
+
+    while i < len(L):
+        line = L[i]
+        current_level = L_levels[i] if i < len(L_levels) else 0
+
+        if RFR_RX.search(line):
+            q_key, section, imvp_q = extract_meta_from_rfr_header(line)
+            test_tag = extract_test_tag(line)
+            
+            # Extract number prefix for cleaner level identification
+            num_prefix, _ = extract_number_prefix(line)
+
+            responses: List[str] = []
+            i += 1
+
+            while i < len(L) and not RFR_RX.search(L[i]):
+                cur = L[i]
+                if RESP_HDR_RX.search(cur):
+                    i += 1
+                    block: List[str] = []
+                    while (
+                        i < len(L)
+                        and not RESP_HDR_RX.search(L[i])
+                        and not RFR_RX.search(L[i])
+                    ):
+                        block.append(L[i])
+                        i += 1
+                    resp = norm(" ".join(block))
+                    m = BRACKETS_RX.fullmatch(resp)
+                    if m:
+                        resp = norm(m.group(1))
+                    if resp:
+                        responses.append(resp)
+                    continue
+                i += 1
+
+            responses = clean_greater_than(responses)
+            
+            if (imvp_q and imvp_q.strip()) or responses:
+                row = {
+                    "IMVP Question": imvp_q or "",
+                    "Section": section or "",
+                    "level": current_level,  # ADD LEVEL HERE
+                    "number_prefix": num_prefix,  # ADD NUMBER PREFIX (like "4.1")
+                    "rfr": {(q_key or "Q?"): " ".join(responses).strip()},
+                }
+                
+                if test_tag:
+                    row[test_tag] = imvp_q or ""
+                
+                rows.append(row)
+            continue
+        i += 1
+
+    return rows
+
+
+def parse_docx_to_rfr_rows(path: str) -> List[Dict]:
+    lines, levels = read_docx_lines(path)
+    return parse_lines_after_request_items(lines, levels)
+
+
+def collapse_empty_imvp_into_previous(rows: List[Dict]) -> List[Dict]:
+    out: List[Dict] = []
+    last_with_imvp_by_section: dict = {}
+
+    for r in rows:
+        imvp = (r.get("IMVP Question") or "").strip()
+        section = (r.get("Section") or "").strip()
+
+        if imvp:
+            out.append(r)
+            last_with_imvp_by_section[section] = len(out) - 1
+        else:
+            idx = last_with_imvp_by_section.get(section)
+            if idx is not None and r.get("rfr"):
+                out[idx]["rfr"].update(r["rfr"])
+
+    return out
+
+
+def merge_rows_by_imvp(rows: List[Dict]) -> List[Dict]:
+    """
+    Merge rows with identical non-empty IMVP Question.
+    Keep the minimum level when merging.
+    """
+    merged: "OrderedDict[str, Dict]" = OrderedDict()
+    
+    for r in rows:
+        imvp = (r.get("IMVP Question") or "").strip()
+        if not imvp:
+            continue
+        
+        if imvp not in merged:
+            merged[imvp] = {
+                "IMVP Question": imvp,
+                "Section": r.get("Section") or "",
+                "level": r.get("level", 0),
+                "number_prefix": r.get("number_prefix"),
+                "rfr": dict(r.get("rfr") or {})
+            }
+        else:
+            merged[imvp]["rfr"].update(r.get("rfr") or {})
+            # Keep the minimum level
+            if r.get("level", 999) < merged[imvp]["level"]:
+                merged[imvp]["level"] = r.get("level", 0)
+                merged[imvp]["number_prefix"] = r.get("number_prefix")
+            if not merged[imvp]["Section"] and (r.get("Section") or ""):
+                merged[imvp]["Section"] = r["Section"]
+
+    return list(merged.values())
+
+
+def flatten_rfr_for_csv(rows: List[Dict]) -> List[Dict]:
+    """Flatten rfr dict into separate columns for CSV."""
+    flattened = []
+    
+    for r in rows:
+        base = {
+            "IMVP Question": r.get("IMVP Question", ""),
+            "Section": r.get("Section", "N/A"),
+            "level": r.get("level", 0),  # ADD LEVEL TO CSV
+            "number_prefix": r.get("number_prefix", "")  # ADD NUMBER PREFIX
+        }
+
+        # Add test tags if present
+        for key in r:
+            if key.startswith("test"):
+                base[key] = r[key]
+
+        # Flatten rfr dict
+        rfr_dict = r.get("rfr", {})
+        for q_key, response in rfr_dict.items():
+            row_copy = base.copy()
+            row_copy["Q_Key"] = q_key
+            row_copy["Response"] = response
+            flattened.append(row_copy)
+
+    return flattened
+
+
+def convert_csv(rows: List[Dict], document_path: str) -> pd.DataFrame:
+    """Convert rows to DataFrame with metadata."""
+    file_name = os.path.basename(document_path)
+
+    flattened = flatten_rfr_for_csv(rows)
+    df = pd.DataFrame(flattened)
+    df["file_name"] = file_name
+    df["type"] = "rfr"
+
+    return df
+
+
+def save_outputs(rows: List[Dict], document_path: str, json_path: str = None, csv_path: str = None):
+    """Save both JSON and CSV outputs."""
+    base_name = os.path.splitext(os.path.basename(document_path))[0]
+
+    # Save JSON
+    if json_path is None:
+        json_path = f"{base_name}_rfr_output.json"
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(rows, f, ensure_ascii=False, indent=2)
+    print(f"✓ Saved JSON: {json_path} ({len(rows)} rows)")
+
+    # Save CSV
+    if csv_path is None:
+        csv_path = f"{base_name}_rfr_output.csv"
+    df = convert_csv(rows, document_path)
+    df.to_csv(csv_path, index=False, encoding="utf-8")
+    print(f"✓ Saved CSV: {csv_path} ({len(df)} rows)")
+
+    return json_path, csv_path
+
+
 if __name__ == "__main__":
-    lines = read_docx_lines("your_document.docx")
-    for line in lines:
-        print(line)  # This will print with preserved indentation
+    DOCX_PATH = "new_rfr_finding/sample_RFR (1).docx"
+
+    rows = parse_docx_to_rfr_rows(DOCX_PATH)
+    
+    json_file, csv_file = save_outputs(rows, DOCX_PATH)
 ```
 
-## Key Changes:
+**Key changes:**
 
-1. **Added `get_paragraph_indent()` function**: Extracts indentation from paragraphs and converts it to spaces
+1. **`get_paragraph_level()`** - Extracts numbering level from Word paragraph properties
+2. **`extract_number_prefix()`** - Extracts numbering like "4.1.1" from text and calculates level
+3. **`read_docx_lines()`** - Now returns both `lines` and `levels` lists
+4. **`parse_lines_after_request_items()`** - Takes levels as input and adds them to output
+5. **Each row now has:**
+   - `"level"`: Integer (1 for "4.", 2 for "4.1", 3 for "4.1.1")
+   - `"number_prefix"`: String ("4", "4.1", "4.1.1")
 
-2. **Modified `read_docx_lines()` function**:
-   - Gets indentation for each paragraph using `get_paragraph_indent(p)`
-   - Adds leading spaces to the text: `" " * num_spaces + t`
-   - Also handles indentation for table cell paragraphs
+**Example JSON output:**
+```json
+{
+  "IMVP Question": "For manually labeled data...",
+  "Section": "Data Validation",
+  "level": 3,
+  "number_prefix": "4.1.1",
+  "rfr": {...}
+}
+```
 
-3. **Preserved all existing logic**: The `norm()`, grouping, and replacement logic remains unchanged
-
-Now when you print the lines, they will have the same indentation as in the Word document!
+The level detection works in two ways:
+1. From Word's internal numbering properties (most reliable)
+2. By parsing the text pattern (fallback)
