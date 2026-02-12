@@ -1,4 +1,4 @@
-Here's your code with indentation preservation added to all three functions without removing the current logic:
+I understand! You want to capture content within `<>` brackets (like `<Q4: MRMG Test 1>`, `<Data Validation>`, etc.) from the document. Here's the updated code with that functionality added:
 
 ```python
 import re
@@ -109,6 +109,160 @@ def get_paragraph_indent(paragraph: Paragraph) -> int:
     indent = paragraph.paragraph_format.left_indent
     if indent and indent > 0:
         try:
+            indent_inches = indent.inches
+            # Convert to spaces (8 spaces per inch, adjust as needed)
+            return int(indent_inches * 8)
+        except:
+            # Fallback: convert EMUs to inches
+            indent_value = indent / 914400
+            return int(indent_value * 8)
+    return 0
+
+
+def extract_angle_bracket_content(text: str) -> List[str]:
+    """
+    Extract all content within <> brackets from text.
+    Returns a list of extracted content.
+    
+    Examples:
+        "<Q4: MRMG Test 1>" -> ["Q4: MRMG Test 1"]
+        "<Data Validation> | <For manually labeled data>" -> ["Data Validation", "For manually labeled data"]
+    """
+    # Pattern to match content within < >
+    pattern = r'<([^>]+)>'
+    matches = re.findall(pattern, text)
+    return [match.strip() for match in matches]
+
+
+def preserve_indent_and_extract_brackets(text: str, indent_spaces: int) -> Tuple[str, List[str]]:
+    """
+    Given a text line with indentation, preserve the indent and extract bracket content.
+    
+    Returns:
+        Tuple of (indented_text, list_of_bracket_contents)
+    """
+    indented_text = " " * indent_spaces + text
+    bracket_contents = extract_angle_bracket_content(text)
+    return indented_text, bracket_contents
+
+
+def read_docx_lines(path: str, extract_brackets: bool = True) -> Tuple[List[str], Dict[int, List[str]]]:
+    """
+    Read docx and preserve indentation as leading spaces in the text.
+    
+    Args:
+        path: Path to the docx file
+        extract_brackets: If True, also extract content within <> brackets
+    
+    Returns:
+        Tuple of (lines_with_indentation, dict mapping line_index to bracket_contents)
+    """
+    doc = Document(path)
+    lines: List[str] = []
+    bracket_map: Dict[int, List[str]] = {}
+    line_idx = 0
+    
+    # Walk through document body in order
+    for child in doc.element.body.iterchildren():
+        if child.tag == qn("w:p"):  # Paragraph
+            p = Paragraph(child, doc)
+            t = norm(p.text)
+            if t:
+                # Get indentation and add as leading spaces
+                num_spaces = get_paragraph_indent(p)
+                indented_text = " " * num_spaces + t
+                lines.append(indented_text)
+                
+                # Extract bracket content if requested
+                if extract_brackets:
+                    bracket_contents = extract_angle_bracket_content(t)
+                    if bracket_contents:
+                        bracket_map[line_idx] = bracket_contents
+                
+                line_idx += 1
+        
+        elif child.tag == qn("w:tbl"):  # Table
+            tbl = Table(child, doc)
+            for row in tbl.rows:
+                row_text = []
+                row_brackets = []
+                for cell in row.cells:
+                    for p in cell.paragraphs:
+                        t = norm(p.text)
+                        if t:
+                            # Get indentation for table cell paragraphs too
+                            num_spaces = get_paragraph_indent(p)
+                            indented_text = " " * num_spaces + t
+                            row_text.append(indented_text)
+                            
+                            # Extract bracket content
+                            if extract_brackets:
+                                bracket_contents = extract_angle_bracket_content(t)
+                                if bracket_contents:
+                                    row_brackets.extend(bracket_contents)
+                
+                if row_text:
+                    combined_row = " | ".join(row_text)
+                    lines.append(combined_row)
+                    
+                    if row_brackets:
+                        bracket_map[line_idx] = row_brackets
+                    
+                    line_idx += 1
+    
+    # Group blocks (this preserves the indentation in the grouped text)
+    blocks = group_blocks_from_list(lines, start_rx=RFR_RX, stop_substrings=STOP_SUBS)
+    final_lines = replace_blocks_in_lines(lines, blocks)
+    
+    return final_lines, bracket_map
+
+
+# Example usage:
+if __name__ == "__main__":
+    # Read lines with indentation and extract bracket content
+    lines, bracket_content = read_docx_lines("your_document.docx", extract_brackets=True)
+    
+    # Print lines with preserved indentation
+    for i, line in enumerate(lines):
+        print(line)
+        
+        # If this line has bracket content, print it
+        if i in bracket_content:
+            print(f"  -> Bracket content: {bracket_content[i]}")
+    
+    # Or just print lines
+    print("\n--- Just Lines ---")
+    for line in lines:
+        print(line)
+    
+    # Or access bracket content separately
+    print("\n--- Bracket Contents ---")
+    for line_idx, contents in bracket_content.items():
+        print(f"Line {line_idx}: {contents}")
+```
+
+## Output Example:
+
+```
+4. [RFR1]: <Q4: MRMG Test 1>
+  -> Bracket content: ['Q4: MRMG Test 1']
+    a. Subtest a
+        i. Sub2test >| <Data Validation> | <For manually labeled data, is observer bias appropriately controlled...>
+  -> Bracket content: ['Data Validation', 'For manually labeled data, is observer bias appropriately controlled...']
+```
+
+## Key Features Added:
+
+1. **`extract_angle_bracket_content()`**: Extracts all content within `<>` brackets using regex
+2. **`preserve_indent_and_extract_brackets()`**: Helper to do both operations
+3. **Modified `read_docx_lines()`**: 
+   - Now returns a tuple: `(lines, bracket_map)`
+   - `bracket_map` is a dictionary mapping line index to list of bracket contents
+   - Extracts brackets from both regular paragraphs and table cells
+
+You can use it in two ways:
+- Get both lines and bracket content separately
+- Just get the lines if you set `extract_brackets=False`        try:
             indent_inches = indent.inches
             # Convert to spaces (8 spaces per inch, adjust as needed)
             return int(indent_inches * 8)
