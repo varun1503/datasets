@@ -1,712 +1,234 @@
-Addressed and fixed bugs originating from MRMG.
+"""
+Optimized move_cursor implementation with robust section matching.
 
-Conducted extensive testing for E1 and E2 across a large user base and resolved identified issues.
+Key improvements:
+  1. Hard section-number gate  — section numbers must match exactly when both present
+  2. Multi-signal scoring      — combines token_set_ratio + partial_ratio + exact bonus
+  3. Configurable thresholds   — MIN_THRESHOLD and SECTION_BOOST are tunable params
+  4. Ambiguity guard           — rejects match when top-2 scores are too close (prevents
+                                 "Assumptions and Limitations" style false picks)
+  5. Early-exit optimisation   — perfect score short-circuits the loop
+  6. Logging / debug support   — pass debug=True to trace scoring decisions
+  7. No retrieval contract     — returns '' (not None) so callers never need null-checks
+"""
 
-Refactored the annotation module to improve the validation report.
+import logging
+from dataclasses import dataclass, field
+from typing import Optional
 
-Refactored the RFR modules and integrated them into the current system.
+from rapidfuzz import fuzz  # drop-in for fuzzywuzzy, 10-40x faster
 
-Implemented new requirements introduced by MRMG for RFR and findings.
-
-Refactored the MRMG assessment module to support the new findings and RFR.    imvp = ""
-
-    line = standardize_angle_brackets(line)
-    parts = [norm(x) for x in BRACKETS_RX.findall(line)]
-
-    for part in parts:
-        if Q_KEY_RX.match(part):
-            q_key = part
-            break
-
-    candidates = [p for p in parts if p != q_key and len(p) > 20]
-    question_parts = [p for p in candidates if p.endswith("?")]
-    
-    if question_parts:
-        imvp = max(question_parts, key=len)
-    elif candidates:
-        imvp = max(candidates, key=len)
-
-    section_candidates = [
-        p for p in parts 
-        if p != q_key 
-        and p != imvp 
-        and len(p) < 50 
-        and not p.endswith("?")
-    ]
-
-    section_keywords = ["validation", "data", "model", "performance", "documentation", "testing"]
-    for part in section_candidates:
-        if any(keyword in part.lower() for keyword in section_keywords):
-            section = part
-            break
-
-    if not section and section_candidates:
-        section = section_candidates[0]
-
-    return q_key, section, imvp
+logger = logging.getLogger(__name__)
 
 
-def clean_greater_than(lines):
-    return [re.sub(r'>.*$', '', s).strip() for s in lines]
+# ---------------------------------------------------------------------------
+# Tunable configuration  (can be loaded from a config file / env vars so that
+# the MRMG team can adjust thresholds without touching code)
+# ---------------------------------------------------------------------------
+@dataclass
+class MatchConfig:
+    # Minimum combined score to accept a match
+    min_threshold: float = 75.0
+
+    # How much extra weight to give when section numbers match exactly
+    section_boost: float = 15.0
+
+    # If the top-2 candidates are within this band, treat as ambiguous → no retrieval
+    ambiguity_margin: float = 5.0
+
+    # Weights for the three fuzz signals
+    weight_ratio: float = 0.4
+    weight_token_set: float = 0.4
+    weight_partial: float = 0.2
+
+    # Outline levels to skip (non-heading paragraphs in python-docx/lxml world)
+    skip_levels: tuple = (-1, 9)
 
 
-def extract_test_tag(line: str) -> Optional[str]:
-    """Extract test tag from line"""
-    parts = [norm(x) for x in BRACKETS_RX.findall(line)]
-    for part in parts:
-        m = TEST_TAG_RX.match(part)
-        if m:
-            tag_value = m.group(1).lower()
-            return f"test{tag_value}"
-    return None
+_DEFAULT_CONFIG = MatchConfig()
 
 
-def parse_lines_after_request_items(lines: List[str]) -> List[Dict]:
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+def _combined_score(a: str, b: str, cfg: MatchConfig) -> float:
     """
-    Parse lines and extract RFR data with levels.
-    Now reads levels directly from the document.
+    Weighted blend of three fuzz metrics for more stable title matching.
+
+    - fuzz.ratio           : character-level similarity (good for short titles)
+    - fuzz.token_set_ratio : order-insensitive, handles reworded titles well
+    - fuzz.partial_ratio   : catches one title being a substring of the other
     """
-    # Get lines with levels from document
-    # We need to read the document again to get levels aligned with the grouped lines
-    # This is a workaround - ideally we'd pass levels through grouping
-    
-    # start after "Request Items" if present
-    start = 0
-    for i, t in enumerate(lines):
-        if REQ_ITEMS_RX.search(t):
-            start = i + 1
-            break
+    r  = fuzz.ratio(a, b)
+    ts = fuzz.token_set_ratio(a, b)
+    pr = fuzz.partial_ratio(a, b)
+    return (
+        cfg.weight_ratio    * r  +
+        cfg.weight_token_set * ts +
+        cfg.weight_partial  * pr
+    )
 
-    L = lines[start:]
 
-    rows: List[Dict] = []
-    i = 0
+@dataclass
+class _Candidate:
+    node: object
+    raw_text: str
+    score: float
 
-    while i < len(L):
-        line = L[i]
-        
-        # Extract level from the line itself
-        num_prefix, current_level = extract_number_prefix(line)
 
-        if RFR_RX.search(line):
-            print(f"\n=== Processing RFR at line {i} ===")
-            print(f"Line: {line[:150]}")
-            
-            q_key, section, imvp_q = extract_meta_from_rfr_header(line)
-            test_tag = extract_test_tag(line)
-            
-            print(f"Q_Key: {q_key}")
-            print(f"Section: {section}")
-            print(f"IMVP: {imvp_q[:100] if imvp_q else 'None'}")
-            print(f"Level: {current_level}, Prefix: {num_prefix}")
+# ---------------------------------------------------------------------------
+# Main method  (drop this into your class, replacing the old move_cursor)
+# ---------------------------------------------------------------------------
+def move_cursor(
+    self,
+    to: str = '',
+    *,
+    cfg: MatchConfig = _DEFAULT_CONFIG,
+    debug: bool = False,
+) -> str:
+    """
+    Move the internal cursor to the paragraph in the Word document that best
+    matches *to* (a section heading string, optionally prefixed by a section
+    number such as "3.2 Business problem solved by the model").
 
-            responses: List[str] = []
-            i += 1
+    Returns the matched paragraph's text, or '' if no confident match found.
+    """
+    self._cursor = None
 
-            # Collect all lines until next RFR
-            while i < len(L) and not RFR_RX.search(L[i]):
-                cur = L[i]
-                print(f"  Checking line {i}: {cur[:80]}")
-                
-                if RESP_HDR_RX.search(cur):
-                    print(f"  -> Found response header at line {i}")
-                    i += 1
-                    block: List[str] = []
-                    
-                    # Collect response lines
-                    while (
-                        i < len(L)
-                        and not RESP_HDR_RX.search(L[i])
-                        and not RFR_RX.search(L[i])
-                    ):
-                        print(f"    Adding to response block: {L[i][:80]}")
-                        block.append(L[i])
-                        i += 1
-                    
-                    resp = norm(" ".join(block))
-                    print(f"  -> Response block: {resp[:100]}")
-                    
-                    # Unwrap if entire response is in brackets
-                    m = BRACKETS_RX.fullmatch(resp)
-                    if m:
-                        resp = norm(m.group(1))
-                        print(f"  -> Unwrapped: {resp[:100]}")
-                    
-                    if resp:
-                        responses.append(resp)
-                else:
-                    i += 1
+    if not to or not to.strip():
+        return ''
 
-            responses = clean_greater_than(responses)
-            print(f"Final responses ({len(responses)}): {responses}")
-            
-            if (imvp_q and imvp_q.strip()) or responses:
-                row = {
-                    "IMVP Question": imvp_q or "",
-                    "Section": section or "",
-                    "level": current_level,
-                    "number_prefix": num_prefix,
-                    "rfr": {(q_key or "Q?"): " ".join(responses).strip()},
-                }
-                
-                if test_tag:
-                    row[test_tag] = imvp_q or ""
-                
-                print(f"Created row: {json.dumps(row, indent=2)}")
-                rows.append(row)
+    input_section: str = extract_section_number(to)          # e.g. "3.2"
+    input_title: str   = remove_section_number(to).lower().strip()
+
+    if debug:
+        logger.debug("move_cursor seeking: section=%r  title=%r", input_section, input_title)
+
+    candidates: list[_Candidate] = []
+
+    for xx in self._doc.xpath('.//w:body/w:p', namespaces=self._doc.nsmap):
+        raw_text = get_text(xx, self._doc.nsmap)
+        if not raw_text or not raw_text.strip():
             continue
-        
-        i += 1
 
-    return rows
-
-
-def parse_docx_to_rfr_rows(path: str) -> List[Dict]:
-    lines = read_docx_lines(path)
-    return parse_lines_after_request_items(lines)
-
-
-def collapse_empty_imvp_into_previous(rows: List[Dict]) -> List[Dict]:
-    out: List[Dict] = []
-    last_with_imvp_by_section: dict = {}
-
-    for r in rows:
-        imvp = (r.get("IMVP Question") or "").strip()
-        section = (r.get("Section") or "").strip()
-
-        if imvp:
-            out.append(r)
-            last_with_imvp_by_section[section] = len(out) - 1
-        else:
-            idx = last_with_imvp_by_section.get(section)
-            if idx is not None and r.get("rfr"):
-                out[idx]["rfr"].update(r["rfr"])
-
-    return out
-
-
-def merge_rows_by_imvp(rows: List[Dict]) -> List[Dict]:
-    """
-    Merge rows with identical non-empty IMVP Question.
-    Keep the minimum level when merging.
-    """
-    merged: "OrderedDict[str, Dict]" = OrderedDict()
-    
-    for r in rows:
-        imvp = (r.get("IMVP Question") or "").strip()
-        if not imvp:
+        olvl = self.get_outline_level(xx)
+        if olvl in cfg.skip_levels:
             continue
-        
-        if imvp not in merged:
-            merged[imvp] = {
-                "IMVP Question": imvp,
-                "Section": r.get("Section") or "",
-                "level": r.get("level", 0),
-                "number_prefix": r.get("number_prefix"),
-                "rfr": dict(r.get("rfr") or {})
-            }
-        else:
-            merged[imvp]["rfr"].update(r.get("rfr") or {})
-            # Keep the minimum level
-            if r.get("level", 999) < merged[imvp]["level"]:
-                merged[imvp]["level"] = r.get("level", 0)
-                merged[imvp]["number_prefix"] = r.get("number_prefix")
-            if not merged[imvp]["Section"] and (r.get("Section") or ""):
-                merged[imvp]["Section"] = r["Section"]
 
-    return list(merged.values())
+        doc_section: str = extract_section_number(raw_text)
+        doc_title: str   = remove_section_number(raw_text).lower().strip()
 
+        if not doc_title:
+            continue
 
-def flatten_rfr_for_csv(rows: List[Dict]) -> List[Dict]:
-    """Flatten rfr dict into separate columns for CSV."""
-    flattened = []
-    
-    for r in rows:
-        base = {
-            "IMVP Question": r.get("IMVP Question", ""),
-            "Section": r.get("Section", "N/A"),
-            "level": r.get("level", 0),
-            "number_prefix": r.get("number_prefix", "")
-        }
+        # ------------------------------------------------------------------
+        # Gate 1 — hard section-number filter
+        #   • Both sides have a number  → must match exactly, otherwise skip.
+        #   • Input has a number, doc doesn't → skip (avoids matching bare
+        #     headings like "Assumptions and Limitations" without a number).
+        # ------------------------------------------------------------------
+        if input_section:
+            if not doc_section:
+                continue                          # doc paragraph has no number
+            if doc_section != input_section:
+                continue                          # numbers present but differ
 
-        # Add test tags if present
-        for key in r:
-            if key.startswith("test"):
-                base[key] = r[key]
+        # ------------------------------------------------------------------
+        # Gate 2 — title must be non-trivially populated
+        # ------------------------------------------------------------------
+        if len(doc_title) < 3:
+            continue
 
-        # Flatten rfr dict
-        rfr_dict = r.get("rfr", {})
-        for q_key, response in rfr_dict.items():
-            row_copy = base.copy()
-            row_copy["Q_Key"] = q_key
-            row_copy["Response"] = response
-            flattened.append(row_copy)
+        # ------------------------------------------------------------------
+        # Scoring — weighted multi-signal fuzzy match
+        # ------------------------------------------------------------------
+        score = _combined_score(input_title, doc_title, cfg)
 
-    return flattened
+        # Small bonus when section numbers agree (already gated above, but
+        # this rewards exact-number matches vs. cases where input has no
+        # section number and we fall through)
+        if input_section and doc_section == input_section:
+            score += cfg.section_boost
 
+        # Cap at 100 for cleanliness
+        score = min(score, 100.0)
 
-def convert_csv(rows: List[Dict], document_path: str) -> pd.DataFrame:
-    """Convert rows to DataFrame with metadata."""
-    file_name = os.path.basename(document_path)
+        if debug:
+            logger.debug(
+                "  candidate  score=%.1f  section=%r  title=%r",
+                score, doc_section, doc_title,
+            )
 
-    flattened = flatten_rfr_for_csv(rows)
-    df = pd.DataFrame(flattened)
-    df["file_name"] = file_name
-    df["type"] = "rfr"
+        candidates.append(_Candidate(node=xx, raw_text=raw_text, score=score))
 
-    return df
-
-
-def save_outputs(rows: List[Dict], document_path: str, json_path: str = None, csv_path: str = None):
-    """Save both JSON and CSV outputs."""
-    base_name = os.path.splitext(os.path.basename(document_path))[0]
-
-    # Save JSON
-    if json_path is None:
-        json_path = f"{base_name}_rfr_output.json"
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(rows, f, ensure_ascii=False, indent=2)
-    print(f"✓ Saved JSON: {json_path} ({len(rows)} rows)")
-
-    # Save CSV
-    if csv_path is None:
-        csv_path = f"{base_name}_rfr_output.csv"
-    df = convert_csv(rows, document_path)
-    df.to_csv(csv_path, index=False, encoding="utf-8")
-    print(f"✓ Saved CSV: {csv_path} ({len(df)} rows)")
-
-    return json_path, csv_file
-
-
-if __name__ == "__main__":
-    DOCX_PATH = "new_rfr_finding/sample_RFR (1).docx"
-
-    rows = parse_docx_to_rfr_rows(DOCX_PATH)
-    
-    json_file, csv_file = save_outputs(rows, DOCX_PATH)
-```
-
-The key changes:
-
-1. **Removed the `levels` parameter** from `parse_lines_after_request_items` - instead, it extracts the level directly from each line using `extract_number_prefix()`
-2. **Added extensive debug printing** to see exactly what's happening at each step
-3. **Kept all the original logic intact** - just added level extraction
-
-The debug output will show you:
-- Which lines are being processed
-- When response headers are found
-- What responses are being collected
-- The final row structure
-
-Run this and share the debug output so we can see where the responses are getting lost!    """
-    if p._element.pPr is not None:
-        numPr = p._element.pPr.numPr
-        if numPr is not None:
-            ilvl = numPr.ilvl
-            if ilvl is not None:
-                return int(ilvl.val)
-    return None
-
-
-def extract_number_prefix(text: str) -> Tuple[Optional[str], int]:
-    """
-    Extract numbering prefix like '4.', '4.1', '4.1.1' from text.
-    Returns (number_string, level) where level is count of dots + 1.
-    Examples:
-        '4.' -> ('4', 1)
-        '4.1' -> ('4.1', 2)
-        '4.1.1' -> ('4.1.1', 3)
-    """
-    # Match patterns like: 4. or 4.1 or 4.1.1 at the start
-    pattern = r'^(\d+(?:\.\d+)*)\.'
-    match = re.match(pattern, text.strip())
-    
-    if match:
-        num_str = match.group(1)
-        level = num_str.count('.') + 1
-        return num_str, level
-    
-    return None, 0
-
-
-def read_docx_lines(path: str) -> Tuple[List[str], List[int]]:
-    """
-    Read docx and return both lines and their corresponding levels.
-    Returns: (lines, levels) where levels[i] is the level of lines[i]
-    """
-    doc = Document(path)
-    lines: List[str] = []
-    levels: List[int] = []
-
-    # Walk through document body in order
-    for child in doc.element.body.iterchildren():
-        if child.tag == qn("w:p"):  # Paragraph
-            p = Paragraph(child, doc)
-            t = norm(p.text)
-            if t:
-                lines.append(t)
-                
-                # Try to get level from paragraph properties
-                para_level = get_paragraph_level(p)
-                
-                # If no level from properties, try to extract from text
-                if para_level is None:
-                    num_prefix, text_level = extract_number_prefix(t)
-                    levels.append(text_level if text_level > 0 else 0)
-                else:
-                    levels.append(para_level + 1)  # ilvl is 0-indexed, we want 1-indexed
-
-        elif child.tag == qn("w:tbl"):  # Table
-            tbl = Table(child, doc)
-            for row in tbl.rows:
-                row_text = []
-                for cell in row.cells:
-                    for p in cell.paragraphs:
-                        t = norm(p.text)
-                        if t:
-                            row_text.append(t)
-                if row_text:
-                    lines.append(" | ".join(row_text))
-                    levels.append(0)  # Tables have no level
-    
-    print("Lines with levels:")
-    for line, level in zip(lines, levels):
-        if level > 0:
-            print(f"Level {level}: {line[:80]}")
-    
-    blocks = group_blocks_from_list(lines, start_rx=RFR_RX, stop_substrings=STOP_SUBS, include_stop_line=False)
-    final_lines = replace_blocks_in_lines(lines, blocks)
-    
-    # Update levels after grouping
-    final_levels = []
-    i = 0
-    block_map = {start: (end, text) for start, end, text in blocks}
-    
-    while i < len(lines):
-        if i in block_map:
-            end_idx, text = block_map[i]
-            final_levels.append(levels[i])  # Keep the level of the first line in the block
-            i = end_idx + 1
-        else:
-            final_levels.append(levels[i])
-            i += 1
-
-    return final_lines, final_levels
-
-
-# ---------- patterns ----------
-REQ_ITEMS_RX = re.compile(r"^\s*Request\s+Items\s*$", re.IGNORECASE)
-RFR_RX = re.compile(r"\s*RFR\s*\d+\s*", re.IGNORECASE)
-BRACKETS_RX = re.compile(r"<\s*([^>]+?)\s*>")
-Q_KEY_RX = re.compile(r"^\s*Q\d+\s*:\s*", re.IGNORECASE)
-RESP_HDR_RX = re.compile(r"Modeling Team['']?s Response", re.IGNORECASE)
-TEST_TAG_RX = re.compile(r"^Test\s*(\w+)", re.IGNORECASE)
-STOP_SUBS = ["[Modeling Team's Response]", "[", "Modeling Team's Response"]
-
-
-def standardize_angle_brackets(line: str) -> str:
-    """
-    Standardize malformed <...> blocks.
-    """
-    line = norm(line)
-    result = []
-    open_blocks = 0
-
-    for ch in line:
-        if ch == "<":
-            if open_blocks > 0:
-                result.append(">")
-                open_blocks -= 1
-            result.append("<")
-            open_blocks += 1
-        elif ch == ">" and open_blocks > 0:
-            result.append(">")
-            open_blocks -= 1
-        else:
-            result.append(ch)
-
-    while open_blocks > 0:
-        result.append(">")
-        open_blocks -= 1
-
-    return "".join(result)
-
-
-def extract_meta_from_rfr_header(line: str) -> Tuple[str, str, str]:
-    q_key = ""
-    section = ""
-    imvp = ""
-
-    line = standardize_angle_brackets(line)
-    parts = [norm(x) for x in BRACKETS_RX.findall(line)]
-
-    for part in parts:
-        if Q_KEY_RX.match(part):
-            q_key = part
+        # Early exit on perfect match
+        if score >= 100.0:
             break
 
-    candidates = [p for p in parts if p != q_key and len(p) > 20]
-    question_parts = [p for p in candidates if p.endswith("?")]
-    
-    if question_parts:
-        imvp = max(question_parts, key=len)
-    elif candidates:
-        imvp = max(candidates, key=len)
+    if not candidates:
+        if debug:
+            logger.debug("  → no candidates found, returning ''")
+        return ''
 
-    section_candidates = [
-        p for p in parts 
-        if p != q_key 
-        and p != imvp 
-        and len(p) < 50 
-        and not p.endswith("?")
-    ]
+    # Sort descending by score
+    candidates.sort(key=lambda c: c.score, reverse=True)
+    best = candidates[0]
 
-    section_keywords = ["validation", "data", "model", "performance", "documentation", "testing"]
-    for part in section_candidates:
-        if any(keyword in part.lower() for keyword in section_keywords):
-            section = part
-            break
+    # ------------------------------------------------------------------
+    # Ambiguity guard — if 2nd-best is within `ambiguity_margin` of best,
+    # we cannot be confident; return no-retrieval rather than guess wrong.
+    # This specifically handles generic titles like "Assumptions and
+    # Limitations" appearing in multiple sections.
+    # ------------------------------------------------------------------
+    if len(candidates) > 1:
+        second_best = candidates[1]
+        if (best.score - second_best.score) < cfg.ambiguity_margin:
+            if debug:
+                logger.debug(
+                    "  → ambiguous match (best=%.1f  2nd=%.1f  margin=%.1f), returning ''",
+                    best.score, second_best.score, cfg.ambiguity_margin,
+                )
+            return ''
 
-    if not section and section_candidates:
-        section = section_candidates[0]
+    # ------------------------------------------------------------------
+    # Final threshold check
+    # ------------------------------------------------------------------
+    if best.score < cfg.min_threshold:
+        if debug:
+            logger.debug(
+                "  → best score %.1f below threshold %.1f, returning ''",
+                best.score, cfg.min_threshold,
+            )
+        return ''
 
-    return q_key, section, imvp
+    if debug:
+        logger.debug(
+            "  → matched  score=%.1f  text=%r",
+            best.score, best.raw_text,
+        )
 
-
-def clean_greater_than(lines):
-    return [re.sub(r'>.*$', '', s).strip() for s in lines]
-
-
-def extract_test_tag(line: str) -> Optional[str]:
-    """Extract test tag from line"""
-    parts = [norm(x) for x in BRACKETS_RX.findall(line)]
-    for part in parts:
-        m = TEST_TAG_RX.match(part)
-        if m:
-            tag_value = m.group(1).lower()
-            return f"test{tag_value}"
-    return None
-
-
-def parse_lines_after_request_items(lines: List[str], levels: List[int]) -> List[Dict]:
-    """
-    Parse lines with level information included.
-    """
-    # start after "Request Items" if present
-    start = 0
-    for i, t in enumerate(lines):
-        if REQ_ITEMS_RX.search(t):
-            start = i + 1
-            break
-
-    L = lines[start:]
-    L_levels = levels[start:]
-
-    rows: List[Dict] = []
-    i = 0
-
-    while i < len(L):
-        line = L[i]
-        current_level = L_levels[i] if i < len(L_levels) else 0
-
-        if RFR_RX.search(line):
-            q_key, section, imvp_q = extract_meta_from_rfr_header(line)
-            test_tag = extract_test_tag(line)
-            
-            # Extract number prefix for cleaner level identification
-            num_prefix, _ = extract_number_prefix(line)
-
-            responses: List[str] = []
-            i += 1
-
-            while i < len(L) and not RFR_RX.search(L[i]):
-                cur = L[i]
-                if RESP_HDR_RX.search(cur):
-                    i += 1
-                    block: List[str] = []
-                    while (
-                        i < len(L)
-                        and not RESP_HDR_RX.search(L[i])
-                        and not RFR_RX.search(L[i])
-                    ):
-                        block.append(L[i])
-                        i += 1
-                    resp = norm(" ".join(block))
-                    m = BRACKETS_RX.fullmatch(resp)
-                    if m:
-                        resp = norm(m.group(1))
-                    if resp:
-                        responses.append(resp)
-                    continue
-                i += 1
-
-            responses = clean_greater_than(responses)
-            
-            if (imvp_q and imvp_q.strip()) or responses:
-                row = {
-                    "IMVP Question": imvp_q or "",
-                    "Section": section or "",
-                    "level": current_level,  # ADD LEVEL HERE
-                    "number_prefix": num_prefix,  # ADD NUMBER PREFIX (like "4.1")
-                    "rfr": {(q_key or "Q?"): " ".join(responses).strip()},
-                }
-                
-                if test_tag:
-                    row[test_tag] = imvp_q or ""
-                
-                rows.append(row)
-            continue
-        i += 1
-
-    return rows
+    self._cursor = best.node
+    return get_text(best.node, self._doc.nsmap)
 
 
-def parse_docx_to_rfr_rows(path: str) -> List[Dict]:
-    lines, levels = read_docx_lines(path)
-    return parse_lines_after_request_items(lines, levels)
-
-
-def collapse_empty_imvp_into_previous(rows: List[Dict]) -> List[Dict]:
-    out: List[Dict] = []
-    last_with_imvp_by_section: dict = {}
-
-    for r in rows:
-        imvp = (r.get("IMVP Question") or "").strip()
-        section = (r.get("Section") or "").strip()
-
-        if imvp:
-            out.append(r)
-            last_with_imvp_by_section[section] = len(out) - 1
-        else:
-            idx = last_with_imvp_by_section.get(section)
-            if idx is not None and r.get("rfr"):
-                out[idx]["rfr"].update(r["rfr"])
-
-    return out
-
-
-def merge_rows_by_imvp(rows: List[Dict]) -> List[Dict]:
-    """
-    Merge rows with identical non-empty IMVP Question.
-    Keep the minimum level when merging.
-    """
-    merged: "OrderedDict[str, Dict]" = OrderedDict()
-    
-    for r in rows:
-        imvp = (r.get("IMVP Question") or "").strip()
-        if not imvp:
-            continue
-        
-        if imvp not in merged:
-            merged[imvp] = {
-                "IMVP Question": imvp,
-                "Section": r.get("Section") or "",
-                "level": r.get("level", 0),
-                "number_prefix": r.get("number_prefix"),
-                "rfr": dict(r.get("rfr") or {})
-            }
-        else:
-            merged[imvp]["rfr"].update(r.get("rfr") or {})
-            # Keep the minimum level
-            if r.get("level", 999) < merged[imvp]["level"]:
-                merged[imvp]["level"] = r.get("level", 0)
-                merged[imvp]["number_prefix"] = r.get("number_prefix")
-            if not merged[imvp]["Section"] and (r.get("Section") or ""):
-                merged[imvp]["Section"] = r["Section"]
-
-    return list(merged.values())
-
-
-def flatten_rfr_for_csv(rows: List[Dict]) -> List[Dict]:
-    """Flatten rfr dict into separate columns for CSV."""
-    flattened = []
-    
-    for r in rows:
-        base = {
-            "IMVP Question": r.get("IMVP Question", ""),
-            "Section": r.get("Section", "N/A"),
-            "level": r.get("level", 0),  # ADD LEVEL TO CSV
-            "number_prefix": r.get("number_prefix", "")  # ADD NUMBER PREFIX
-        }
-
-        # Add test tags if present
-        for key in r:
-            if key.startswith("test"):
-                base[key] = r[key]
-
-        # Flatten rfr dict
-        rfr_dict = r.get("rfr", {})
-        for q_key, response in rfr_dict.items():
-            row_copy = base.copy()
-            row_copy["Q_Key"] = q_key
-            row_copy["Response"] = response
-            flattened.append(row_copy)
-
-    return flattened
-
-
-def convert_csv(rows: List[Dict], document_path: str) -> pd.DataFrame:
-    """Convert rows to DataFrame with metadata."""
-    file_name = os.path.basename(document_path)
-
-    flattened = flatten_rfr_for_csv(rows)
-    df = pd.DataFrame(flattened)
-    df["file_name"] = file_name
-    df["type"] = "rfr"
-
-    return df
-
-
-def save_outputs(rows: List[Dict], document_path: str, json_path: str = None, csv_path: str = None):
-    """Save both JSON and CSV outputs."""
-    base_name = os.path.splitext(os.path.basename(document_path))[0]
-
-    # Save JSON
-    if json_path is None:
-        json_path = f"{base_name}_rfr_output.json"
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(rows, f, ensure_ascii=False, indent=2)
-    print(f"✓ Saved JSON: {json_path} ({len(rows)} rows)")
-
-    # Save CSV
-    if csv_path is None:
-        csv_path = f"{base_name}_rfr_output.csv"
-    df = convert_csv(rows, document_path)
-    df.to_csv(csv_path, index=False, encoding="utf-8")
-    print(f"✓ Saved CSV: {csv_path} ({len(df)} rows)")
-
-    return json_path, csv_path
-
-
-if __name__ == "__main__":
-    DOCX_PATH = "new_rfr_finding/sample_RFR (1).docx"
-
-    rows = parse_docx_to_rfr_rows(DOCX_PATH)
-    
-    json_file, csv_file = save_outputs(rows, DOCX_PATH)
-```
-
-**Key changes:**
-
-1. **`get_paragraph_level()`** - Extracts numbering level from Word paragraph properties
-2. **`extract_number_prefix()`** - Extracts numbering like "4.1.1" from text and calculates level
-3. **`read_docx_lines()`** - Now returns both `lines` and `levels` lists
-4. **`parse_lines_after_request_items()`** - Takes levels as input and adds them to output
-5. **Each row now has:**
-   - `"level"`: Integer (1 for "4.", 2 for "4.1", 3 for "4.1.1")
-   - `"number_prefix"`: String ("4", "4.1", "4.1.1")
-
-**Example JSON output:**
-```json
-{
-  "IMVP Question": "For manually labeled data...",
-  "Section": "Data Validation",
-  "level": 3,
-  "number_prefix": "4.1.1",
-  "rfr": {...}
-}
-```
-
-The level detection works in two ways:
-1. From Word's internal numbering properties (most reliable)
-2. By parsing the text pattern (fallback)
+# ---------------------------------------------------------------------------
+# Example: how to make thresholds MRMG-configurable without code changes
+# ---------------------------------------------------------------------------
+# In your config.yaml / .env:
+#
+#   MATCH_MIN_THRESHOLD=75
+#   MATCH_SECTION_BOOST=15
+#   MATCH_AMBIGUITY_MARGIN=5
+#
+# Then at startup:
+#
+#   import os
+#   MATCH_CONFIG = MatchConfig(
+#       min_threshold     = float(os.getenv("MATCH_MIN_THRESHOLD",     75)),
+#       section_boost     = float(os.getenv("MATCH_SECTION_BOOST",     15)),
+#       ambiguity_margin  = float(os.getenv("MATCH_AMBIGUITY_MARGIN",   5)),
+#   )
+#
+# And pass it in every call:
+#   self.move_cursor(to=heading, cfg=MATCH_CONFIG)
+# ---------------------------------------------------------------------------
