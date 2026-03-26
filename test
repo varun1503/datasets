@@ -1,40 +1,34 @@
-You want green output in Jupyter notebooks running in VS Code. Here are two ways:
-
-**Option 1: Add this to a cell at the top of your notebook**
-
 ```python
 import logging
 
 class GreenFormatter(logging.Formatter):
-    GREEN = "\033[92m"
-    RESET = "\033[0m"
     
+    FORMATS = {
+        logging.DEBUG:    f"\033[92m%(levelname)s:%(name)s:%(message)s\033[0m",
+        logging.INFO:     f"\033[92m\033[1m%(levelname)s:%(name)s:%(message)s\033[0m",
+        logging.WARNING:  f"\033[42m\033[1m%(levelname)s:%(name)s:%(message)s\033[0m",
+        logging.ERROR:    f"\033[42m\033[1m%(levelname)s:%(name)s:%(message)s\033[0m",
+        logging.CRITICAL: f"\033[42m\033[1m\033[4m%(levelname)s:%(name)s:%(message)s\033[0m",
+    }
+
     def format(self, record):
-        msg = super().format(record)
-        return f"{self.GREEN}{msg}{self.RESET}"
+        fmt = self.FORMATS.get(record.levelno, self.FORMATS[logging.DEBUG])
+        formatter = logging.Formatter(fmt)
+        return formatter.format(record)
 
 # Apply to root logger
 handler = logging.StreamHandler()
 handler.setFormatter(GreenFormatter())
 logging.root.handlers = [handler]
-logging.root.setLevel(logging.WARNING)
+logging.root.setLevel(logging.DEBUG)
 ```
 
-**Option 2: Also make `print()` output green**
+Updated summary:
 
-```python
-import builtins
-
-GREEN = "\033[92m"
-RESET = "\033[0m"
-
-_original_print = builtins.print
-
-def green_print(*args, **kwargs):
-    green_args = [f"{GREEN}{a}{RESET}" for a in args]
-    _original_print(*green_args, **kwargs)
-
-builtins.print = green_print
-```
-
-**Note:** ANSI color codes work in VS Code's Jupyter output. If colors don't show, go to VS Code settings and make sure `"jupyter.enableOutputScrolling"` isn't stripping them. The `\033[92m` code is bright green — swap for `\033[32m` for darker green.
+| Level | Style |
+|-------|-------|
+| `DEBUG` | Plain bright green |
+| `INFO` | **Bold** bright green |
+| `WARNING` | **Bold** green background highlight ✅ |
+| `ERROR` | **Bold** green background highlight |
+| `CRITICAL` | **Bold + underline** green background highlight |
