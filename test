@@ -1,7 +1,44 @@
-re.match(r'^\d+(\.\d+)*\.?\s+', full_text)
-numId_el = numPr.find('./w:numId', namespaces=nsmap)
-ilvl_el = numPr.find('./w:ilvl', namespaces=nsmap)
-def get_text(p, nsmap, resolver=None):
+import re
+from fuzzywuzzy import fuzz
+
+
+# =========================
+# 🔢 Number Tracker
+# =========================
+class SimpleNumberTracker:
+    def __init__(self):
+        self.counters = {}
+
+    def reset(self):
+        self.counters = {}
+
+    def get_number(self, ilvl):
+        if ilvl not in self.counters:
+            self.counters[ilvl] = 0
+
+        self.counters[ilvl] += 1
+
+        # Reset deeper levels
+        for lvl in list(self.counters.keys()):
+            if lvl > ilvl:
+                self.counters[lvl] = 0
+
+        parts = []
+        for lvl in sorted(self.counters.keys()):
+            if lvl <= ilvl and self.counters[lvl] > 0:
+                parts.append(str(self.counters[lvl]))
+
+        return ".".join(parts)
+
+
+# 🔥 Global tracker
+tracker = SimpleNumberTracker()
+
+
+# =========================
+# 📝 Extract Text Function
+# =========================
+def get_text(p, nsmap):
     texts = []
 
     for x in p.xpath('.//w:t', namespaces=nsmap):
@@ -10,24 +47,110 @@ def get_text(p, nsmap, resolver=None):
 
     full_text = ''.join(texts).strip()
 
-    # ✅ If already numbered → keep
-    if re.match(r'^\d+(\.\d+)*\.?\s+', full_text):
-        return full_text
+    if not full_text:
+        return None
 
-    # ✅ Try resolving numbering (FIXED PATH)
+    # 🔍 DEBUG
+    print("\n----------------------")
+    print("TEXT:", full_text)
+
     numPr = p.find('./w:pPr/w:numPr', namespaces=nsmap)
 
-    if numPr is not None and resolver is not None:
-        numId_el = numPr.find('./w:numId', namespaces=nsmap)
+    if numPr is None:
+        print("❌ No numbering found in XML")
+    else:
+        print("✅ Numbering found")
+
+    # ✅ Case 1: Manual numbering
+    if re.match(r'^\d+(\.\d+)*\.?\s+', full_text):
+        print("➡️ Manual numbering detected")
+        return full_text
+
+    # ✅ Case 2: Auto-numbering
+    if numPr is not None:
         ilvl_el = numPr.find('./w:ilvl', namespaces=nsmap)
 
-        if numId_el is not None and ilvl_el is not None:
-            numId = numId_el.get(f"{{{nsmap['w']}}}val")
+        if ilvl_el is not None:
             ilvl = int(ilvl_el.get(f"{{{nsmap['w']}}}val"))
 
-            number = resolver.get_number(numId, ilvl)
+            number = tracker.get_number(ilvl)
+
+            print(f"➡️ Auto numbering applied: {number}")
 
             if number:
                 return f"{number} {full_text}"
 
+    # ✅ Case 3: Normal text
+    print("➡️ No numbering applied")
     return full_text
+
+
+# =========================
+# 🔍 Main Section Finder
+# =========================
+def find_section(self, to):
+
+    input_section = extract_section_number(to)
+    input_title = clean_text(remove_section_number(to))
+
+    best_match = None
+    best_text = None
+    best_score = 0
+
+    for xx in self._doc.xpath('./w:body/w:p', namespaces=self._doc.nsmap):
+
+        # 🔥 STEP 1: Get raw text WITHOUT numbering (for reset logic)
+        temp_text = ''.join([
+            x.text for x in xx.xpath('.//w:t', namespaces=self._doc.nsmap) if x.text
+        ]).strip()
+
+        # 🔥 STEP 2: Reset tracker BEFORE numbering
+        if re.match(r'^1\.?\s+', temp_text):
+            print("🔄 Resetting numbering tracker")
+            tracker.reset()
+
+        # 🔥 STEP 3: Get processed text ONCE
+        raw_text = get_text(xx, self._doc.nsmap)
+
+        if not raw_text:
+            continue
+
+        # 🔥 STEP 4: Skip unwanted outline levels
+        olvl = self.get_outline_level(xx)
+        if olvl in (-1, 9):
+            continue
+
+        doc_section = extract_section_number(raw_text)
+        doc_title = clean_text(remove_section_number(raw_text))
+
+        # ✅ EXACT MATCH
+        if input_section and doc_section and input_section == doc_section:
+            print("✅ Exact match found")
+            self._cursor = xx
+            return raw_text
+
+        # ✅ FUZZY MATCH
+        score = fuzz.token_set_ratio(input_title, doc_title)
+
+        if input_section and doc_section:
+            if input_section in doc_section or doc_section in input_section:
+                score += 10
+        elif input_section and not doc_section:
+            score += 5
+
+        if score > best_score:
+            best_score = score
+            best_match = xx
+            best_text = raw_text
+
+    # 🔥 FINAL RESULT
+    if best_match is not None and best_score >= 85:
+        print("✅ Best match selected")
+        print("SECTION:", best_text)
+        print("SCORE:", best_score)
+
+        self._cursor = best_match
+        return best_text
+
+    print("❌ No matching section found")
+    return ""
