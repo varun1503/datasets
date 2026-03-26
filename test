@@ -1,59 +1,33 @@
-Now I can see your full code structure. Here's exactly where to add everything:
+re.match(r'^\d+(\.\d+)*\.?\s+', full_text)
+numId_el = numPr.find('./w:numId', namespaces=nsmap)
+ilvl_el = numPr.find('./w:ilvl', namespaces=nsmap)
+def get_text(p, nsmap, resolver=None):
+    texts = []
 
-**In `Document1.__init__`, add the numbering map build after `self._doc` is set:**
+    for x in p.xpath('.//w:t', namespaces=nsmap):
+        if x.text:
+            texts.append(x.text)
 
-```python
-def __init__(self, filepath) -> None:
-    # ... your existing code ...
-    self._doc = etree.parse(os.path.join(self._path, 'word', 'document.xml')).getroot()
-    self._cursor = None
-    self._numbering_map = self._build_numbering_map()  # ← ADD THIS
-```
+    full_text = ''.join(texts).strip()
 
-**Add `_build_numbering_map` method inside `Document1` class:**
+    # ✅ If already numbered → keep
+    if re.match(r'^\d+(\.\d+)*\.?\s+', full_text):
+        return full_text
 
-```python
-def _build_numbering_map(self):
-    from collections import defaultdict
-    ns = self._doc.nsmap.get('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main')
-    ns_uri = f'{{{ns}}}'
-    counters = defaultdict(int)
-    numbering_map = {}
+    # ✅ Try resolving numbering (FIXED PATH)
+    numPr = p.find('./w:pPr/w:numPr', namespaces=nsmap)
 
-    for p in self._doc.xpath('.//w:body/w:p', namespaces=self._doc.nsmap):
-        numPr = p.find(f'.//{ns_uri}numPr')
-        if numPr is not None:
-            ilvl_el = numPr.find(f'{ns_uri}ilvl')
-            numId_el = numPr.find(f'{ns_uri}numId')
-            if ilvl_el is not None and numId_el is not None:
-                lvl = ilvl_el.get(f'{ns_uri}val')
-                nid = numId_el.get(f'{ns_uri}val')
-                counters[(nid, lvl)] += 1
-                numbering_map[id(p)] = counters[(nid, lvl)]
+    if numPr is not None and resolver is not None:
+        numId_el = numPr.find('./w:numId', namespaces=nsmap)
+        ilvl_el = numPr.find('./w:ilvl', namespaces=nsmap)
 
-    return numbering_map
-```
+        if numId_el is not None and ilvl_el is not None:
+            numId = numId_el.get(f"{{{nsmap['w']}}}val")
+            ilvl = int(ilvl_el.get(f"{{{nsmap['w']}}}val"))
 
-**In `move_cursor`, update the loop — change this one line:**
+            number = resolver.get_number(numId, ilvl)
 
-```python
-# BEFORE:
-raw_text = get_text(xx, self._doc.nsmap)
+            if number:
+                return f"{number} {full_text}"
 
-# AFTER:
-raw_text = get_text(xx, self._doc.nsmap)
-num = self._numbering_map.get(id(xx), None)
-if num is not None and not re.match(r'^\d+(\.\d+)*', raw_text):
-    raw_text = f"{num}. {raw_text}"
-```
-
-**Same fix in `copy_content` where you call `get_text`:**
-
-```python
-nxt_text = get_text(nxt, self._doc.nsmap).strip()
-num = self._numbering_map.get(id(nxt), None)
-if num is not None and not re.match(r'^\d+(\.\d+)*', nxt_text):
-    nxt_text = f"{num}. {nxt_text}"
-```
-
-Since `source = ModelDoc(filepath)` inherits from `Document1`, the numbering map is built automatically when you instantiate it — no changes needed in your main loop.
+    return full_text
