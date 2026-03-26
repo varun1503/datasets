@@ -1,425 +1,59 @@
-"""
-Optimized move_cursor implementation with robust section matching
-and hierarchical sub-section range retrieval.
+Now I can see your full code structure. Here's exactly where to add everything:
 
-Key improvements:
-  1. Hard section-number gate    — section numbers must match exactly when both present
-  2. Hierarchical range logic    — if 3.2 matches, also collects 3.2.1, 3.2.1.1 ...
-                                   until the next sibling section (3.3) begins
-  3. Multi-signal scoring        — combines ratio + token_set_ratio + partial_ratio
-  4. Configurable thresholds     — MatchConfig tunable via env vars (MRMG-friendly)
-  5. Ambiguity guard             — rejects match when top-2 scores are too close
-  6. Early-exit optimisation     — perfect score short-circuits the scan loop
-  7. Logging / debug support     — pass debug=True to trace every scoring decision
-  8. No retrieval contract       — always returns '' (never None)
-"""
+**In `Document1.__init__`, add the numbering map build after `self._doc` is set:**
 
-import logging
-import re
-from dataclasses import dataclass
-from typing import Optional
-
-from rapidfuzz import fuzz  # drop-in for fuzzywuzzy, 10-40x faster
-
-logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Tunable configuration  (load from env / config so MRMG can adjust without
-# touching code — see the example at the bottom of this file)
-# ---------------------------------------------------------------------------
-@dataclass
-class MatchConfig:
-    # Minimum combined score to accept a match
-    min_threshold: float = 75.0
-
-    # Bonus added when section numbers match exactly
-    section_boost: float = 15.0
-
-    # If top-2 candidates are within this band → ambiguous → no retrieval
-    ambiguity_margin: float = 5.0
-
-    # Weights for the three fuzz signals (must sum to 1.0)
-    weight_ratio: float = 0.4
-    weight_token_set: float = 0.4
-    weight_partial: float = 0.2
-
-    # Outline levels to skip (non-heading paragraphs in lxml/docx world)
-    skip_levels: tuple = (-1, 9)
-
-    # Whether to collect sub-sections after the anchor match
-    collect_subsections: bool = True
-
-
-_DEFAULT_CONFIG = MatchConfig()
-
-
-# ---------------------------------------------------------------------------
-# Section-number helpers
-# ---------------------------------------------------------------------------
-_SECTION_RE = re.compile(r'^(\d+(?:\.\d+)*)\s*')
-
-
-def _parse_section(text: str) -> Optional[tuple]:
-    """
-    Parse a section number string like '3.2' or '11.1.4' into a tuple of ints.
-
-        '3.2'    -> (3, 2)
-        '11.1.4' -> (11, 1, 4)
-        ''       -> None
-    """
-    if not text:
-        return None
-    m = _SECTION_RE.match(text.strip())
-    if not m:
-        return None
-    return tuple(int(p) for p in m.group(1).split('.'))
-
-
-def _is_child_of(child: tuple, parent: tuple) -> bool:
-    """
-    Return True if *child* is a direct or indirect sub-section of *parent*.
-
-    Examples:
-        _is_child_of((3,2,1),   (3,2))   -> True   # 3.2.1 under 3.2
-        _is_child_of((3,2,1,1), (3,2))   -> True   # 3.2.1.1 under 3.2
-        _is_child_of((3,3),     (3,2))   -> False  # sibling
-        _is_child_of((3,2),     (3,2))   -> False  # same level (not a child)
-        _is_child_of((4,1),     (3,2))   -> False  # different top-level
-    """
-    if len(child) <= len(parent):
-        return False
-    return child[:len(parent)] == parent
-
-
-def _is_next_sibling_or_above(candidate: tuple, anchor: tuple) -> bool:
-    """
-    Return True when *candidate* marks the end of the anchor's sub-tree,
-    i.e. it is the next sibling of anchor or belongs to a higher section.
-
-    Examples (anchor = (3, 2)):
-        (3, 3)    -> True   # next sibling of 3.2 -> stop
-        (3, 2)    -> True   # same section again   -> stop
-        (4,)      -> True   # moved up to ch. 4   -> stop
-        (3, 2, 1) -> False  # still inside 3.2    -> keep collecting
-    """
-    depth = len(anchor)
-    candidate_prefix = candidate[:depth]
-    anchor_prefix    = anchor[:depth]
-    # Has the prefix at anchor depth advanced past us?
-    return candidate_prefix >= anchor_prefix and not _is_child_of(candidate, anchor)
-
-
-# ---------------------------------------------------------------------------
-# Fuzzy scoring helper
-# ---------------------------------------------------------------------------
-def _combined_score(a: str, b: str, cfg: MatchConfig) -> float:
-    """Weighted blend of three fuzz metrics for stable title matching."""
-    r  = fuzz.ratio(a, b)
-    ts = fuzz.token_set_ratio(a, b)
-    pr = fuzz.partial_ratio(a, b)
-    return (
-        cfg.weight_ratio     * r  +
-        cfg.weight_token_set * ts +
-        cfg.weight_partial   * pr
-    )
-
-
-# ---------------------------------------------------------------------------
-# Internal candidate container
-# ---------------------------------------------------------------------------
-@dataclass
-class _Candidate:
-    node: object
-    raw_text: str
-    score: float
-    section_tuple: Optional[tuple]   # e.g. (3, 2)
-
-
-# ---------------------------------------------------------------------------
-# Main method — drop this into your class, replacing the old move_cursor
-# ---------------------------------------------------------------------------
-def move_cursor(
-    self,
-    to: str = '',
-    *,
-    cfg: MatchConfig = _DEFAULT_CONFIG,
-    debug: bool = False,
-) -> str:
-    """
-    Move the internal cursor to the paragraph in the Word document that best
-    matches *to*.
-
-    Hierarchical collection
-    -----------------------
-    When cfg.collect_subsections is True (default) and the anchor paragraph
-    has a section number (e.g. 3.2), the method also collects every following
-    paragraph that belongs to that section's sub-tree (3.2.1, 3.2.1.1, …)
-    and stops as soon as the next sibling (3.3) or a higher section is reached.
-
-    Visual example
-    --------------
-    Document order:
-        3.2  Business problem          <- anchor (matched)
-        3.2.1  Sub-topic A             <- collected
-        3.2.1.1  Detail                <- collected
-        3.2.2  Sub-topic B             <- collected
-        3.3  Next section              <- STOP here (not collected)
-
-    Returns the matched + collected text joined by newlines, or '' on no match.
-    """
+```python
+def __init__(self, filepath) -> None:
+    # ... your existing code ...
+    self._doc = etree.parse(os.path.join(self._path, 'word', 'document.xml')).getroot()
     self._cursor = None
+    self._numbering_map = self._build_numbering_map()  # ← ADD THIS
+```
 
-    if not to or not to.strip():
-        return ''
+**Add `_build_numbering_map` method inside `Document1` class:**
 
-    input_section_str: str               = extract_section_number(to)
-    input_section_tuple: Optional[tuple] = _parse_section(input_section_str)
-    input_title: str                     = remove_section_number(to).lower().strip()
+```python
+def _build_numbering_map(self):
+    from collections import defaultdict
+    ns = self._doc.nsmap.get('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main')
+    ns_uri = f'{{{ns}}}'
+    counters = defaultdict(int)
+    numbering_map = {}
 
-    if debug:
-        logger.debug(
-            "move_cursor  seeking: section=%r %r  title=%r",
-            input_section_str, input_section_tuple, input_title,
-        )
+    for p in self._doc.xpath('.//w:body/w:p', namespaces=self._doc.nsmap):
+        numPr = p.find(f'.//{ns_uri}numPr')
+        if numPr is not None:
+            ilvl_el = numPr.find(f'{ns_uri}ilvl')
+            numId_el = numPr.find(f'{ns_uri}numId')
+            if ilvl_el is not None and numId_el is not None:
+                lvl = ilvl_el.get(f'{ns_uri}val')
+                nid = numId_el.get(f'{ns_uri}val')
+                counters[(nid, lvl)] += 1
+                numbering_map[id(p)] = counters[(nid, lvl)]
 
-    # -----------------------------------------------------------------------
-    # Pass 1 — single traversal to build structured paragraph list
-    # -----------------------------------------------------------------------
-    all_paras: list[dict] = []
-    for xx in self._doc.xpath('.//w:body/w:p', namespaces=self._doc.nsmap):
-        raw_text = get_text(xx, self._doc.nsmap)
-        if not raw_text or not raw_text.strip():
-            continue
-        olvl = self.get_outline_level(xx)
-        if olvl in cfg.skip_levels:
-            continue
+    return numbering_map
+```
 
-        doc_section_str   = extract_section_number(raw_text)
-        doc_section_tuple = _parse_section(doc_section_str)
-        doc_title         = remove_section_number(raw_text).lower().strip()
+**In `move_cursor`, update the loop — change this one line:**
 
-        all_paras.append(dict(
-            node          = xx,
-            raw_text      = raw_text,
-            section_str   = doc_section_str,
-            section_tuple = doc_section_tuple,
-            title         = doc_title,
-        ))
+```python
+# BEFORE:
+raw_text = get_text(xx, self._doc.nsmap)
 
-    if not all_paras:
-        return ''
+# AFTER:
+raw_text = get_text(xx, self._doc.nsmap)
+num = self._numbering_map.get(id(xx), None)
+if num is not None and not re.match(r'^\d+(\.\d+)*', raw_text):
+    raw_text = f"{num}. {raw_text}"
+```
 
-    # -----------------------------------------------------------------------
-    # Pass 2 — score anchor candidates
-    # -----------------------------------------------------------------------
-    candidates: list[_Candidate] = []
+**Same fix in `copy_content` where you call `get_text`:**
 
-    for para in all_paras:
-        doc_section_tuple = para['section_tuple']
-        doc_title         = para['title']
+```python
+nxt_text = get_text(nxt, self._doc.nsmap).strip()
+num = self._numbering_map.get(id(nxt), None)
+if num is not None and not re.match(r'^\d+(\.\d+)*', nxt_text):
+    nxt_text = f"{num}. {nxt_text}"
+```
 
-        if len(doc_title) < 3:
-            continue
-
-        # --- Gate: hard section-number filter ---
-        if input_section_tuple:
-            if not doc_section_tuple:
-                continue                          # doc paragraph has no number
-            if doc_section_tuple != input_section_tuple:
-                continue                          # numbers differ
-
-        score = _combined_score(input_title, doc_title, cfg)
-
-        if input_section_tuple and doc_section_tuple == input_section_tuple:
-            score += cfg.section_boost
-
-        score = min(score, 100.0)
-
-        if debug:
-            logger.debug(
-                "  candidate  score=%.1f  section=%r  title=%r",
-                score, para['section_str'], doc_title,
-            )
-
-        candidates.append(_Candidate(
-            node          = para['node'],
-            raw_text      = para['raw_text'],
-            score         = score,
-            section_tuple = doc_section_tuple,
-        ))
-
-        if score >= 100.0:
-            break   # perfect match
-
-    if not candidates:
-        if debug:
-            logger.debug("  -> no candidates, returning ''")
-        return ''
-
-    candidates.sort(key=lambda c: c.score, reverse=True)
-    best = candidates[0]
-
-    # --- Ambiguity guard ---
-    if len(candidates) > 1:
-        second = candidates[1]
-        if (best.score - second.score) < cfg.ambiguity_margin:
-            if debug:
-                logger.debug(
-                    "  -> ambiguous (best=%.1f  2nd=%.1f  margin=%.1f), returning ''",
-                    best.score, second.score, cfg.ambiguity_margin,
-                )
-            return ''
-
-    # --- Threshold check ---
-    if best.score < cfg.min_threshold:
-        if debug:
-            logger.debug(
-                "  -> score %.1f below threshold %.1f, returning ''",
-                best.score, cfg.min_threshold,
-            )
-        return ''
-
-    # Set cursor to the anchor paragraph
-    self._cursor = best.node
-    anchor_tuple = best.section_tuple
-
-    if debug:
-        logger.debug(
-            "  -> anchor matched  score=%.1f  section=%r  text=%r",
-            best.score, anchor_tuple, best.raw_text,
-        )
-
-    # -----------------------------------------------------------------------
-    # Pass 3 — collect sub-sections (3.2.1, 3.2.1.1, ...) up to next sibling
-    # -----------------------------------------------------------------------
-    if not cfg.collect_subsections or not anchor_tuple:
-        return get_text(best.node, self._doc.nsmap)
-
-    collected_texts: list[str] = [get_text(best.node, self._doc.nsmap)]
-    anchor_found = False
-
-    for para in all_paras:
-        node = para['node']
-
-        # Fast-forward until we hit the anchor node in document order
-        if not anchor_found:
-            if node is best.node:
-                anchor_found = True
-            continue
-
-        candidate_tuple = para['section_tuple']
-
-        if candidate_tuple is None:
-            # Body text / unnumbered heading inside the section — always include
-            collected_texts.append(para['raw_text'])
-            continue
-
-        if _is_child_of(candidate_tuple, anchor_tuple):
-            # e.g. (3,2,1) or (3,2,1,1) — belongs to 3.2's sub-tree
-            if debug:
-                logger.debug(
-                    "    collecting sub-section %r  %r",
-                    para['section_str'], para['title'],
-                )
-            collected_texts.append(para['raw_text'])
-
-        elif _is_next_sibling_or_above(candidate_tuple, anchor_tuple):
-            # e.g. (3,3) — we have left 3.2's sub-tree, stop
-            if debug:
-                logger.debug(
-                    "    stopping at sibling/above section %r", para['section_str'],
-                )
-            break
-
-        else:
-            # Edge case — include and continue
-            collected_texts.append(para['raw_text'])
-
-    result = '\n'.join(collected_texts)
-
-    if debug:
-        logger.debug(
-            "  -> returning %d paragraph(s) total", len(collected_texts),
-        )
-
-    return result
-
-
-# ---------------------------------------------------------------------------
-# MRMG-friendly threshold configuration via environment variables
-# ---------------------------------------------------------------------------
-# .env / config.yaml:
-#
-#   MATCH_MIN_THRESHOLD=75
-#   MATCH_SECTION_BOOST=15
-#   MATCH_AMBIGUITY_MARGIN=5
-#   MATCH_COLLECT_SUBSECTIONS=true
-#
-# Startup code:
-#
-#   import os
-#   MATCH_CONFIG = MatchConfig(
-#       min_threshold       = float(os.getenv("MATCH_MIN_THRESHOLD",    75)),
-#       section_boost       = float(os.getenv("MATCH_SECTION_BOOST",    15)),
-#       ambiguity_margin    = float(os.getenv("MATCH_AMBIGUITY_MARGIN",  5)),
-#       collect_subsections = os.getenv("MATCH_COLLECT_SUBSECTIONS","true").lower() == "true",
-#   )
-#   self.move_cursor(to=heading, cfg=MATCH_CONFIG)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Self-test — run:  python move_cursor_optimized.py
-# ---------------------------------------------------------------------------
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.DEBUG)
-    ok = True
-
-    CHILD_TESTS = [
-        ((3, 2, 1),    (3, 2),   True),
-        ((3, 2, 1, 1), (3, 2),   True),
-        ((3, 3),       (3, 2),   False),
-        ((3, 2),       (3, 2),   False),   # same is NOT a child
-        ((4, 1),       (3, 2),   False),
-        ((11, 1, 1),   (11, 1),  True),
-        ((11, 2),      (11, 1),  False),
-    ]
-    print("=== _is_child_of ===")
-    for child, parent, expected in CHILD_TESTS:
-        result = _is_child_of(child, parent)
-        status = "PASS" if result == expected else "FAIL"
-        if status == "FAIL":
-            ok = False
-        print(f"  [{status}]  _is_child_of({child}, {parent}) = {result}  (expected {expected})")
-
-    SIBLING_TESTS = [
-        ((3, 3),    (3, 2),  True),    # next sibling  -> stop
-        ((3, 2),    (3, 2),  True),    # same section  -> stop
-        ((4,),      (3, 2),  True),    # higher level  -> stop
-        ((3, 2, 1), (3, 2),  False),   # child         -> keep
-        ((3, 2, 1, 1), (3,2),False),   # grandchild    -> keep
-    ]
-    print("\n=== _is_next_sibling_or_above ===")
-    for cand, anchor, expected in SIBLING_TESTS:
-        result = _is_next_sibling_or_above(cand, anchor)
-        status = "PASS" if result == expected else "FAIL"
-        if status == "FAIL":
-            ok = False
-        print(f"  [{status}]  sibling_or_above({cand}, anchor={anchor}) = {result}  (expected {expected})")
-
-    PARSE_TESTS = [
-        ("3.2 Title",   (3, 2)),
-        ("11.1.4 Foo",  (11, 1, 4)),
-        ("No number",   None),
-        ("",            None),
-    ]
-    print("\n=== _parse_section ===")
-    for s, expected in PARSE_TESTS:
-        result = _parse_section(s)
-        status = "PASS" if result == expected else "FAIL"
-        if status == "FAIL":
-            ok = False
-        print(f"  [{status}]  _parse_section({s!r}) = {result}  (expected {expected})")
-
-    print(f"\n{'All tests passed!' if ok else 'SOME TESTS FAILED — check above.'}")
+Since `source = ModelDoc(filepath)` inherits from `Document1`, the numbering map is built automatically when you instantiate it — no changes needed in your main loop.
