@@ -1,68 +1,67 @@
-Here are your work points rewritten in a clean, professional, and systematic way:
+## The Error
 
+The last image shows the problem clearly:
 
----
+```
+AttributeError: 'Part' object has no attribute 'element'
+```
 
-Work Summary
+It's failing in `update_header` at the line `if not header.paragraphs:` — specifically because `section.header` is returning a `Part` object instead of a proper `HeaderFooter` object. This happens with **newer versions of python-docx** where the API changed.
 
-1. Bug Fixing & Enhancements
+## The Fix
 
-Resolved multiple bugs identified by the MRMG team.
+Replace your `update_header` method's header access pattern. Instead of:
 
-Fixed issues related to fuzzy logic by identifying and applying optimal thresholds.
+```python
+header = section.header
+header.is_linked_to_previous = False
+if not header.paragraphs:
+    header.add_paragraph()
+```
 
+Use this approach that works across versions:
 
+```python
+def update_header(self, model_id, model_name):
+    new_text = f"{model_id} {model_name} - Validation Report"
+    
+    for section in self.doc.sections:
+        # Unlink header from previous section
+        section.header.is_linked_to_previous = False
+        header = section.header
+        
+        # Clear existing header content via XML directly
+        hdr = header._element
+        # Remove all existing paragraphs from the header element
+        for child in list(hdr):
+            hdr.remove(child)
+        
+        # Add fresh paragraph
+        from docx.oxml.ns import qn
+        from docx.oxml import OxmlElement
+        p_elem = OxmlElement('w:p')
+        hdr.append(p_elem)
+        
+        # Now use the paragraph normally
+        para = header.paragraphs[0]
+        para.text = new_text
+        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        
+        # Add border (your existing border code)
+        p = para._element
+        pPr = p.get_or_add_pPr()
+        pBdr = OxmlElement('w:pBdr')
+        bottom = OxmlElement('w:bottom')
+        bottom.set(qn('w:val'), 'single')
+        bottom.set(qn('w:sz'), '12')
+        bottom.set(qn('w:space'), '1')
+        bottom.set(qn('w:color'), '000000')
+        pBdr.append(bottom)
+        pPr.append(pBdr)
+```
 
-2. Logic Improvements
+## Why This Happens
 
-Updated and optimized the logic for:
+In some python-docx builds, `section.header` returns the raw `Part` before the header definition (`w:hdr`) is created in the XML. Manipulating `_element` directly bypasses that broken lazy-init path and forces the header element to exist before you try to access `.paragraphs`.
 
-Executive summary section retriever
-
-Move cursor functionality in MRMG tool
-
-
-Improved overall system accuracy and performance.
-
-
-
-3. Feature Development
-
-Implemented validation functionality:
-
-If a section is missing in the validation report, it is now highlighted in red.
-
-
-Enhanced input formatting coming from the UI.
-
-
-
-4. Testing & Validation
-
-Performed comprehensive testing across all business documents.
-
-Ensured correctness based on different business rules and criticality levels.
-
-Retested bugs after fixes and made necessary adjustments.
-
-
-
-5. System Improvements
-
-Made continuous improvements based on testing feedback.
-
-Ensured stability and consistency in functionality.
-
-
-
-
-
----
-
-If you want, I can also convert this into:
-
-Daily status update (DSR)
-
-Sprint review points
-
-Resume bullet points (impact-focused)
+You can also try pinning to a known-good version: `pip install python-docx==0.8.11`
