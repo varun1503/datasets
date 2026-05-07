@@ -1,71 +1,131 @@
-Let me look at this differently. The root cause is that in python-docx 1.2, `Part._get_or_add_definition()` returns something without `.element`. Let me find exactly what API changed.
+Looking at your code, the "unreadable content" error in Word typically comes from a few specific issues in how you're writing XML back to the docx. Let me identify the likely culprits:
 
-Try this approach that works **purely through lxml XML manipulation** — no `section.header` access at all:
+**Most probable causes:**
+
+**1. `numbering.xml` corruption** — your `update_numbering` method appends `abstractNum` elements *after* `num` elements, but the Word spec requires all `abstractNum` nodes to come *before* `num` nodes in the file. This is a very common cause of the error.
+
+**2. `[Content_Types].xml` malformed entries** — in `update_index`, you're modifying `PartName` on the original `xx` element in-place before checking if it already exists, which can corrupt the index.
+
+**3. Namespace stripping** — `etree.fromstring(etree.tostring(...))` can drop namespace declarations in some edge cases, producing invalid XML.
+
+---
+
+Here are the targeted fixes:
+
+**Fix 1 — `update_numbering`: insert `abstractNum` before all `num` elements**
 
 ```python
-def update_header(self, model_id, model_name):
-    from docx.oxml.ns import qn
-    from docx.oxml import OxmlElement
-    from lxml import etree
-    import copy
+def update_numbering(self, content, index):
+    suffix = '999' + index
+    numdoc = etree.parse(os.path.join(self._path, 'word', 'numbering.xml')).getroot()
+    w = numdoc.nsmap['w']
+    num_ids = numdoc.xpath('./w:num/@w:numId', namespaces=numdoc.nsmap)
+    anum_ids = numdoc.xpath('./w:abstractNum/@w:abstractNumId', namespaces=numdoc.nsmap)
+    curr_num_ids, curr_anum_ids = [], []
 
-    new_text = f"{model_id} {model_name} - Validation Report"
+    for num in content['nums']:
+        nid = num['id'] + suffix
+        num['elem'].set(num['key'], nid)
 
-    # Build header XML as lxml element directly
-    W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
-    R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+        if 'num' not in num['ref'] or nid in num_ids or nid in curr_num_ids:
+            continue
 
-    def make_header_element(text):
-        hdr = etree.Element(f'{{{W}}}hdr', nsmap={'w': W, 'r': R})
-        p = etree.SubElement(hdr, f'{{{W}}}p')
-        pPr = etree.SubElement(p, f'{{{W}}}pPr')
-        jc = etree.SubElement(pPr, f'{{{W}}}jc')
-        jc.set(f'{{{W}}}val', 'center')
-        pBdr = etree.SubElement(pPr, f'{{{W}}}pBdr')
-        bottom = etree.SubElement(pBdr, f'{{{W}}}bottom')
-        bottom.set(f'{{{W}}}val', 'single')
-        bottom.set(f'{{{W}}}sz', '12')
-        bottom.set(f'{{{W}}}space', '1')
-        bottom.set(f'{{{W}}}color', '000000')
-        r = etree.SubElement(p, f'{{{W}}}r')
-        t = etree.SubElement(r, f'{{{W}}}t')
-        t.text = text
-        return etree.tostring(hdr, xml_declaration=True, 
-                             encoding='UTF-8', standalone=True)
+        curr_num_ids.append(nid)
+        num['ref']['num'].set(f'{{{w}}}numId', nid)
 
-    header_bytes = make_header_element(new_text)
+        anum = num['ref']['num'].find('./w:abstractNumId', numdoc.nsmap)
+        aid = anum.get(f'{{{w}}}val') + suffix
+        anum.set(f'{{{w}}}val', aid)
 
-    from docx.opc.part import Part
-    from docx.opc.packuri import PackURI
+        if aid not in anum_ids and aid not in curr_anum_ids:
+            curr_anum_ids.append(aid)
+            num['ref']['anum'].set(f'{{{w}}}abstractNumId', aid)
 
-    CT = 'application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml'
-    REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/header'
+            # ✅ abstractNum MUST come before all w:num elements
+            first_num = numdoc.find('./w:num', numdoc.nsmap)
+            if first_num is not None:
+                first_num.addprevious(num['ref']['anum'])
+            else:
+                numdoc.append(num['ref']['anum'])
 
-    for i, section in enumerate(self.doc.sections):
-        sectPr = section._sectPr
+        # ✅ num goes at the end
+        numdoc.append(num['ref']['num'])
 
-        # Remove old header references
-        for ref in sectPr.findall(qn('w:headerReference')):
-            rId_old = ref.get(qn('r:id'))
-            try:
-                self.doc.part.drop_rel(rId_old)
-            except:
-                pass
-            sectPr.remove(ref)
-
-        # Create new header part with raw bytes — no .element access
-        part_uri = PackURI(f'/word/header_custom_{i+1}.xml')
-        header_part = Part(part_uri, CT, header_bytes, self.doc.part.package)
-
-        rId = self.doc.part.relate_to(header_part, REL)
-
-        # Wire it into sectPr
-        hdrRef = OxmlElement('w:headerReference')
-        hdrRef.set(qn('w:type'), 'default')
-        hdrRef.set(qn('r:id'), rId)
-        sectPr.insert(0, hdrRef)
+    etree.ElementTree(numdoc).write(
+        os.path.join(self._path, 'word', 'numbering.xml'), pretty_print=True
+    )
 ```
 
-This **never calls `section.header`** at all — it builds the XML bytes directly with lxml and injects the part manually, completely bypassing the broken `_get_or_add_definition().element` code path.
+---
 
-Can you try this and share the exact error if it still fails?
+**Fix 2 — `update_index`: don't mutate `xx` before existence check**
+
+```python
+def update_index(self, content, index):
+    idxdoc = etree.parse(os.path.join(self._path, '[Content_Types].xml')).getroot()
+
+    for k, xx in content['index'].items():
+        if etree.QName(xx).localname == 'Default':
+            if idxdoc.find(f'./*[@Extension="{k}"]') is None:
+                idxdoc.insert(0, xx)
+
+        elif etree.QName(xx).localname == 'Override':
+            # ✅ Build the new key BEFORE mutating xx
+            new_key = os.path.dirname(k) + f'/copy{index}_' + os.path.basename(k)
+            if idxdoc.find(f'./*[@PartName="{new_key}"]') is None:
+                # ✅ Clone so you don't corrupt the original
+                xx_copy = etree.fromstring(etree.tostring(xx))
+                xx_copy.set('PartName', new_key)
+                idxdoc.append(xx_copy)
+
+    etree.ElementTree(idxdoc).write(
+        os.path.join(self._path, '[Content_Types].xml'), pretty_print=True
+    )
+```
+
+---
+
+**Fix 3 — `save`: preserve existing compression types per file**
+
+Your current `save` uses `ZIP_DEFLATED` for everything, but some parts of a docx (like images) may have been stored differently. This can occasionally cause issues:
+
+```python
+def save(self, filepath=''):
+    filepath = self._path + '.docx' if filepath == '' else filepath
+
+    if os.path.exists(filepath):
+        os.remove(filepath)
+
+    # ✅ Use ZIP_DEFLATED but explicitly handle media files
+    no_compress = {'.png', '.jpg', '.jpeg', '.gif', '.wmf', '.emf'}
+
+    with zipfile.ZipFile(filepath, 'w', zipfile.ZIP_DEFLATED) as docx:
+        for foldername, subfolders, filenames in os.walk(self._path):
+            for filename in filenames:
+                file_path = os.path.join(foldername, filename)
+                arcname = os.path.relpath(file_path, self._path)
+                ext = os.path.splitext(filename)[1].lower()
+                compress = zipfile.ZIP_STORED if ext in no_compress else zipfile.ZIP_DEFLATED
+                docx.write(file_path, arcname, compress_type=compress)
+
+    return filepath
+```
+
+---
+
+**Quick diagnostic** — to find *which* XML part is actually broken, add this validator before saving:
+
+```python
+def validate_xml_parts(self):
+    """Call this before save() to catch malformed XML early."""
+    for foldername, _, filenames in os.walk(self._path):
+        for filename in filenames:
+            if filename.endswith('.xml') or filename.endswith('.rels'):
+                path = os.path.join(foldername, filename)
+                try:
+                    etree.parse(path)
+                except etree.XMLSyntaxError as e:
+                    print(f"BROKEN XML: {path}\n  {e}")
+```
+
+The numbering fix (Fix 1) is almost certainly your main issue — the `abstractNum`/`num` ordering requirement is strict in the OOXML spec and Word silently rejects documents that violate it.
