@@ -1,67 +1,64 @@
-## The Error
+The issue is deeper — `_get_or_add_definition()` itself is broken in your version of python-docx. We need to bypass it entirely and manipulate the XML directly through the document's part relationships.
 
-The last image shows the problem clearly:
-
-```
-AttributeError: 'Part' object has no attribute 'element'
-```
-
-It's failing in `update_header` at the line `if not header.paragraphs:` — specifically because `section.header` is returning a `Part` object instead of a proper `HeaderFooter` object. This happens with **newer versions of python-docx** where the API changed.
-
-## The Fix
-
-Replace your `update_header` method's header access pattern. Instead of:
-
-```python
-header = section.header
-header.is_linked_to_previous = False
-if not header.paragraphs:
-    header.add_paragraph()
-```
-
-Use this approach that works across versions:
+Try this replacement for `update_header`:
 
 ```python
 def update_header(self, model_id, model_name):
+    from docx.oxml.ns import qn, nsmap
+    from docx.oxml import OxmlElement
+    from lxml import etree
+
     new_text = f"{model_id} {model_name} - Validation Report"
-    
+
     for section in self.doc.sections:
-        # Unlink header from previous section
-        section.header.is_linked_to_previous = False
-        header = section.header
-        
-        # Clear existing header content via XML directly
-        hdr = header._element
-        # Remove all existing paragraphs from the header element
-        for child in list(hdr):
-            hdr.remove(child)
-        
-        # Add fresh paragraph
-        from docx.oxml.ns import qn
-        from docx.oxml import OxmlElement
-        p_elem = OxmlElement('w:p')
-        hdr.append(p_elem)
-        
-        # Now use the paragraph normally
-        para = header.paragraphs[0]
-        para.text = new_text
-        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        
-        # Add border (your existing border code)
-        p = para._element
-        pPr = p.get_or_add_pPr()
-        pBdr = OxmlElement('w:pBdr')
-        bottom = OxmlElement('w:bottom')
-        bottom.set(qn('w:val'), 'single')
-        bottom.set(qn('w:sz'), '12')
-        bottom.set(qn('w:space'), '1')
-        bottom.set(qn('w:color'), '000000')
-        pBdr.append(bottom)
-        pPr.append(pBdr)
+        # Access the sectPr element directly
+        sectPr = section._sectPr
+
+        # Remove existing header references
+        for hdrRef in sectPr.findall(qn('w:headerReference')):
+            sectPr.remove(hdrRef)
+
+        # Create a new header part manually
+        from docx.opc.part import Part
+        from docx.opc.packuri import PackURI
+        from docx.oxml import parse_xml
+
+        header_xml = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<w:hdr xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas" '
+            'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            '<w:p><w:pPr>'
+            '<w:jc w:val="center"/>'
+            '<w:pBdr><w:bottom w:val="single" w:sz="12" w:space="1" w:color="000000"/></w:pBdr>'
+            '</w:pPr>'
+            f'<w:r><w:t>{new_text}</w:t></w:r>'
+            '</w:p>'
+            '</w:hdr>'
+        )
+
+        header_part = Part(
+            PackURI('/word/header1.xml'),
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml',
+            header_xml.encode('utf-8'),
+            self.doc.part.package
+        )
+
+        rId = self.doc.part.relate_to(
+            header_part,
+            'http://schemas.openxmlformats.org/officeDocument/2006/relationships/header'
+        )
+
+        # Add headerReference to sectPr
+        hdrRef = OxmlElement('w:headerReference')
+        hdrRef.set(qn('w:type'), 'default')
+        hdrRef.set(qn('r:id'), rId)
+        sectPr.append(hdrRef)
 ```
 
-## Why This Happens
+If you're still hitting issues, the most reliable fix is to **downgrade python-docx**:
 
-In some python-docx builds, `section.header` returns the raw `Part` before the header definition (`w:hdr`) is created in the XML. Manipulating `_element` directly bypasses that broken lazy-init path and forces the header element to exist before you try to access `.paragraphs`.
+```bash
+pip install "python-docx==0.8.11"
+```
 
-You can also try pinning to a known-good version: `pip install python-docx==0.8.11`
+Then revert to your original code — version 0.8.11 has the stable `section.header` API that your original code was written for. The newer versions (1.x+) broke backward compatibility on header/footer access.
