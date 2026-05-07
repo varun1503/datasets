@@ -1,73 +1,71 @@
-Got it! So on version 1.2, the header only appears after running twice because the first run creates the header part, and the second run finds it and updates it.
+Let me look at this differently. The root cause is that in python-docx 1.2, `Part._get_or_add_definition()` returns something without `.element`. Let me find exactly what API changed.
 
-The fix — force header part creation explicitly before accessing it:
+Try this approach that works **purely through lxml XML manipulation** — no `section.header` access at all:
 
 ```python
 def update_header(self, model_id, model_name):
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
+    from lxml import etree
+    import copy
+
+    new_text = f"{model_id} {model_name} - Validation Report"
+
+    # Build header XML as lxml element directly
+    W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+    R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+
+    def make_header_element(text):
+        hdr = etree.Element(f'{{{W}}}hdr', nsmap={'w': W, 'r': R})
+        p = etree.SubElement(hdr, f'{{{W}}}p')
+        pPr = etree.SubElement(p, f'{{{W}}}pPr')
+        jc = etree.SubElement(pPr, f'{{{W}}}jc')
+        jc.set(f'{{{W}}}val', 'center')
+        pBdr = etree.SubElement(pPr, f'{{{W}}}pBdr')
+        bottom = etree.SubElement(pBdr, f'{{{W}}}bottom')
+        bottom.set(f'{{{W}}}val', 'single')
+        bottom.set(f'{{{W}}}sz', '12')
+        bottom.set(f'{{{W}}}space', '1')
+        bottom.set(f'{{{W}}}color', '000000')
+        r = etree.SubElement(p, f'{{{W}}}r')
+        t = etree.SubElement(r, f'{{{W}}}t')
+        t.text = text
+        return etree.tostring(hdr, xml_declaration=True, 
+                             encoding='UTF-8', standalone=True)
+
+    header_bytes = make_header_element(new_text)
+
     from docx.opc.part import Part
     from docx.opc.packuri import PackURI
 
-    new_text = f"{model_id} {model_name} - Validation Report"
+    CT = 'application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml'
+    REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/header'
 
     for i, section in enumerate(self.doc.sections):
         sectPr = section._sectPr
 
-        # Check if header part already exists
-        existing_refs = sectPr.findall(qn('w:headerReference'))
-        
-        if not existing_refs:
-            # First run: manually create the header part so it exists
-            header_xml = (
-                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-                '<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
-                '<w:p><w:r><w:t></w:t></w:r></w:p>'
-                '</w:hdr>'
-            )
-            part_name = PackURI(f'/word/header{i+1}.xml')
-            content_type = 'application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml'
-            
-            header_part = Part(
-                part_name,
-                content_type,
-                header_xml.encode('utf-8'),
-                self.doc.part.package
-            )
-            rId = self.doc.part.relate_to(
-                header_part,
-                'http://schemas.openxmlformats.org/officeDocument/2006/relationships/header'
-            )
-            hdrRef = OxmlElement('w:headerReference')
-            hdrRef.set(qn('w:type'), 'default')
-            hdrRef.set(qn('r:id'), rId)
-            sectPr.insert(0, hdrRef)
+        # Remove old header references
+        for ref in sectPr.findall(qn('w:headerReference')):
+            rId_old = ref.get(qn('r:id'))
+            try:
+                self.doc.part.drop_rel(rId_old)
+            except:
+                pass
+            sectPr.remove(ref)
 
-        # Now header part exists — safe to access normally
-        header = section.header
-        header.is_linked_to_previous = False
+        # Create new header part with raw bytes — no .element access
+        part_uri = PackURI(f'/word/header_custom_{i+1}.xml')
+        header_part = Part(part_uri, CT, header_bytes, self.doc.part.package)
 
-        for para in header.paragraphs:
-            para.clear()
+        rId = self.doc.part.relate_to(header_part, REL)
 
-        if not header.paragraphs:
-            header.add_paragraph()
-
-        para = header.paragraphs[0]
-        para.text = new_text
-        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-        # Bottom border
-        p = para._element
-        pPr = p.get_or_add_pPr()
-        pBdr = OxmlElement('w:pBdr')
-        bottom = OxmlElement('w:bottom')
-        bottom.set(qn('w:val'), 'single')
-        bottom.set(qn('w:sz'), '12')
-        bottom.set(qn('w:space'), '1')
-        bottom.set(qn('w:color'), '000000')
-        pBdr.append(bottom)
-        pPr.append(pBdr)
+        # Wire it into sectPr
+        hdrRef = OxmlElement('w:headerReference')
+        hdrRef.set(qn('w:type'), 'default')
+        hdrRef.set(qn('r:id'), rId)
+        sectPr.insert(0, hdrRef)
 ```
 
-**What this does:** on the first run, if no `headerReference` exists in the section XML, it manually creates a blank header part and registers it. Then the normal `section.header` access works immediately — no second run needed.
+This **never calls `section.header`** at all — it builds the XML bytes directly with lxml and injects the part manually, completely bypassing the broken `_get_or_add_definition().element` code path.
+
+Can you try this and share the exact error if it still fails?
