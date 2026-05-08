@@ -1,114 +1,246 @@
-Here is the complete `ValReport` class with every fix:
+All checks pass but Word still rejects it. This means the corruption is **deeper in the XML content itself** — not structure, not declarations, not ZIP. 
+
+The issue is in **`document.xml` content** that Word's schema validator rejects but lxml accepts. Let me give you a deeper content-level inspector:
 
 ```python
-class ValReport(Document1):
+def deep_content_diagnose(filepath):
+    """
+    Inspects document.xml content at schema level.
+    Catches what lxml misses but Word rejects.
+    """
+    import zipfile
+    from lxml import etree
 
-    def __init__(self, filepath, report='main') -> None:
-        super().__init__(filepath)
-        self._type = report
+    W  = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+    W14 = 'http://schemas.microsoft.com/office/word/2010/wordml'
+    MC  = 'http://schemas.openxmlformats.org/markup-compatibility/2006'
 
-    # ─────────────────────────────────────────────────────────
-    # HELPER — safe XML write with declaration
-    # ─────────────────────────────────────────────────────────
-    def _safe_write(self, tree_or_root, path):
-        if isinstance(tree_or_root, etree._Element):
-            tree = etree.ElementTree(tree_or_root)
-        else:
-            tree = tree_or_root
-        tree.write(
-            path,
-            xml_declaration=True,
-            encoding='UTF-8',
-            standalone=True,
-            pretty_print=True,
-        )
+    issues = []
 
-    # ─────────────────────────────────────────────────────────
-    # HELPER — safe deep copy without namespace loss
-    # ─────────────────────────────────────────────────────────
-    def _safe_copy(self, elem):
-        return copy.deepcopy(elem)
+    with zipfile.ZipFile(filepath, 'r') as zf:
+        with zf.open('word/document.xml') as f:
+            raw = f.read()
 
-    # ─────────────────────────────────────────────────────────
-    # HELPER — rewrite copied XML file with declaration
-    # Fixes colors1.xml, style1.xml etc copied as raw bytes
-    # ─────────────────────────────────────────────────────────
-    def _rewrite_with_declaration(self, path):
-        try:
-            tree = etree.parse(path)
-            tree.write(
-                path,
-                xml_declaration=True,
-                encoding='UTF-8',
-                standalone=True,
-                pretty_print=True,
+        root = etree.fromstring(raw)
+
+        # ── 1. Check mc:AlternateContent blocks ──────────────
+        # Word requires mc:Fallback inside every mc:AlternateContent
+        print('\n── mc:AlternateContent check ──')
+        ac_ok = True
+        for ac in root.iter(f'{{{MC}}}AlternateContent'):
+            fallback = ac.find(f'{{{MC}}}Fallback')
+            if fallback is None:
+                issues.append('mc:AlternateContent missing mc:Fallback')
+                print('  ❌ mc:AlternateContent missing mc:Fallback')
+                ac_ok = False
+        if ac_ok:
+            print('  ✅ All AlternateContent blocks valid')
+
+        # ── 2. Check w:p has no direct w:p children ──────────
+        print('\n── Nested paragraph check ──')
+        nested_ok = True
+        for p in root.iter(f'{{{W}}}p'):
+            for child in p:
+                if etree.QName(child).localname == 'p':
+                    issues.append('Nested <w:p> inside <w:p> found')
+                    print('  ❌ Nested <w:p> inside <w:p>')
+                    nested_ok = False
+        if nested_ok:
+            print('  ✅ No nested paragraphs')
+
+        # ── 3. Check w:tbl is not inside w:r ─────────────────
+        print('\n── Table containment check ──')
+        tbl_ok = True
+        for r in root.iter(f'{{{W}}}r'):
+            for child in r:
+                if etree.QName(child).localname == 'tbl':
+                    issues.append('<w:tbl> found inside <w:r>')
+                    print('  ❌ <w:tbl> inside <w:r>')
+                    tbl_ok = False
+        if tbl_ok:
+            print('  ✅ No misplaced tables')
+
+        # ── 4. Check every w:hyperlink has r:id or w:anchor ──
+        print('\n── Hyperlink attribute check ──')
+        R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+        hl_ok = True
+        for hl in root.iter(f'{{{W}}}hyperlink'):
+            has_rid    = hl.get(f'{{{R}}}id')
+            has_anchor = hl.get(f'{{{W}}}anchor')
+            if not has_rid and not has_anchor:
+                issues.append('<w:hyperlink> missing both r:id and w:anchor')
+                print('  ❌ <w:hyperlink> has neither r:id nor w:anchor')
+                hl_ok = False
+        if hl_ok:
+            print('  ✅ All hyperlinks valid')
+
+        # ── 5. Check w:drawing has no empty a:blip ───────────
+        print('\n── Drawing/image blip check ──')
+        A = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+        AP = 'http://schemas.openxmlformats.org/drawingml/2006/picture'
+        blip_ns = 'http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing'
+        blip_ok = True
+        for blip in root.iter(
+            '{http://schemas.openxmlformats.org/drawingml/2006/main}blip'
+        ):
+            embed = blip.get(
+                '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed'
             )
-        except Exception as e:
-            print(f"  ⚠️  Could not rewrite {path}: {e}")
+            if not embed:
+                issues.append('Empty a:blip embed attribute found')
+                print('  ❌ a:blip missing r:embed')
+                blip_ok = False
+        if blip_ok:
+            print('  ✅ All image blips valid')
 
-    # ─────────────────────────────────────────────────────────
-    def move_cursor(self, to='question?'):
-        self._cursor = None
+        # ── 6. Check w:ins / w:del have required attributes ──
+        print('\n── Tracked changes check ──')
+        tc_ok = True
+        for tag in ('ins', 'del'):
+            for elem in root.iter(f'{{{W}}}{tag}'):
+                if not elem.get(f'{{{W}}}id'):
+                    issues.append(f'<w:{tag}> missing w:id attribute')
+                    print(f'  ❌ <w:{tag}> missing w:id')
+                    tc_ok = False
+                if not elem.get(f'{{{W}}}author'):
+                    issues.append(f'<w:{tag}> missing w:author attribute')
+                    print(f'  ❌ <w:{tag}> missing w:author')
+                    tc_ok = False
+        if tc_ok:
+            print('  ✅ Tracked changes valid')
 
-        to = to.lower().strip()
-        for xx in self._doc.xpath('.//w:body/w:p', namespaces=self._doc.nsmap):
-            text = get_text(xx, self._doc.nsmap).lower().strip()
-            if to in text and len(text) - len(to) < 10:
-                self._cursor = xx
+        # ── 7. Check w:bookmarkStart has w:name ──────────────
+        print('\n── Bookmark check ──')
+        bm_ok = True
+        for bm in root.iter(f'{{{W}}}bookmarkStart'):
+            if not bm.get(f'{{{W}}}name'):
+                issues.append('<w:bookmarkStart> missing w:name')
+                print('  ❌ <w:bookmarkStart> missing w:name')
+                bm_ok = False
+            if not bm.get(f'{{{W}}}id'):
+                issues.append('<w:bookmarkStart> missing w:id')
+                print('  ❌ <w:bookmarkStart> missing w:id')
+                bm_ok = False
+        if bm_ok:
+            print('  ✅ All bookmarks valid')
+
+        # ── 8. Check for null bytes in text ──────────────────
+        print('\n── Null byte check ──')
+        null_ok = True
+        for t in root.iter(f'{{{W}}}t'):
+            if t.text and '\x00' in t.text:
+                issues.append(f'Null byte found in <w:t>: {t.text[:50]}')
+                print(f'  ❌ Null byte in <w:t>')
+                null_ok = False
+        if null_ok:
+            print('  ✅ No null bytes in text')
+
+        # ── 9. Check w:tblGrid exists in every w:tbl ─────────
+        print('\n── Table grid check ──')
+        tg_ok = True
+        for tbl in root.iter(f'{{{W}}}tbl'):
+            grid = tbl.find(f'{{{W}}}tblGrid')
+            if grid is None:
+                issues.append('<w:tbl> missing <w:tblGrid>')
+                print('  ❌ <w:tbl> missing <w:tblGrid>')
+                tg_ok = False
+        if tg_ok:
+            print('  ✅ All tables have tblGrid')
+
+        # ── 10. Check w:tc has w:tcPr/w:tcW ──────────────────
+        print('\n── Table cell width check ──')
+        tc_w_ok = True
+        for tc in root.iter(f'{{{W}}}tc'):
+            tcPr = tc.find(f'{{{W}}}tcPr')
+            if tcPr is None:
+                issues.append('<w:tc> missing <w:tcPr>')
+                print('  ❌ <w:tc> missing <w:tcPr>')
+                tc_w_ok = False
+                continue
+            tcW = tcPr.find(f'{{{W}}}tcW')
+            if tcW is None:
+                issues.append('<w:tc> missing <w:tcW>')
+                print('  ❌ <w:tc> missing <w:tcW>')
+                tc_w_ok = False
+        if tc_w_ok:
+            print('  ✅ All table cells have tcW')
+
+        # ── 11. Dump first bad element with full path ─────────
+        if issues:
+            print(f'\n{"="*60}')
+            print(f'❌ FOUND {len(issues)} CONTENT ISSUE(S):')
+            for i in issues:
+                print(f'   • {i}')
+            print(f'{"="*60}')
+        else:
+            print(f'\n{"="*60}')
+            print('✅ No content issues found')
+            print('👉 Try the element dump below to find hidden issues')
+            print(f'{"="*60}')
+
+        return issues
+
+
+def dump_first_difference(original_path, output_path):
+    """
+    Compares original docx document.xml with your output.
+    Prints the FIRST element that differs — this is usually
+    exactly where Word chokes.
+    """
+    import zipfile
+    from lxml import etree
+
+    print(f'\n── Diffing document.xml ──')
+
+    with zipfile.ZipFile(original_path, 'r') as zf:
+        with zf.open('word/document.xml') as f:
+            orig_root = etree.fromstring(f.read())
+
+    with zipfile.ZipFile(output_path, 'r') as zf:
+        with zf.open('word/document.xml') as f:
+            out_root = etree.fromstring(f.read())
+
+    orig_elems = list(orig_root.iter())
+    out_elems  = list(out_root.iter())
+
+    print(f'  Original elements : {len(orig_elems)}')
+    print(f'  Output elements   : {len(out_elems)}')
+
+    diffs = 0
+    for i, (o, n) in enumerate(zip(orig_elems, out_elems)):
+        o_tag  = etree.QName(o).localname
+        n_tag  = etree.QName(n).localname
+        o_attr = dict(o.attrib)
+        n_attr = dict(n.attrib)
+        o_text = (o.text or '').strip()
+        n_text = (n.text or '').strip()
+
+        if o_tag != n_tag or o_attr != n_attr or o_text != n_text:
+            print(f'\n  ❌ FIRST DIFF at element #{i}:')
+            print(f'     Original : <{o_tag}> attrs={o_attr} text="{o_text[:80]}"')
+            print(f'     Output   : <{n_tag}> attrs={n_attr} text="{n_text[:80]}"')
+            diffs += 1
+            if diffs >= 5:   # show first 5 diffs only
                 break
 
-        if self._cursor is not None:
-            xx = self._cursor.getnext()
-            if xx is None:
-                return
-            text = get_text(xx, self._doc.nsmap).lower().strip()
+    if diffs == 0:
+        print('  ✅ document.xml content is identical')
+        print('  👉 Difference must be in another XML part')
+        print('     Run dump_first_difference() on styles.xml, numbering.xml next')
 
-            while 'mrmg' not in text:
-                if 'team response' in text:
-                    self._cursor = xx
-                    break
-                nxt = xx.getnext()
-                if nxt is None:
-                    break
-                xx = nxt
-                text = get_text(xx, self._doc.nsmap).lower().strip()
 
-    # ─────────────────────────────────────────────────────────
-    def update_index(self, content, index):
-        idxdoc = etree.parse(
-            os.path.join(self._path, '[Content_Types].xml')
-        ).getroot()
+# ─────────────────────────────────────────────────────────────
+# USAGE — run on your corrupt output file
+# ─────────────────────────────────────────────────────────────
 
-        for k, xx in content['index'].items():
-            local = etree.QName(xx).localname
+corrupt_file   = r"C:\path\to\your\output.docx"
+original_file  = r"C:\path\to\original\source.docx"  # the input ModelDoc file
 
-            if local == 'Default':
-                ext = xx.get('Extension', k)
-                if idxdoc.find(f'./*[@Extension="{ext}"]') is None:
-                    idxdoc.insert(0, self._safe_copy(xx))
+deep_content_diagnose(corrupt_file)
+dump_first_difference(original_file, corrupt_file)
+```
 
-            elif local == 'Override':
-                # ✅ build new_key BEFORE touching xx
-                new_key = (
-                    os.path.dirname(k)
-                    + f'/copy{index}_'
-                    + os.path.basename(k)
-                )
-                if idxdoc.find(f'./*[@PartName="{new_key}"]') is None:
-                    xx_copy = self._safe_copy(xx)     # ✅ clone first
-                    xx_copy.set('PartName', new_key)
-                    idxdoc.append(xx_copy)
-
-        # ✅ xml declaration added
-        self._safe_write(
-            idxdoc,
-            os.path.join(self._path, '[Content_Types].xml')
-        )
-
-    # ─────────────────────────────────────────────────────────
-    def put_relationships(self, content, index):
-        reldoc = etree.parse(
-            os.path.join(self._path, 'word', '_rels', 'document.xml.rels')
+Run this and share what it prints — especially `dump_first_difference()` because it will show **exactly which element** Word is choking on by comparing your output against the original clean file side by side.            os.path.join(self._path, 'word', '_rels', 'document.xml.rels')
         ).getroot()
 
         for relation in content['rels']:
