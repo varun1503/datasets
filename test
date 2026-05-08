@@ -1,198 +1,387 @@
-Yes! Here's a clean validator you can integrate into your existing code. It checks the docx before processing and flags/skips corrupt files:
-
-Here's the validator you can drop into your code:
+Let me dig deeper. The issue is likely in how namespaces are being serialized. Let me give you a proper diagnostic tool first to pinpoint the exact problem:
 
 ```python
-# ─────────────────────────────────────────────
-# DOCX CORRUPTION VALIDATOR
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# STEP 1: RUN THIS DIAGNOSTIC FIRST on a known corrupt output
+# ─────────────────────────────────────────────────────────────
 
 import zipfile
 from lxml import etree
 import os
+import difflib
 
-# Required XML parts that must exist and parse cleanly
-CRITICAL_PARTS = [
-    'word/document.xml',
-    'word/_rels/document.xml.rels',
-    '[Content_Types].xml',
-    'word/styles.xml',
-]
-
-OPTIONAL_PARTS = [
-    'word/numbering.xml',
-    'word/settings.xml',
-]
-
-
-def validate_docx(filepath):
+def deep_diagnose(filepath):
     """
-    Validates a .docx file before processing.
-
-    Returns:
-        (is_valid: bool, reasons: list[str])
-
-    Usage:
-        is_valid, reasons = validate_docx("myfile.docx")
-        if not is_valid:
-            print(f"CORRUPT: {reasons}")
+    Run this on a docx that Word rejects.
+    Prints exactly what is wrong and in which XML part.
     """
-    reasons = []
+    print(f"\n{'='*60}")
+    print(f"DIAGNOSING: {os.path.basename(filepath)}")
+    print(f"{'='*60}")
 
-    # ── 1. File existence & extension ──────────────────────────
-    if not os.path.exists(filepath):
-        return False, ["File does not exist"]
-
-    if not filepath.lower().endswith('.docx'):
-        return False, ["Not a .docx file"]
-
-    if os.path.getsize(filepath) == 0:
-        return False, ["File is empty (0 bytes)"]
-
-    # ── 2. Valid ZIP structure ──────────────────────────────────
     if not zipfile.is_zipfile(filepath):
-        return False, ["Not a valid ZIP/docx archive"]
+        print("❌ FATAL: Not a valid ZIP file at all")
+        return
 
-    try:
-        zf = zipfile.ZipFile(filepath, 'r')
-    except zipfile.BadZipFile as e:
-        return False, [f"BadZipFile: {e}"]
+    with zipfile.ZipFile(filepath, 'r') as zf:
+        names = zf.namelist()
+        print(f"\n📦 ZIP contains {len(names)} files")
 
-    with zf:
-        zip_names = zf.namelist()
+        # ── Check 1: Required parts ──────────────────────────
+        required = [
+            '[Content_Types].xml',
+            'word/document.xml',
+            'word/_rels/document.xml.rels',
+            'word/styles.xml',
+        ]
+        print("\n── Required parts ──")
+        for r in required:
+            status = "✅" if r in names else "❌ MISSING"
+            print(f"  {status}  {r}")
 
-        # ── 3. Critical parts must exist ───────────────────────
-        for part in CRITICAL_PARTS:
-            if part not in zip_names:
-                reasons.append(f"Missing critical part: {part}")
-
-        if reasons:
-            return False, reasons  # stop early — no point parsing
-
-        # ── 4. Critical XML must parse cleanly ─────────────────
-        for part in CRITICAL_PARTS:
+        # ── Check 2: Parse every XML file ────────────────────
+        print("\n── XML parse check ──")
+        bad_xml = []
+        for name in names:
+            if not (name.endswith('.xml') or name.endswith('.rels')):
+                continue
             try:
-                with zf.open(part) as f:
-                    etree.parse(f)
+                with zf.open(name) as f:
+                    raw = f.read()
+                etree.fromstring(raw)
+                print(f"  ✅  {name}")
             except etree.XMLSyntaxError as e:
-                reasons.append(f"XML syntax error in {part}: {e}")
-            except Exception as e:
-                reasons.append(f"Cannot read {part}: {e}")
+                print(f"  ❌  {name}")
+                print(f"       ERROR: {e}")
+                bad_xml.append((name, raw, str(e)))
 
-        # ── 5. Optional parts — warn but don't fail ────────────
-        warnings = []
-        for part in OPTIONAL_PARTS:
-            if part in zip_names:
-                try:
-                    with zf.open(part) as f:
-                        etree.parse(f)
-                except etree.XMLSyntaxError as e:
-                    warnings.append(f"XML warning in {part}: {e}")
+        # ── Check 3: Dump first 2000 chars of bad XML ────────
+        for name, raw, err in bad_xml:
+            print(f"\n{'─'*50}")
+            print(f"CONTENT OF BROKEN FILE: {name}")
+            print(f"{'─'*50}")
+            print(raw[:2000].decode('utf-8', errors='replace'))
 
-        # ── 6. Relationships must reference existing parts ─────
-        try:
+        # ── Check 4: numbering.xml order ─────────────────────
+        if 'word/numbering.xml' in names:
+            print("\n── numbering.xml element order ──")
+            with zf.open('word/numbering.xml') as f:
+                num = etree.parse(f).getroot()
+            tags = [etree.QName(c).localname for c in num]
+            print(f"  Order: {tags[:20]}")  # first 20 tags
+            
+            # abstractNum must ALL come before any num
+            seen_num = False
+            order_ok = True
+            for tag in tags:
+                if tag == 'num':
+                    seen_num = True
+                if tag == 'abstractNum' and seen_num:
+                    order_ok = False
+                    break
+            print(f"  Order valid: {'✅' if order_ok else '❌ abstractNum appears AFTER num'}")
+
+        # ── Check 5: Content_Types.xml duplicates ────────────
+        if '[Content_Types].xml' in names:
+            print("\n── [Content_Types].xml duplicates ──")
+            with zf.open('[Content_Types].xml') as f:
+                ct = etree.parse(f).getroot()
+            
+            seen_ext, seen_part = {}, {}
+            for child in ct:
+                ext = child.get('Extension')
+                part = child.get('PartName')
+                if ext:
+                    if ext in seen_ext:
+                        print(f"  ❌ DUPLICATE Extension: {ext}")
+                    seen_ext[ext] = True
+                if part:
+                    if part in seen_part:
+                        print(f"  ❌ DUPLICATE PartName: {part}")
+                    seen_part[part] = True
+            if not any('DUPLICATE' in str(x) for x in [seen_ext, seen_part]):
+                print("  ✅ No duplicates found")
+
+        # ── Check 6: Relationship targets exist ──────────────
+        if 'word/_rels/document.xml.rels' in names:
+            print("\n── Relationship target check ──")
             with zf.open('word/_rels/document.xml.rels') as f:
-                reldoc = etree.parse(f).getroot()
-            for rel in reldoc.findall('./'):
+                rels = etree.parse(f).getroot()
+            for rel in rels:
                 target = rel.get('Target', '')
                 mode = rel.get('TargetMode', '')
-                if mode == 'External':
+                if mode == 'External' or not target:
                     continue
                 full = f"word/{target}" if not target.startswith('/') else target.lstrip('/')
-                if full not in zip_names:
-                    warnings.append(f"Relationship target missing: {full}")
-        except Exception:
-            pass  # already caught above
+                if full not in names:
+                    print(f"  ❌ MISSING target: {full}")
+                else:
+                    print(f"  ✅  {full}")
 
-    if reasons:
-        return False, reasons
+        # ── Check 7: namespace declarations in document.xml ──
+        if 'word/document.xml' in names:
+            print("\n── Namespace check in document.xml ──")
+            with zf.open('word/document.xml') as f:
+                raw = f.read()
+            root = etree.fromstring(raw)
+            required_ns = {
+                'w':   'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+                'r':   'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
+                'wp':  'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing',
+            }
+            for prefix, uri in required_ns.items():
+                if uri in root.nsmap.values():
+                    print(f"  ✅  ns:{prefix} present")
+                else:
+                    print(f"  ⚠️  ns:{prefix} ({uri}) NOT declared on root")
 
-    return True, warnings  # valid; warnings may still be populated
-
-
-# ─────────────────────────────────────────────
-# FLAG + SKIP WRAPPER  — plug into your loop
-# ─────────────────────────────────────────────
-
-def process_documents(file_list):
-    """
-    Wraps your Document1 / ModelDoc / ValReport instantiation.
-    Flags corrupt files and skips them automatically.
-    """
-    corrupt_log = []   # collects all flagged files
-    processed   = []
-    skipped     = []
-
-    for filepath in file_list:
-        is_valid, issues = validate_docx(filepath)
-
-        if not is_valid:
-            # ── FLAG it ────────────────────────────────────────
-            corrupt_log.append({
-                'file':   filepath,
-                'issues': issues,
-            })
-            skipped.append(filepath)
-            print(f"[CORRUPT ✗] {os.path.basename(filepath)}")
-            for issue in issues:
-                print(f"            └─ {issue}")
-            continue  # ← STOP EXECUTION for this file
-
-        if issues:  # warnings only
-            print(f"[WARN    ⚠] {os.path.basename(filepath)}")
-            for w in issues:
-                print(f"            └─ {w}")
-
-        # ── Safe to process ────────────────────────────────────
-        try:
-            print(f"[OK      ✓] {os.path.basename(filepath)}")
-            doc = ModelDoc(filepath)       # or ValReport(filepath)
-            processed.append(filepath)
-            # ... rest of your logic here ...
-
-        except Exception as e:
-            # catches runtime corruption not caught by validator
-            corrupt_log.append({'file': filepath, 'issues': [str(e)]})
-            skipped.append(filepath)
-            print(f"[RUNTIME ✗] {os.path.basename(filepath)}: {e}")
-
-    # ── Summary report ─────────────────────────────────────────
-    print(f"\n{'─'*50}")
-    print(f"  Processed : {len(processed)}")
-    print(f"  Skipped   : {len(skipped)}")
-    print(f"  Corrupt   : {len(corrupt_log)}")
-    print(f"{'─'*50}")
-
-    if corrupt_log:
-        print("\nCorrupt file details:")
-        for entry in corrupt_log:
-            print(f"  • {entry['file']}")
-            for issue in entry['issues']:
-                print(f"      - {issue}")
-
-    return processed, corrupt_log
+    print(f"\n{'='*60}\n")
 
 
-# ─────────────────────────────────────────────
-# STANDALONE USAGE (single file check)
-# ─────────────────────────────────────────────
-
-# is_valid, issues = validate_docx("myfile.docx")
-# if not is_valid:
-#     print("Cannot open — file is corrupt:", issues)
-# else:
-#     doc = ModelDoc("myfile.docx")
+# ── Run it ───────────────────────────────────────────────────
+# Point this at a docx your code PRODUCED (the corrupt output)
+deep_diagnose(r"path\to\your\corrupt_output.docx")
 ```
 
-**What it checks, in order:**
+---
 
-| Step | Check | Fail = skip? |
-|------|-------|-------------|
-| 1 | File exists, `.docx` extension, not 0 bytes | ✅ Hard stop |
-| 2 | Valid ZIP archive structure | ✅ Hard stop |
-| 3 | All critical XML parts present | ✅ Hard stop |
-| 4 | Critical XML parses without errors | ✅ Hard stop |
-| 5 | Optional XML (numbering, settings) parses | ⚠ Warning only |
-| 6 | Relationship targets exist in ZIP | ⚠ Warning only |
+```python
+# ─────────────────────────────────────────────────────────────
+# STEP 2: Once you see the error, apply the matching fix below
+# ─────────────────────────────────────────────────────────────
 
-**To use it in your existing flow**, just replace wherever you do `ModelDoc(filepath)` or `ValReport(filepath)` with a call to `process_documents(your_file_list)`, or call `validate_docx()` inline before each instantiation.
+# ══ FIX A: Namespace loss in etree.fromstring(etree.tostring())
+# ══ This is the #1 silent killer — tostring() drops ns context
+# ══ Replace EVERY occurrence of this pattern in your code:
+# ══   etree.fromstring(etree.tostring(elem))
+# ══ With this safe version:
+
+def safe_copy(elem):
+    """
+    Deep-copies an lxml element WITHOUT losing namespace declarations.
+    Drop-in replacement for etree.fromstring(etree.tostring(elem)).
+    """
+    import copy
+    return copy.deepcopy(elem)
+
+
+# ══ FIX B: write XML with full namespace declarations
+# ══ Replace all your etree.ElementTree(...).write(...) calls with:
+
+def safe_write(tree_or_root, path):
+    """
+    Writes XML ensuring namespace declarations are not stripped.
+    """
+    if isinstance(tree_or_root, etree._Element):
+        tree = etree.ElementTree(tree_or_root)
+    else:
+        tree = tree_or_root
+
+    tree.write(
+        path,
+        xml_declaration=True,       # ← ensures <?xml version="1.0"?>
+        encoding='UTF-8',           # ← Word requires explicit encoding
+        standalone=True,            # ← matches what Word expects
+        pretty_print=True,
+    )
+
+
+# ══ FIX C: Patch your ValReport methods to use both fixes above
+
+class ValReport(Document1):
+
+    def update_numbering(self, content, index):
+        suffix = '999' + index
+        numdoc = etree.parse(os.path.join(self._path, 'word', 'numbering.xml')).getroot()
+        w = numdoc.nsmap['w']
+
+        num_ids   = set(numdoc.xpath('./w:num/@w:numId',           namespaces=numdoc.nsmap))
+        anum_ids  = set(numdoc.xpath('./w:abstractNum/@w:abstractNumId', namespaces=numdoc.nsmap))
+        curr_num_ids, curr_anum_ids = set(), set()
+
+        for num in content['nums']:
+            nid = num['id'] + suffix
+            num['elem'].set(num['key'], nid)
+
+            if 'num' not in num['ref']:
+                continue
+            if nid in num_ids or nid in curr_num_ids:
+                continue
+
+            curr_num_ids.add(nid)
+
+            # ── safe deep copy — no namespace loss ──────────
+            num_elem = safe_copy(num['ref']['num'])
+            num_elem.set(f'{{{w}}}numId', nid)
+
+            anum_ref = num_elem.find('./w:abstractNumId', numdoc.nsmap)
+            aid = anum_ref.get(f'{{{w}}}val') + suffix
+            anum_ref.set(f'{{{w}}}val', aid)
+
+            if aid not in anum_ids and aid not in curr_anum_ids:
+                curr_anum_ids.add(aid)
+                anum_elem = safe_copy(num['ref']['anum'])
+                anum_elem.set(f'{{{w}}}abstractNumId', aid)
+
+                # abstractNum MUST come before all w:num
+                first_num = numdoc.find('./w:num', numdoc.nsmap)
+                if first_num is not None:
+                    first_num.addprevious(anum_elem)
+                else:
+                    numdoc.append(anum_elem)
+
+            numdoc.append(num_elem)
+
+        safe_write(numdoc, os.path.join(self._path, 'word', 'numbering.xml'))
+
+    def update_index(self, content, index):
+        idxdoc = etree.parse(os.path.join(self._path, '[Content_Types].xml')).getroot()
+
+        for k, xx in content['index'].items():
+            local = etree.QName(xx).localname
+
+            if local == 'Default':
+                ext = xx.get('Extension', k)
+                if idxdoc.find(f'./*[@Extension="{ext}"]') is None:
+                    idxdoc.insert(0, safe_copy(xx))    # ← safe copy
+
+            elif local == 'Override':
+                new_key = os.path.dirname(k) + f'/copy{index}_' + os.path.basename(k)
+                if idxdoc.find(f'./*[@PartName="{new_key}"]') is None:
+                    xx_copy = safe_copy(xx)            # ← copy BEFORE mutating
+                    xx_copy.set('PartName', new_key)
+                    idxdoc.append(xx_copy)
+
+        safe_write(idxdoc, os.path.join(self._path, '[Content_Types].xml'))
+
+    def update_styles(self, content):
+        stdoc = etree.parse(os.path.join(self._path, 'word', 'styles.xml')).getroot()
+        suffix, w = 'New', stdoc.nsmap['w']
+
+        for style in content['styles']:
+            style['id'] = style['id'] + suffix
+            style['elem'].set(style['key'], style['id'])
+
+            if stdoc.find(f'./w:style[@w:styleId="{style["id"]}"]', stdoc.nsmap) is None:
+                elem_copy = safe_copy(style['ref']['elem'])   # ← safe copy
+                elem_copy.set(f'{{{w}}}styleId', style['id'])
+
+                if 'basedon' in style['ref']:
+                    basedon_id = safe_copy(
+                        style['ref']['basedon']
+                    ).get(f'{{{w}}}styleId') + suffix
+
+                    elem_copy.find('./w:basedOn', stdoc.nsmap).set(f'{{{w}}}val', basedon_id)
+
+                    if stdoc.find(f'./w:style[@w:styleId="{basedon_id}"]', stdoc.nsmap) is None:
+                        base_copy = safe_copy(style['ref']['basedon'])
+                        base_copy.set(f'{{{w}}}styleId', basedon_id)
+                        stdoc.insert(stdoc.index(stdoc.find('./w:style', stdoc.nsmap)), base_copy)
+
+                stdoc.append(elem_copy)
+
+        safe_write(stdoc, os.path.join(self._path, 'word', 'styles.xml'))
+
+    def put_relationships(self, content, index):
+        reldoc = etree.parse(
+            os.path.join(self._path, 'word', '_rels', 'document.xml.rels')
+        ).getroot()
+
+        for relation in content['rels']:
+            val = relation['id'] + 'c' + index
+            relation['elem'].set(relation['key'], val)
+
+            if reldoc.find(f'./*[@Id="{val}"]') is not None:
+                continue
+
+            ref_copy = safe_copy(relation['ref'])    # ← safe copy
+            ref_copy.set('Id', val)
+            reldoc.append(ref_copy)
+
+            if ref_copy.get('TargetMode') != 'External':
+                target = ref_copy.get('Target')
+                new_target = posixpath.join(
+                    os.path.dirname(target),
+                    f'copy{index}_' + os.path.basename(target)
+                )
+                ref_copy.set('Target', new_target)
+                dest = os.path.join(self._path, 'word', *new_target.split('/'))
+                copy_file(relation['source'], dest)
+
+            if relation['type'] == 'chart':
+                name   = relation['chart']['name']
+                crel   = relation['chart']['rels']
+                sources = relation['chart']['sources']
+
+                charts_rels = os.path.join(self._path, 'word', 'charts', '_rels')
+                os.makedirs(charts_rels, exist_ok=True)
+
+                for rel in crel:
+                    if rel.get('TargetMode') != 'External':
+                        t = rel.get('Target')
+                        rel.set('Target', os.path.dirname(t) + f'/copy{index}_' + os.path.basename(t))
+
+                for target, source in sources:
+                    new_t = os.path.dirname(target) + f'/copy{index}_' + os.path.basename(target)
+                    dest  = os.path.join(self._path, 'word', 'charts', *new_t.split('/'))
+                    copy_file(source, dest)
+
+                safe_write(
+                    crel,
+                    os.path.join(charts_rels, f'copy{index}_{os.path.basename(name)}.rels')
+                )
+
+        safe_write(reldoc, os.path.join(self._path, 'word', '_rels', 'document.xml.rels'))
+
+    def paste_content(self, content, after, index):
+        self.move_cursor(to=after)
+        for c in content['data']:
+            self._cursor.addnext(c)
+            self._cursor = self._cursor.getnext()
+
+        self.put_relationships(content, index)
+        self.update_styles(content)
+        self.update_numbering(content, index)
+        self.update_index(content, index)
+
+        safe_write(self._doc, os.path.join(self._path, 'word', 'document.xml'))
+
+    def save(self, filepath=''):
+        filepath = self._path + '.docx' if filepath == '' else filepath
+        if os.path.exists(filepath):
+            os.remove(filepath)
+
+        # validate before saving so you catch it early
+        self.validate_xml_parts()
+
+        no_compress = {'.png', '.jpg', '.jpeg', '.gif', '.wmf', '.emf', '.bin'}
+        with zipfile.ZipFile(filepath, 'w', zipfile.ZIP_DEFLATED) as docx:
+            for foldername, _, filenames in os.walk(self._path):
+                for filename in filenames:
+                    file_path = os.path.join(foldername, filename)
+                    arcname   = os.path.relpath(file_path, self._path)
+                    ext       = os.path.splitext(filename)[1].lower()
+                    compress  = zipfile.ZIP_STORED if ext in no_compress else zipfile.ZIP_DEFLATED
+                    docx.write(file_path, arcname, compress_type=compress)
+
+        return filepath
+
+    def validate_xml_parts(self):
+        """Called automatically inside save(). Prints broken parts."""
+        print("\n── Pre-save XML validation ──")
+        found_error = False
+        for foldername, _, filenames in os.walk(self._path):
+            for filename in filenames:
+                if not (filename.endswith('.xml') or filename.endswith('.rels')):
+                    continue
+                path = os.path.join(foldername, filename)
+                try:
+                    etree.parse(path)
+                except etree.XMLSyntaxError as e:
+                    print(f"  ❌ BROKEN: {path}\n     {e}")
+                    found_error = True
+        if not found_error:
+            print("  ✅ All XML parts valid")
+```
+
+**The key insight is:** run `deep_diagnose()` on your corrupt output file first — it will tell you exactly which XML part is broken and why, then you'll know which fix actually applies to your specific files.
