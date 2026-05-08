@@ -1,131 +1,198 @@
-Looking at your code, the "unreadable content" error in Word typically comes from a few specific issues in how you're writing XML back to the docx. Let me identify the likely culprits:
+Yes! Here's a clean validator you can integrate into your existing code. It checks the docx before processing and flags/skips corrupt files:
 
-**Most probable causes:**
-
-**1. `numbering.xml` corruption** — your `update_numbering` method appends `abstractNum` elements *after* `num` elements, but the Word spec requires all `abstractNum` nodes to come *before* `num` nodes in the file. This is a very common cause of the error.
-
-**2. `[Content_Types].xml` malformed entries** — in `update_index`, you're modifying `PartName` on the original `xx` element in-place before checking if it already exists, which can corrupt the index.
-
-**3. Namespace stripping** — `etree.fromstring(etree.tostring(...))` can drop namespace declarations in some edge cases, producing invalid XML.
-
----
-
-Here are the targeted fixes:
-
-**Fix 1 — `update_numbering`: insert `abstractNum` before all `num` elements**
+Here's the validator you can drop into your code:
 
 ```python
-def update_numbering(self, content, index):
-    suffix = '999' + index
-    numdoc = etree.parse(os.path.join(self._path, 'word', 'numbering.xml')).getroot()
-    w = numdoc.nsmap['w']
-    num_ids = numdoc.xpath('./w:num/@w:numId', namespaces=numdoc.nsmap)
-    anum_ids = numdoc.xpath('./w:abstractNum/@w:abstractNumId', namespaces=numdoc.nsmap)
-    curr_num_ids, curr_anum_ids = [], []
+# ─────────────────────────────────────────────
+# DOCX CORRUPTION VALIDATOR
+# ─────────────────────────────────────────────
 
-    for num in content['nums']:
-        nid = num['id'] + suffix
-        num['elem'].set(num['key'], nid)
+import zipfile
+from lxml import etree
+import os
 
-        if 'num' not in num['ref'] or nid in num_ids or nid in curr_num_ids:
-            continue
+# Required XML parts that must exist and parse cleanly
+CRITICAL_PARTS = [
+    'word/document.xml',
+    'word/_rels/document.xml.rels',
+    '[Content_Types].xml',
+    'word/styles.xml',
+]
 
-        curr_num_ids.append(nid)
-        num['ref']['num'].set(f'{{{w}}}numId', nid)
+OPTIONAL_PARTS = [
+    'word/numbering.xml',
+    'word/settings.xml',
+]
 
-        anum = num['ref']['num'].find('./w:abstractNumId', numdoc.nsmap)
-        aid = anum.get(f'{{{w}}}val') + suffix
-        anum.set(f'{{{w}}}val', aid)
 
-        if aid not in anum_ids and aid not in curr_anum_ids:
-            curr_anum_ids.append(aid)
-            num['ref']['anum'].set(f'{{{w}}}abstractNumId', aid)
+def validate_docx(filepath):
+    """
+    Validates a .docx file before processing.
 
-            # ✅ abstractNum MUST come before all w:num elements
-            first_num = numdoc.find('./w:num', numdoc.nsmap)
-            if first_num is not None:
-                first_num.addprevious(num['ref']['anum'])
-            else:
-                numdoc.append(num['ref']['anum'])
+    Returns:
+        (is_valid: bool, reasons: list[str])
 
-        # ✅ num goes at the end
-        numdoc.append(num['ref']['num'])
+    Usage:
+        is_valid, reasons = validate_docx("myfile.docx")
+        if not is_valid:
+            print(f"CORRUPT: {reasons}")
+    """
+    reasons = []
 
-    etree.ElementTree(numdoc).write(
-        os.path.join(self._path, 'word', 'numbering.xml'), pretty_print=True
-    )
-```
+    # ── 1. File existence & extension ──────────────────────────
+    if not os.path.exists(filepath):
+        return False, ["File does not exist"]
 
----
+    if not filepath.lower().endswith('.docx'):
+        return False, ["Not a .docx file"]
 
-**Fix 2 — `update_index`: don't mutate `xx` before existence check**
+    if os.path.getsize(filepath) == 0:
+        return False, ["File is empty (0 bytes)"]
 
-```python
-def update_index(self, content, index):
-    idxdoc = etree.parse(os.path.join(self._path, '[Content_Types].xml')).getroot()
+    # ── 2. Valid ZIP structure ──────────────────────────────────
+    if not zipfile.is_zipfile(filepath):
+        return False, ["Not a valid ZIP/docx archive"]
 
-    for k, xx in content['index'].items():
-        if etree.QName(xx).localname == 'Default':
-            if idxdoc.find(f'./*[@Extension="{k}"]') is None:
-                idxdoc.insert(0, xx)
+    try:
+        zf = zipfile.ZipFile(filepath, 'r')
+    except zipfile.BadZipFile as e:
+        return False, [f"BadZipFile: {e}"]
 
-        elif etree.QName(xx).localname == 'Override':
-            # ✅ Build the new key BEFORE mutating xx
-            new_key = os.path.dirname(k) + f'/copy{index}_' + os.path.basename(k)
-            if idxdoc.find(f'./*[@PartName="{new_key}"]') is None:
-                # ✅ Clone so you don't corrupt the original
-                xx_copy = etree.fromstring(etree.tostring(xx))
-                xx_copy.set('PartName', new_key)
-                idxdoc.append(xx_copy)
+    with zf:
+        zip_names = zf.namelist()
 
-    etree.ElementTree(idxdoc).write(
-        os.path.join(self._path, '[Content_Types].xml'), pretty_print=True
-    )
-```
+        # ── 3. Critical parts must exist ───────────────────────
+        for part in CRITICAL_PARTS:
+            if part not in zip_names:
+                reasons.append(f"Missing critical part: {part}")
 
----
+        if reasons:
+            return False, reasons  # stop early — no point parsing
 
-**Fix 3 — `save`: preserve existing compression types per file**
+        # ── 4. Critical XML must parse cleanly ─────────────────
+        for part in CRITICAL_PARTS:
+            try:
+                with zf.open(part) as f:
+                    etree.parse(f)
+            except etree.XMLSyntaxError as e:
+                reasons.append(f"XML syntax error in {part}: {e}")
+            except Exception as e:
+                reasons.append(f"Cannot read {part}: {e}")
 
-Your current `save` uses `ZIP_DEFLATED` for everything, but some parts of a docx (like images) may have been stored differently. This can occasionally cause issues:
-
-```python
-def save(self, filepath=''):
-    filepath = self._path + '.docx' if filepath == '' else filepath
-
-    if os.path.exists(filepath):
-        os.remove(filepath)
-
-    # ✅ Use ZIP_DEFLATED but explicitly handle media files
-    no_compress = {'.png', '.jpg', '.jpeg', '.gif', '.wmf', '.emf'}
-
-    with zipfile.ZipFile(filepath, 'w', zipfile.ZIP_DEFLATED) as docx:
-        for foldername, subfolders, filenames in os.walk(self._path):
-            for filename in filenames:
-                file_path = os.path.join(foldername, filename)
-                arcname = os.path.relpath(file_path, self._path)
-                ext = os.path.splitext(filename)[1].lower()
-                compress = zipfile.ZIP_STORED if ext in no_compress else zipfile.ZIP_DEFLATED
-                docx.write(file_path, arcname, compress_type=compress)
-
-    return filepath
-```
-
----
-
-**Quick diagnostic** — to find *which* XML part is actually broken, add this validator before saving:
-
-```python
-def validate_xml_parts(self):
-    """Call this before save() to catch malformed XML early."""
-    for foldername, _, filenames in os.walk(self._path):
-        for filename in filenames:
-            if filename.endswith('.xml') or filename.endswith('.rels'):
-                path = os.path.join(foldername, filename)
+        # ── 5. Optional parts — warn but don't fail ────────────
+        warnings = []
+        for part in OPTIONAL_PARTS:
+            if part in zip_names:
                 try:
-                    etree.parse(path)
+                    with zf.open(part) as f:
+                        etree.parse(f)
                 except etree.XMLSyntaxError as e:
-                    print(f"BROKEN XML: {path}\n  {e}")
+                    warnings.append(f"XML warning in {part}: {e}")
+
+        # ── 6. Relationships must reference existing parts ─────
+        try:
+            with zf.open('word/_rels/document.xml.rels') as f:
+                reldoc = etree.parse(f).getroot()
+            for rel in reldoc.findall('./'):
+                target = rel.get('Target', '')
+                mode = rel.get('TargetMode', '')
+                if mode == 'External':
+                    continue
+                full = f"word/{target}" if not target.startswith('/') else target.lstrip('/')
+                if full not in zip_names:
+                    warnings.append(f"Relationship target missing: {full}")
+        except Exception:
+            pass  # already caught above
+
+    if reasons:
+        return False, reasons
+
+    return True, warnings  # valid; warnings may still be populated
+
+
+# ─────────────────────────────────────────────
+# FLAG + SKIP WRAPPER  — plug into your loop
+# ─────────────────────────────────────────────
+
+def process_documents(file_list):
+    """
+    Wraps your Document1 / ModelDoc / ValReport instantiation.
+    Flags corrupt files and skips them automatically.
+    """
+    corrupt_log = []   # collects all flagged files
+    processed   = []
+    skipped     = []
+
+    for filepath in file_list:
+        is_valid, issues = validate_docx(filepath)
+
+        if not is_valid:
+            # ── FLAG it ────────────────────────────────────────
+            corrupt_log.append({
+                'file':   filepath,
+                'issues': issues,
+            })
+            skipped.append(filepath)
+            print(f"[CORRUPT ✗] {os.path.basename(filepath)}")
+            for issue in issues:
+                print(f"            └─ {issue}")
+            continue  # ← STOP EXECUTION for this file
+
+        if issues:  # warnings only
+            print(f"[WARN    ⚠] {os.path.basename(filepath)}")
+            for w in issues:
+                print(f"            └─ {w}")
+
+        # ── Safe to process ────────────────────────────────────
+        try:
+            print(f"[OK      ✓] {os.path.basename(filepath)}")
+            doc = ModelDoc(filepath)       # or ValReport(filepath)
+            processed.append(filepath)
+            # ... rest of your logic here ...
+
+        except Exception as e:
+            # catches runtime corruption not caught by validator
+            corrupt_log.append({'file': filepath, 'issues': [str(e)]})
+            skipped.append(filepath)
+            print(f"[RUNTIME ✗] {os.path.basename(filepath)}: {e}")
+
+    # ── Summary report ─────────────────────────────────────────
+    print(f"\n{'─'*50}")
+    print(f"  Processed : {len(processed)}")
+    print(f"  Skipped   : {len(skipped)}")
+    print(f"  Corrupt   : {len(corrupt_log)}")
+    print(f"{'─'*50}")
+
+    if corrupt_log:
+        print("\nCorrupt file details:")
+        for entry in corrupt_log:
+            print(f"  • {entry['file']}")
+            for issue in entry['issues']:
+                print(f"      - {issue}")
+
+    return processed, corrupt_log
+
+
+# ─────────────────────────────────────────────
+# STANDALONE USAGE (single file check)
+# ─────────────────────────────────────────────
+
+# is_valid, issues = validate_docx("myfile.docx")
+# if not is_valid:
+#     print("Cannot open — file is corrupt:", issues)
+# else:
+#     doc = ModelDoc("myfile.docx")
 ```
 
-The numbering fix (Fix 1) is almost certainly your main issue — the `abstractNum`/`num` ordering requirement is strict in the OOXML spec and Word silently rejects documents that violate it.
+**What it checks, in order:**
+
+| Step | Check | Fail = skip? |
+|------|-------|-------------|
+| 1 | File exists, `.docx` extension, not 0 bytes | ✅ Hard stop |
+| 2 | Valid ZIP archive structure | ✅ Hard stop |
+| 3 | All critical XML parts present | ✅ Hard stop |
+| 4 | Critical XML parses without errors | ✅ Hard stop |
+| 5 | Optional XML (numbering, settings) parses | ⚠ Warning only |
+| 6 | Relationship targets exist in ZIP | ⚠ Warning only |
+
+**To use it in your existing flow**, just replace wherever you do `ModelDoc(filepath)` or `ValReport(filepath)` with a call to `process_documents(your_file_list)`, or call `validate_docx()` inline before each instantiation.
