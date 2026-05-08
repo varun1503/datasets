@@ -1,387 +1,272 @@
-Let me dig deeper. The issue is likely in how namespaces are being serialized. Let me give you a proper diagnostic tool first to pinpoint the exact problem:
+If the XML all parses fine but Word still complains, the issue is **not XML syntax** — it's **semantic/structural** problems that lxml accepts but Word rejects. Here are the real culprits:
+
+The root cause is almost always **missing namespace declarations** — specifically namespaces like `xmlns:w16cid` that Word's schema validator requires but lxml silently drops. [Docx4java](https://www.docx4java.org/forums/docx-java-f6/invalid-xml-after-template-modification-t2718.html)
+
+Here's a targeted diagnostic that checks **exactly** what Word's schema validator checks (not just XML syntax):
 
 ```python
 # ─────────────────────────────────────────────────────────────
-# STEP 1: RUN THIS DIAGNOSTIC FIRST on a known corrupt output
+# SEMANTIC VALIDATOR — catches what lxml misses but Word rejects
 # ─────────────────────────────────────────────────────────────
 
 import zipfile
 from lxml import etree
-import os
-import difflib
+import re
 
-def deep_diagnose(filepath):
+def semantic_diagnose(filepath):
     """
-    Run this on a docx that Word rejects.
-    Prints exactly what is wrong and in which XML part.
+    Checks things that are XML-valid but OOXML-invalid.
+    These all parse fine in lxml but Word rejects them.
     """
     print(f"\n{'='*60}")
-    print(f"DIAGNOSING: {os.path.basename(filepath)}")
+    print(f"SEMANTIC CHECK: {filepath}")
     print(f"{'='*60}")
 
-    if not zipfile.is_zipfile(filepath):
-        print("❌ FATAL: Not a valid ZIP file at all")
-        return
+    issues = []
 
     with zipfile.ZipFile(filepath, 'r') as zf:
         names = zf.namelist()
-        print(f"\n📦 ZIP contains {len(names)} files")
 
-        # ── Check 1: Required parts ──────────────────────────
-        required = [
-            '[Content_Types].xml',
-            'word/document.xml',
-            'word/_rels/document.xml.rels',
-            'word/styles.xml',
-        ]
-        print("\n── Required parts ──")
-        for r in required:
-            status = "✅" if r in names else "❌ MISSING"
-            print(f"  {status}  {r}")
-
-        # ── Check 2: Parse every XML file ────────────────────
-        print("\n── XML parse check ──")
-        bad_xml = []
+        # ══ CHECK 1: xml declaration + encoding ══════════════
+        # Word requires UTF-8 declaration on every XML part
+        print("\n── XML declarations ──")
         for name in names:
             if not (name.endswith('.xml') or name.endswith('.rels')):
                 continue
-            try:
-                with zf.open(name) as f:
-                    raw = f.read()
-                etree.fromstring(raw)
+            with zf.open(name) as f:
+                first_line = f.read(60)
+            has_decl = first_line.startswith(b'<?xml')
+            has_utf8 = b'UTF-8' in first_line or b'utf-8' in first_line
+            if not has_decl:
+                print(f"  ❌ MISSING xml declaration: {name}")
+                issues.append(f"No xml declaration: {name}")
+            elif not has_utf8:
+                print(f"  ⚠️  No UTF-8 encoding declared: {name}")
+            else:
                 print(f"  ✅  {name}")
-            except etree.XMLSyntaxError as e:
-                print(f"  ❌  {name}")
-                print(f"       ERROR: {e}")
-                bad_xml.append((name, raw, str(e)))
 
-        # ── Check 3: Dump first 2000 chars of bad XML ────────
-        for name, raw, err in bad_xml:
-            print(f"\n{'─'*50}")
-            print(f"CONTENT OF BROKEN FILE: {name}")
-            print(f"{'─'*50}")
-            print(raw[:2000].decode('utf-8', errors='replace'))
+        # ══ CHECK 2: required namespaces on document.xml root ═
+        print("\n── Root namespace declarations ──")
+        REQUIRED_NS = {
+            'w':    'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+            'r':    'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
+            'mc':   'http://schemas.openxmlformats.org/markup-compatibility/2006',
+            'w14':  'http://schemas.microsoft.com/office/word/2010/wordml',
+            'w15':  'http://schemas.microsoft.com/office/word/2012/wordml',
+        }
+        with zf.open('word/document.xml') as f:
+            raw = f.read()
+        root = etree.fromstring(raw)
+        declared = set(root.nsmap.values())
+        for prefix, uri in REQUIRED_NS.items():
+            if uri in declared:
+                print(f"  ✅  {prefix}: {uri}")
+            else:
+                print(f"  ⚠️  MISSING (may be ok): {prefix}: {uri}")
 
-        # ── Check 4: numbering.xml order ─────────────────────
+        # ══ CHECK 3: rsidR / rsidRPr orphan attributes ════════
+        # These are revision-save IDs — if present on elements
+        # without the w: namespace declared they corrupt the doc
+        print("\n── Orphan rsid attributes ──")
+        tree = etree.fromstring(raw)
+        w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+        rsid_ok = True
+        for elem in tree.iter():
+            for attr_name in elem.attrib:
+                if 'rsid' in attr_name.lower() and '{' not in attr_name:
+                    print(f"  ❌ Bare rsid attr '{attr_name}' on <{etree.QName(elem).localname}>")
+                    issues.append(f"Bare rsid: {attr_name}")
+                    rsid_ok = False
+        if rsid_ok:
+            print("  ✅  No bare rsid attributes")
+
+        # ══ CHECK 4: w:body must end with w:sectPr ════════════
+        print("\n── w:body last element ──")
+        body = tree.find(f'.//{{{w}}}body')
+        if body is not None:
+            last = list(body)[-1] if len(body) else None
+            if last is not None and etree.QName(last).localname == 'sectPr':
+                print("  ✅  body ends with sectPr")
+            else:
+                tag = etree.QName(last).localname if last is not None else 'EMPTY'
+                print(f"  ❌  body ends with <{tag}> — MUST end with sectPr")
+                issues.append("body missing final sectPr")
+
+        # ══ CHECK 5: every w:r must be inside w:p ═════════════
+        print("\n── Run containment check ──")
+        orphan_runs = 0
+        for elem in tree.iter(f'{{{w}}}r'):
+            parent = elem.getparent()
+            if parent is None or etree.QName(parent).localname not in ('p', 'hyperlink', 'ins', 'del', 'sdtContent'):
+                orphan_runs += 1
+                print(f"  ❌  <w:r> inside <{etree.QName(parent).localname}> — invalid")
+        if orphan_runs == 0:
+            print("  ✅  All runs properly contained")
+
+        # ══ CHECK 6: duplicate relationship IDs ═══════════════
+        print("\n── Relationship ID duplicates ──")
+        with zf.open('word/_rels/document.xml.rels') as f:
+            rels = etree.parse(f).getroot()
+        seen_ids = {}
+        dup_found = False
+        for rel in rels:
+            rid = rel.get('Id', '')
+            if rid in seen_ids:
+                print(f"  ❌  DUPLICATE rId: {rid}")
+                issues.append(f"Duplicate rId: {rid}")
+                dup_found = True
+            seen_ids[rid] = True
+        if not dup_found:
+            print("  ✅  No duplicate relationship IDs")
+
+        # ══ CHECK 7: styles referenced in doc exist ═══════════
+        print("\n── Style reference check ──")
+        with zf.open('word/styles.xml') as f:
+            stdoc = etree.parse(f).getroot()
+        sw = stdoc.nsmap.get('w', w)
+        defined_styles = set(
+            stdoc.xpath('./w:style/@w:styleId', namespaces={'w': sw})
+        )
+        missing_styles = set()
+        for elem in tree.iter(f'{{{w}}}pStyle', f'{{{w}}}rStyle', f'{{{w}}}tblStyle'):
+            val = elem.get(f'{{{w}}}val', '')
+            if val and val not in defined_styles:
+                missing_styles.add(val)
+        if missing_styles:
+            for s in missing_styles:
+                print(f"  ❌  Style referenced but not defined: '{s}'")
+                issues.append(f"Missing style: {s}")
+        else:
+            print("  ✅  All styles defined")
+
+        # ══ CHECK 8: numId references exist in numbering.xml ══
         if 'word/numbering.xml' in names:
-            print("\n── numbering.xml element order ──")
+            print("\n── NumId reference check ──")
             with zf.open('word/numbering.xml') as f:
-                num = etree.parse(f).getroot()
-            tags = [etree.QName(c).localname for c in num]
-            print(f"  Order: {tags[:20]}")  # first 20 tags
-            
-            # abstractNum must ALL come before any num
-            seen_num = False
-            order_ok = True
-            for tag in tags:
-                if tag == 'num':
-                    seen_num = True
-                if tag == 'abstractNum' and seen_num:
-                    order_ok = False
-                    break
-            print(f"  Order valid: {'✅' if order_ok else '❌ abstractNum appears AFTER num'}")
+                numdoc = etree.parse(f).getroot()
+            nw = numdoc.nsmap.get('w', w)
+            defined_nums = set(
+                numdoc.xpath('./w:num/@w:numId', namespaces={'w': nw})
+            )
+            missing_nums = set()
+            for elem in tree.iter(f'{{{w}}}numId'):
+                val = elem.get(f'{{{w}}}val', '')
+                if val and val != '0' and val not in defined_nums:
+                    missing_nums.add(val)
+            if missing_nums:
+                for n in missing_nums:
+                    print(f"  ❌  numId '{n}' used but not defined in numbering.xml")
+                    issues.append(f"Missing numId: {n}")
+            else:
+                print("  ✅  All numIds defined")
 
-        # ── Check 5: Content_Types.xml duplicates ────────────
-        if '[Content_Types].xml' in names:
-            print("\n── [Content_Types].xml duplicates ──")
-            with zf.open('[Content_Types].xml') as f:
-                ct = etree.parse(f).getroot()
-            
-            seen_ext, seen_part = {}, {}
-            for child in ct:
-                ext = child.get('Extension')
-                part = child.get('PartName')
-                if ext:
-                    if ext in seen_ext:
-                        print(f"  ❌ DUPLICATE Extension: {ext}")
-                    seen_ext[ext] = True
-                if part:
-                    if part in seen_part:
-                        print(f"  ❌ DUPLICATE PartName: {part}")
-                    seen_part[part] = True
-            if not any('DUPLICATE' in str(x) for x in [seen_ext, seen_part]):
-                print("  ✅ No duplicates found")
-
-        # ── Check 6: Relationship targets exist ──────────────
-        if 'word/_rels/document.xml.rels' in names:
-            print("\n── Relationship target check ──")
-            with zf.open('word/_rels/document.xml.rels') as f:
-                rels = etree.parse(f).getroot()
-            for rel in rels:
-                target = rel.get('Target', '')
-                mode = rel.get('TargetMode', '')
-                if mode == 'External' or not target:
-                    continue
-                full = f"word/{target}" if not target.startswith('/') else target.lstrip('/')
-                if full not in names:
-                    print(f"  ❌ MISSING target: {full}")
-                else:
-                    print(f"  ✅  {full}")
-
-        # ── Check 7: namespace declarations in document.xml ──
-        if 'word/document.xml' in names:
-            print("\n── Namespace check in document.xml ──")
-            with zf.open('word/document.xml') as f:
-                raw = f.read()
-            root = etree.fromstring(raw)
-            required_ns = {
-                'w':   'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
-                'r':   'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
-                'wp':  'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing',
-            }
-            for prefix, uri in required_ns.items():
-                if uri in root.nsmap.values():
-                    print(f"  ✅  ns:{prefix} present")
-                else:
-                    print(f"  ⚠️  ns:{prefix} ({uri}) NOT declared on root")
-
-    print(f"\n{'='*60}\n")
-
-
-# ── Run it ───────────────────────────────────────────────────
-# Point this at a docx your code PRODUCED (the corrupt output)
-deep_diagnose(r"path\to\your\corrupt_output.docx")
-```
-
----
-
-```python
-# ─────────────────────────────────────────────────────────────
-# STEP 2: Once you see the error, apply the matching fix below
-# ─────────────────────────────────────────────────────────────
-
-# ══ FIX A: Namespace loss in etree.fromstring(etree.tostring())
-# ══ This is the #1 silent killer — tostring() drops ns context
-# ══ Replace EVERY occurrence of this pattern in your code:
-# ══   etree.fromstring(etree.tostring(elem))
-# ══ With this safe version:
-
-def safe_copy(elem):
-    """
-    Deep-copies an lxml element WITHOUT losing namespace declarations.
-    Drop-in replacement for etree.fromstring(etree.tostring(elem)).
-    """
-    import copy
-    return copy.deepcopy(elem)
-
-
-# ══ FIX B: write XML with full namespace declarations
-# ══ Replace all your etree.ElementTree(...).write(...) calls with:
-
-def safe_write(tree_or_root, path):
-    """
-    Writes XML ensuring namespace declarations are not stripped.
-    """
-    if isinstance(tree_or_root, etree._Element):
-        tree = etree.ElementTree(tree_or_root)
+    # ── Summary ───────────────────────────────────────────────
+    print(f"\n{'='*60}")
+    if issues:
+        print(f"❌  FOUND {len(issues)} ISSUE(S):")
+        for i in issues:
+            print(f"    • {i}")
     else:
-        tree = tree_or_root
+        print("✅  No semantic issues found — check ZIP encoding (see below)")
+    print(f"{'='*60}\n")
 
-    tree.write(
-        path,
-        xml_declaration=True,       # ← ensures <?xml version="1.0"?>
-        encoding='UTF-8',           # ← Word requires explicit encoding
-        standalone=True,            # ← matches what Word expects
-        pretty_print=True,
-    )
+    return issues
 
 
-# ══ FIX C: Patch your ValReport methods to use both fixes above
+# ─────────────────────────────────────────────────────────────
+# ZIP ENCODING CHECK — the silent killer when XML looks fine
+# This checks the actual bytes of the ZIP central directory
+# ─────────────────────────────────────────────────────────────
 
-class ValReport(Document1):
+def check_zip_encoding(filepath):
+    """
+    Checks if the ZIP was built correctly at the byte level.
+    Windows ZIP (used by shutil/zipfile defaults) can produce
+    a ZIP that Word rejects even though the XML is fine.
+    """
+    print(f"\n── ZIP encoding check ──")
+    with open(filepath, 'rb') as f:
+        data = f.read()
 
-    def update_numbering(self, content, index):
-        suffix = '999' + index
-        numdoc = etree.parse(os.path.join(self._path, 'word', 'numbering.xml')).getroot()
-        w = numdoc.nsmap['w']
+    # Check for ZIP64 end of central directory (Word dislikes it)
+    if b'PK\x06\x06' in data:
+        print("  ❌  ZIP64 format detected — Word may reject this")
+    else:
+        print("  ✅  Standard ZIP format")
 
-        num_ids   = set(numdoc.xpath('./w:num/@w:numId',           namespaces=numdoc.nsmap))
-        anum_ids  = set(numdoc.xpath('./w:abstractNum/@w:abstractNumId', namespaces=numdoc.nsmap))
-        curr_num_ids, curr_anum_ids = set(), set()
+    # Check first entry starts at offset 0
+    if data[:2] == b'PK':
+        print("  ✅  Valid PK signature")
+    else:
+        print("  ❌  Invalid ZIP signature")
 
-        for num in content['nums']:
-            nid = num['id'] + suffix
-            num['elem'].set(num['key'], nid)
+    # Check [Content_Types].xml is the FIRST entry in ZIP
+    first_entry_end = data.find(b'\x00', 30)
+    first_name = data[30:first_entry_end].decode('latin-1', errors='replace')
+    if '[Content_Types].xml' in first_name:
+        print("  ✅  [Content_Types].xml is first entry")
+    else:
+        print(f"  ❌  First ZIP entry is '{first_name}' — should be [Content_Types].xml")
+        print("      Word REQUIRES [Content_Types].xml to be the first file in the ZIP")
 
-            if 'num' not in num['ref']:
-                continue
-            if nid in num_ids or nid in curr_num_ids:
-                continue
 
-            curr_num_ids.add(nid)
+# ─────────────────────────────────────────────────────────────
+# FIXED save() — forces [Content_Types].xml first in ZIP
+# This alone fixes many "valid XML but corrupt" cases
+# ─────────────────────────────────────────────────────────────
 
-            # ── safe deep copy — no namespace loss ──────────
-            num_elem = safe_copy(num['ref']['num'])
-            num_elem.set(f'{{{w}}}numId', nid)
+def save(self, filepath=''):
+    filepath = self._path + '.docx' if filepath == '' else filepath
+    if os.path.exists(filepath):
+        os.remove(filepath)
 
-            anum_ref = num_elem.find('./w:abstractNumId', numdoc.nsmap)
-            aid = anum_ref.get(f'{{{w}}}val') + suffix
-            anum_ref.set(f'{{{w}}}val', aid)
+    no_compress = {'.png', '.jpg', '.jpeg', '.gif', '.wmf', '.emf', '.bin'}
 
-            if aid not in anum_ids and aid not in curr_anum_ids:
-                curr_anum_ids.add(aid)
-                anum_elem = safe_copy(num['ref']['anum'])
-                anum_elem.set(f'{{{w}}}abstractNumId', aid)
+    # Collect all files
+    all_files = []
+    for foldername, _, filenames in os.walk(self._path):
+        for filename in filenames:
+            file_path = os.path.join(foldername, filename)
+            arcname   = os.path.relpath(file_path, self._path).replace(os.sep, '/')
+            all_files.append((file_path, arcname))
 
-                # abstractNum MUST come before all w:num
-                first_num = numdoc.find('./w:num', numdoc.nsmap)
-                if first_num is not None:
-                    first_num.addprevious(anum_elem)
-                else:
-                    numdoc.append(anum_elem)
+    # ✅ Sort so [Content_Types].xml is ALWAYS written first
+    def sort_key(item):
+        arcname = item[1]
+        if arcname == '[Content_Types].xml':
+            return 0
+        if arcname.startswith('_rels/'):
+            return 1
+        if arcname.startswith('word/_rels/'):
+            return 2
+        if arcname == 'word/document.xml':
+            return 3
+        return 10
 
-            numdoc.append(num_elem)
+    all_files.sort(key=sort_key)
 
-        safe_write(numdoc, os.path.join(self._path, 'word', 'numbering.xml'))
+    with zipfile.ZipFile(filepath, 'w', zipfile.ZIP_DEFLATED, allowZip64=False) as docx:
+        for file_path, arcname in all_files:
+            ext      = os.path.splitext(file_path)[1].lower()
+            compress = zipfile.ZIP_STORED if ext in no_compress else zipfile.ZIP_DEFLATED
+            docx.write(file_path, arcname, compress_type=compress)
 
-    def update_index(self, content, index):
-        idxdoc = etree.parse(os.path.join(self._path, '[Content_Types].xml')).getroot()
+    return filepath
 
-        for k, xx in content['index'].items():
-            local = etree.QName(xx).localname
 
-            if local == 'Default':
-                ext = xx.get('Extension', k)
-                if idxdoc.find(f'./*[@Extension="{ext}"]') is None:
-                    idxdoc.insert(0, safe_copy(xx))    # ← safe copy
-
-            elif local == 'Override':
-                new_key = os.path.dirname(k) + f'/copy{index}_' + os.path.basename(k)
-                if idxdoc.find(f'./*[@PartName="{new_key}"]') is None:
-                    xx_copy = safe_copy(xx)            # ← copy BEFORE mutating
-                    xx_copy.set('PartName', new_key)
-                    idxdoc.append(xx_copy)
-
-        safe_write(idxdoc, os.path.join(self._path, '[Content_Types].xml'))
-
-    def update_styles(self, content):
-        stdoc = etree.parse(os.path.join(self._path, 'word', 'styles.xml')).getroot()
-        suffix, w = 'New', stdoc.nsmap['w']
-
-        for style in content['styles']:
-            style['id'] = style['id'] + suffix
-            style['elem'].set(style['key'], style['id'])
-
-            if stdoc.find(f'./w:style[@w:styleId="{style["id"]}"]', stdoc.nsmap) is None:
-                elem_copy = safe_copy(style['ref']['elem'])   # ← safe copy
-                elem_copy.set(f'{{{w}}}styleId', style['id'])
-
-                if 'basedon' in style['ref']:
-                    basedon_id = safe_copy(
-                        style['ref']['basedon']
-                    ).get(f'{{{w}}}styleId') + suffix
-
-                    elem_copy.find('./w:basedOn', stdoc.nsmap).set(f'{{{w}}}val', basedon_id)
-
-                    if stdoc.find(f'./w:style[@w:styleId="{basedon_id}"]', stdoc.nsmap) is None:
-                        base_copy = safe_copy(style['ref']['basedon'])
-                        base_copy.set(f'{{{w}}}styleId', basedon_id)
-                        stdoc.insert(stdoc.index(stdoc.find('./w:style', stdoc.nsmap)), base_copy)
-
-                stdoc.append(elem_copy)
-
-        safe_write(stdoc, os.path.join(self._path, 'word', 'styles.xml'))
-
-    def put_relationships(self, content, index):
-        reldoc = etree.parse(
-            os.path.join(self._path, 'word', '_rels', 'document.xml.rels')
-        ).getroot()
-
-        for relation in content['rels']:
-            val = relation['id'] + 'c' + index
-            relation['elem'].set(relation['key'], val)
-
-            if reldoc.find(f'./*[@Id="{val}"]') is not None:
-                continue
-
-            ref_copy = safe_copy(relation['ref'])    # ← safe copy
-            ref_copy.set('Id', val)
-            reldoc.append(ref_copy)
-
-            if ref_copy.get('TargetMode') != 'External':
-                target = ref_copy.get('Target')
-                new_target = posixpath.join(
-                    os.path.dirname(target),
-                    f'copy{index}_' + os.path.basename(target)
-                )
-                ref_copy.set('Target', new_target)
-                dest = os.path.join(self._path, 'word', *new_target.split('/'))
-                copy_file(relation['source'], dest)
-
-            if relation['type'] == 'chart':
-                name   = relation['chart']['name']
-                crel   = relation['chart']['rels']
-                sources = relation['chart']['sources']
-
-                charts_rels = os.path.join(self._path, 'word', 'charts', '_rels')
-                os.makedirs(charts_rels, exist_ok=True)
-
-                for rel in crel:
-                    if rel.get('TargetMode') != 'External':
-                        t = rel.get('Target')
-                        rel.set('Target', os.path.dirname(t) + f'/copy{index}_' + os.path.basename(t))
-
-                for target, source in sources:
-                    new_t = os.path.dirname(target) + f'/copy{index}_' + os.path.basename(target)
-                    dest  = os.path.join(self._path, 'word', 'charts', *new_t.split('/'))
-                    copy_file(source, dest)
-
-                safe_write(
-                    crel,
-                    os.path.join(charts_rels, f'copy{index}_{os.path.basename(name)}.rels')
-                )
-
-        safe_write(reldoc, os.path.join(self._path, 'word', '_rels', 'document.xml.rels'))
-
-    def paste_content(self, content, after, index):
-        self.move_cursor(to=after)
-        for c in content['data']:
-            self._cursor.addnext(c)
-            self._cursor = self._cursor.getnext()
-
-        self.put_relationships(content, index)
-        self.update_styles(content)
-        self.update_numbering(content, index)
-        self.update_index(content, index)
-
-        safe_write(self._doc, os.path.join(self._path, 'word', 'document.xml'))
-
-    def save(self, filepath=''):
-        filepath = self._path + '.docx' if filepath == '' else filepath
-        if os.path.exists(filepath):
-            os.remove(filepath)
-
-        # validate before saving so you catch it early
-        self.validate_xml_parts()
-
-        no_compress = {'.png', '.jpg', '.jpeg', '.gif', '.wmf', '.emf', '.bin'}
-        with zipfile.ZipFile(filepath, 'w', zipfile.ZIP_DEFLATED) as docx:
-            for foldername, _, filenames in os.walk(self._path):
-                for filename in filenames:
-                    file_path = os.path.join(foldername, filename)
-                    arcname   = os.path.relpath(file_path, self._path)
-                    ext       = os.path.splitext(filename)[1].lower()
-                    compress  = zipfile.ZIP_STORED if ext in no_compress else zipfile.ZIP_DEFLATED
-                    docx.write(file_path, arcname, compress_type=compress)
-
-        return filepath
-
-    def validate_xml_parts(self):
-        """Called automatically inside save(). Prints broken parts."""
-        print("\n── Pre-save XML validation ──")
-        found_error = False
-        for foldername, _, filenames in os.walk(self._path):
-            for filename in filenames:
-                if not (filename.endswith('.xml') or filename.endswith('.rels')):
-                    continue
-                path = os.path.join(foldername, filename)
-                try:
-                    etree.parse(path)
-                except etree.XMLSyntaxError as e:
-                    print(f"  ❌ BROKEN: {path}\n     {e}")
-                    found_error = True
-        if not found_error:
-            print("  ✅ All XML parts valid")
+# ── Run both checks on your corrupt file ─────────────────────
+semantic_diagnose(r"path\to\your\output.docx")
+check_zip_encoding(r"path\to\your\output.docx")
 ```
 
-**The key insight is:** run `deep_diagnose()` on your corrupt output file first — it will tell you exactly which XML part is broken and why, then you'll know which fix actually applies to your specific files.
+The three most likely causes when XML parses fine but Word rejects it:
+
+**Priority order to check:**
+
+1. **`[Content_Types].xml` not first in ZIP** — Word's parser hard-requires this as the very first entry. The fixed `save()` above sorts it to position 0.
+
+2. **Missing style referenced in document** — your `clean_paragraph()` sets every paragraph to style `'Body'` but if `Body` doesn't exist in `styles.xml` of the *target* document, Word silently corrupts on open.
+
+3. **Duplicate relationship IDs** — your `put_relationships` appends `rId + 'c' + index` but if `paste_content` is called multiple times with the same index, IDs collide.
+
+Run `semantic_diagnose()` and `check_zip_encoding()` on your corrupt output and share what they print — that will pinpoint it exactly.
