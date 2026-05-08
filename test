@@ -1,61 +1,376 @@
-The diagnostic found it. **Every single XML part is missing the `<?xml ...?>` declaration.** This is exactly why Word rejects it.
-
-The cause is your `etree.ElementTree.write()` calls — you're not passing `xml_declaration=True`. Fix it in one place by replacing your `safe_write` function and it fixes all 75 issues at once:
+Here is the complete `ValReport` class with all fixes applied:
 
 ```python
-# ─────────────────────────────────────────────────────────────
-# THE FIX — replace your safe_write with this
-# ─────────────────────────────────────────────────────────────
+class ValReport(Document1):
+    def __init__(self, filepath, report='main') -> None:
+        super().__init__(filepath)
+        self._type = report
 
-def safe_write(tree_or_root, path):
-    if isinstance(tree_or_root, etree._Element):
-        tree = etree.ElementTree(tree_or_root)
-    else:
-        tree = tree_or_root
+    # ─────────────────────────────────────────────────────────
+    # HELPER — safe XML write with declaration
+    # ─────────────────────────────────────────────────────────
+    def _safe_write(self, tree_or_root, path):
+        if isinstance(tree_or_root, etree._Element):
+            tree = etree.ElementTree(tree_or_root)
+        else:
+            tree = tree_or_root
+        tree.write(
+            path,
+            xml_declaration=True,
+            encoding='UTF-8',
+            standalone=True,
+            pretty_print=True,
+        )
 
-    tree.write(
-        path,
-        xml_declaration=True,   # ✅ adds <?xml version='1.0' encoding='UTF-8'?>
-        encoding='UTF-8',       # ✅ Word requires explicit UTF-8
-        standalone=True,        # ✅ matches original Word files
-        pretty_print=True,
-    )
+    # ─────────────────────────────────────────────────────────
+    # HELPER — safe deep copy without namespace loss
+    # ─────────────────────────────────────────────────────────
+    def _safe_copy(self, elem):
+        import copy
+        return copy.deepcopy(elem)
+
+    # ─────────────────────────────────────────────────────────
+    def move_cursor(self, to='question?'):
+        self._cursor = None
+
+        to = to.lower().strip()
+        for xx in self._doc.xpath('.//w:body/w:p', namespaces=self._doc.nsmap):
+            text = get_text(xx, self._doc.nsmap).lower().strip()
+            if to in text and len(text) - len(to) < 10:
+                self._cursor = xx
+                break
+
+        if self._cursor is not None:
+            xx = self._cursor.getnext()
+            text = get_text(xx, self._doc.nsmap).lower().strip()
+
+            while 'mrmg' not in text:
+                if 'team response' in text:
+                    self._cursor = xx
+                    break
+                else:
+                    xx = xx.getnext()
+                    text = get_text(xx, self._doc.nsmap).lower().strip()
+
+    # ─────────────────────────────────────────────────────────
+    def update_index(self, content, index):
+        idxdoc = etree.parse(
+            os.path.join(self._path, '[Content_Types].xml')
+        ).getroot()
+
+        for k, xx in content['index'].items():
+            local = etree.QName(xx).localname
+
+            if local == 'Default':
+                ext = xx.get('Extension', k)
+                if idxdoc.find(f'./*[@Extension="{ext}"]') is None:
+                    idxdoc.insert(0, self._safe_copy(xx))  # ✅ copy, no mutation
+
+            elif local == 'Override':
+                # ✅ build new key BEFORE touching xx
+                new_key = (
+                    os.path.dirname(k)
+                    + f'/copy{index}_'
+                    + os.path.basename(k)
+                )
+                if idxdoc.find(f'./*[@PartName="{new_key}"]') is None:
+                    xx_copy = self._safe_copy(xx)          # ✅ clone first
+                    xx_copy.set('PartName', new_key)
+                    idxdoc.append(xx_copy)
+
+        self._safe_write(idxdoc, os.path.join(self._path, '[Content_Types].xml'))
+
+    # ─────────────────────────────────────────────────────────
+    def put_relationships(self, content, index):
+        reldoc = etree.parse(
+            os.path.join(self._path, 'word', '_rels', 'document.xml.rels')
+        ).getroot()
+
+        for relation in content['rels']:
+            val = relation['id'] + 'c' + index
+            relation['elem'].set(relation['key'], val)
+
+            if reldoc.find(f'./*[@Id="{val}"]') is not None:
+                continue
+
+            ref_copy = self._safe_copy(relation['ref'])    # ✅ safe copy
+            ref_copy.set('Id', val)
+            reldoc.append(ref_copy)
+
+            if ref_copy.get('TargetMode') != 'External':
+                target = ref_copy.get('Target')
+                new_target = posixpath.join(
+                    os.path.dirname(target),
+                    f'copy{index}_' + os.path.basename(target)
+                )
+                ref_copy.set('Target', new_target)
+                dest = os.path.join(
+                    self._path, 'word', *new_target.split('/')
+                )
+                copy_file(relation['source'], dest)
+
+            if relation['type'] == 'chart':
+                name    = relation['chart']['name']
+                crel    = relation['chart']['rels']
+                sources = relation['chart']['sources']
+
+                charts_rels = os.path.join(
+                    self._path, 'word', 'charts', '_rels'
+                )
+                os.makedirs(charts_rels, exist_ok=True)
+
+                for rel in crel:
+                    if rel.get('TargetMode') != 'External':
+                        t = rel.get('Target')
+                        rel.set(
+                            'Target',
+                            os.path.dirname(t)
+                            + f'/copy{index}_'
+                            + os.path.basename(t)
+                        )
+
+                for target, source in sources:
+                    new_t = (
+                        os.path.dirname(target)
+                        + f'/copy{index}_'
+                        + os.path.basename(target)
+                    )
+                    dest = os.path.join(
+                        self._path, 'word', 'charts', *new_t.split('/')
+                    )
+                    copy_file(source, dest)
+
+                # ✅ safe_write adds xml declaration to chart rels
+                self._safe_write(
+                    crel,
+                    os.path.join(
+                        charts_rels,
+                        f'copy{index}_{os.path.basename(name)}.rels'
+                    )
+                )
+
+        # ✅ safe_write adds xml declaration
+        self._safe_write(
+            reldoc,
+            os.path.join(self._path, 'word', '_rels', 'document.xml.rels')
+        )
+
+    # ─────────────────────────────────────────────────────────
+    def update_numbering(self, content, index):
+        suffix = '999' + index
+        numdoc = etree.parse(
+            os.path.join(self._path, 'word', 'numbering.xml')
+        ).getroot()
+        w = numdoc.nsmap['w']
+
+        num_ids  = set(numdoc.xpath('./w:num/@w:numId',
+                                    namespaces=numdoc.nsmap))
+        anum_ids = set(numdoc.xpath('./w:abstractNum/@w:abstractNumId',
+                                    namespaces=numdoc.nsmap))
+        curr_num_ids, curr_anum_ids = set(), set()
+
+        for num in content['nums']:
+            nid = num['id'] + suffix
+            num['elem'].set(num['key'], nid)
+
+            if 'num' not in num['ref']:
+                continue
+            if nid in num_ids or nid in curr_num_ids:
+                continue
+
+            curr_num_ids.add(nid)
+
+            # ✅ safe copy — no namespace loss
+            num_elem = self._safe_copy(num['ref']['num'])
+            num_elem.set(f'{{{w}}}numId', nid)
+
+            anum_ref = num_elem.find('./w:abstractNumId', numdoc.nsmap)
+            aid = anum_ref.get(f'{{{w}}}val') + suffix
+            anum_ref.set(f'{{{w}}}val', aid)
+
+            if aid not in anum_ids and aid not in curr_anum_ids:
+                curr_anum_ids.add(aid)
+                anum_elem = self._safe_copy(num['ref']['anum'])
+                anum_elem.set(f'{{{w}}}abstractNumId', aid)
+
+                # ✅ abstractNum MUST come before all w:num elements
+                first_num = numdoc.find('./w:num', numdoc.nsmap)
+                if first_num is not None:
+                    first_num.addprevious(anum_elem)
+                else:
+                    numdoc.append(anum_elem)
+
+            numdoc.append(num_elem)
+
+        # ✅ safe_write adds xml declaration
+        self._safe_write(
+            numdoc,
+            os.path.join(self._path, 'word', 'numbering.xml')
+        )
+
+    # ─────────────────────────────────────────────────────────
+    def update_styles(self, content):
+        stdoc = etree.parse(
+            os.path.join(self._path, 'word', 'styles.xml')
+        ).getroot()
+        suffix, w = 'New', stdoc.nsmap['w']
+
+        for style in content['styles']:
+            style['id'] = style['id'] + suffix
+            style['elem'].set(style['key'], style['id'])
+
+            if stdoc.find(
+                f'./w:style[@w:styleId="{style["id"]}"]', stdoc.nsmap
+            ) is None:
+                elem_copy = self._safe_copy(style['ref']['elem'])  # ✅ safe copy
+                elem_copy.set(f'{{{w}}}styleId', style['id'])
+
+                if 'basedon' in style['ref']:
+                    basedon_id = (
+                        self._safe_copy(style['ref']['basedon'])
+                        .get(f'{{{w}}}styleId') + suffix
+                    )
+                    elem_copy.find(
+                        './w:basedOn', stdoc.nsmap
+                    ).set(f'{{{w}}}val', basedon_id)
+
+                    if stdoc.find(
+                        f'./w:style[@w:styleId="{basedon_id}"]', stdoc.nsmap
+                    ) is None:
+                        base_copy = self._safe_copy(style['ref']['basedon'])
+                        base_copy.set(f'{{{w}}}styleId', basedon_id)
+                        stdoc.insert(
+                            stdoc.index(stdoc.find('./w:style', stdoc.nsmap)),
+                            base_copy
+                        )
+
+                stdoc.append(elem_copy)
+
+        # ✅ safe_write adds xml declaration
+        self._safe_write(
+            stdoc,
+            os.path.join(self._path, 'word', 'styles.xml')
+        )
+
+    # ─────────────────────────────────────────────────────────
+    def paste_content(self, content, after, index):
+        self.move_cursor(to=after)
+
+        for c in content['data']:
+            self._cursor.addnext(c)
+            self._cursor = self._cursor.getnext()
+
+        self.put_relationships(content, index)
+        self.update_styles(content)
+        self.update_numbering(content, index)
+        self.update_index(content, index)
+
+        # ✅ safe_write adds xml declaration to document.xml
+        self._safe_write(
+            self._doc,
+            os.path.join(self._path, 'word', 'document.xml')
+        )
+
+    # ─────────────────────────────────────────────────────────
+    def put_text(self, after, text, color):
+        self.move_cursor(to=after)
+        if self._cursor is None:
+            return
+
+        safe_text = escape(str(text or ''))
+        w = self._doc.nsmap['w']
+        color_xml = (
+            f'<w:rPr><w:highlight w:val="{color}"/></w:rPr>'
+            if color else ''
+        )
+
+        elem = f'''<w:p xmlns:w="{w}">
+            <w:pPr>
+                <w:pStyle w:val="Body"/>
+            </w:pPr>
+            <w:r>
+                {color_xml}
+                <w:t xml:space="preserve">{safe_text}</w:t>
+            </w:r>
+        </w:p>'''
+
+        new_para = etree.fromstring(elem)
+        self._cursor.addnext(new_para)
+
+        # ✅ safe_write adds xml declaration
+        self._safe_write(
+            self._doc,
+            os.path.join(self._path, 'word', 'document.xml')
+        )
+
+    # ─────────────────────────────────────────────────────────
+    def validate_xml_parts(self):
+        """Call before save() to catch any remaining broken XML."""
+        print('\n── Pre-save XML validation ──')
+        found_error = False
+        for foldername, _, filenames in os.walk(self._path):
+            for filename in filenames:
+                if not (
+                    filename.endswith('.xml')
+                    or filename.endswith('.rels')
+                ):
+                    continue
+                path = os.path.join(foldername, filename)
+                try:
+                    etree.parse(path)
+                except etree.XMLSyntaxError as e:
+                    print(f'  ❌ BROKEN: {path}\n     {e}')
+                    found_error = True
+        if not found_error:
+            print('  ✅ All XML parts valid')
+
+    # ─────────────────────────────────────────────────────────
+    def save(self, filepath=''):
+        filepath = self._path + '.docx' if filepath == '' else filepath
+
+        if os.path.exists(filepath):
+            os.remove(filepath)
+
+        # validate before zipping
+        self.validate_xml_parts()
+
+        no_compress = {'.png', '.jpg', '.jpeg', '.gif', '.wmf', '.emf', '.bin'}
+
+        # collect all files
+        all_files = []
+        for foldername, _, filenames in os.walk(self._path):
+            for filename in filenames:
+                file_path = os.path.join(foldername, filename)
+                arcname   = os.path.relpath(
+                    file_path, self._path
+                ).replace(os.sep, '/')
+                all_files.append((file_path, arcname))
+
+        # ✅ [Content_Types].xml MUST be first entry in ZIP
+        def sort_key(item):
+            a = item[1]
+            if a == '[Content_Types].xml':      return 0
+            if a.startswith('_rels/'):          return 1
+            if a.startswith('word/_rels/'):     return 2
+            if a == 'word/document.xml':        return 3
+            return 10
+
+        all_files.sort(key=sort_key)
+
+        # ✅ allowZip64=False — Word rejects ZIP64 format
+        with zipfile.ZipFile(
+            filepath, 'w', zipfile.ZIP_DEFLATED, allowZip64=False
+        ) as docx:
+            for file_path, arcname in all_files:
+                ext      = os.path.splitext(file_path)[1].lower()
+                compress = (
+                    zipfile.ZIP_STORED
+                    if ext in no_compress
+                    else zipfile.ZIP_DEFLATED
+                )
+                docx.write(file_path, arcname, compress_type=compress)
+
+        return filepath
 ```
 
-Then replace **every** `.write(...)` call in your `ValReport` class:
-
-```python
-# BEFORE (missing declaration — causes all 75 issues):
-etree.ElementTree(numdoc).write(path, pretty_print=True)
-etree.ElementTree(idxdoc).write(path, pretty_print=True)
-etree.ElementTree(stdoc).write(path, pretty_print=True)
-etree.ElementTree(reldoc).write(path, pretty_print=True)
-etree.ElementTree(self._doc).write(path, pretty_print=True)
-
-# AFTER — replace all of them with safe_write:
-safe_write(numdoc,    os.path.join(self._path, 'word', 'numbering.xml'))
-safe_write(idxdoc,    os.path.join(self._path, '[Content_Types].xml'))
-safe_write(stdoc,     os.path.join(self._path, 'word', 'styles.xml'))
-safe_write(reldoc,    os.path.join(self._path, 'word', '_rels', 'document.xml.rels'))
-safe_write(self._doc, os.path.join(self._path, 'word', 'document.xml'))
-```
-
-**For the chart files** (copy13_colors1.xml, copy18_style2.xml etc.) — these are written inside `put_relationships`. Find that line too:
-
-```python
-# BEFORE:
-etree.ElementTree(crel).write(
-    os.path.join(charts_rels, f'copy{index}_{os.path.basename(name)}.rels'),
-    pretty_print=True
-)
-
-# AFTER:
-safe_write(
-    crel,
-    os.path.join(charts_rels, f'copy{index}_{os.path.basename(name)}.rels')
-)
-```
-
-**Why other files open fine but this one doesn't** — files without charts only have 4-5 XML parts written. This file has 75 because it has many copied charts (`copy13`, `copy14`, `copy17`, `copy18`), so every chart's colors/style XML also gets written without the declaration. The more charts a document has, the more broken parts accumulate.
-
-Run the diagnostic again after this fix — you should see 0 issues.
+The three fixes working together in this code are: `_safe_write()` adds `<?xml version='1.0' encoding='UTF-8'?>` to every part (fixes all 75 issues), `_safe_copy()` prevents namespace loss when cloning elements, and `save()` ensures `[Content_Types].xml` is always the first ZIP entry with no ZIP64 format. Run your diagnostic again after this and it should come back clean.
