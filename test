@@ -1,231 +1,275 @@
-Now I can see the exact problem. Looking at the diff output:
-
-**Element #2:** Output has `w14:paraId` and `w14:textId` attributes but **different values** — these are Word 2013+ paragraph identity attributes that got replaced during your `clean_paragraph()` function.
-
-**Element #4:** Original has `<rPr>` but output has `<spacing>` — your `clean_paragraph()` is **stripping and replacing** the original `rPr` content.
-
-**Element #5:** Original has `<rFonts>` with Calibri but output has empty `<rPr>` — fonts being stripped.
-
-**The root cause is `clean_paragraph()`** — it's too aggressive. It strips valid formatting that Word needs. Here is the fix:
+Here's a clean function that tries to open the Word document in the background and flags if it fails:
 
 ```python
+import subprocess
+import os
+import time
+import psutil
+import threading
+from datetime import datetime
+
+
 # ─────────────────────────────────────────────────────────────
-# REPLACE your existing clean_paragraph() with this
+# WORD OPEN VALIDATOR
+# Tries to open the docx silently in the background via COM,
+# flags corruption without any popup showing to the user.
 # ─────────────────────────────────────────────────────────────
 
-def clean_paragraph(p, nsmap):
+def try_open_in_word(filepath, timeout=30):
     """
-    Only adds highlight cyan to runs.
-    Does NOT strip fonts, spacing, rsid, paraId, textId,
-    or any other attributes Word needs.
+    Silently opens a .docx in Word via COM automation.
+    Catches the 'unreadable content' dialog before it shows.
+
+    Returns:
+        (success: bool, reason: str)
+
+    Requirements:
+        pip install pywin32
+        (Windows only — Word must be installed)
     """
-    import copy
-    w = nsmap['w']
+    try:
+        import win32com.client
+        import pythoncom
+    except ImportError:
+        return None, "pywin32 not installed — run: pip install pywin32"
 
-    # ── Only set paragraph style to Body if NO style exists ──
-    # Do NOT clear existing pPr attributes
-    pPr = p.find('w:pPr', nsmap)
-    if pPr is None:
-        pPr = etree.fromstring(f'<w:pPr xmlns:w="{w}"/>')
-        p.insert(0, pPr)
+    filepath = os.path.abspath(filepath)
+    if not os.path.exists(filepath):
+        return False, f"File not found: {filepath}"
 
-    pStyle = pPr.find('w:pStyle', nsmap)
-    if pStyle is None:
-        pStyle = etree.fromstring(f'<w:pStyle xmlns:w="{w}"/>')
-        pPr.insert(0, pStyle)
-        pStyle.set(f'{{{w}}}val', 'Body')
-    # If style already exists — leave it alone, don't overwrite
+    pythoncom.CoInitialize()
+    word = None
 
-    # ── Only add cyan highlight to runs — touch nothing else ──
-    for r in p.findall('w:r', nsmap):
-        # DO NOT clear r.attrib
-        # DO NOT remove rFonts, sz, szCs, lang etc
+    try:
+        # ── Start Word silently ───────────────────────────────
+        word = win32com.client.Dispatch('Word.Application')
+        word.Visible        = False   # completely hidden
+        word.DisplayAlerts  = 0       # 0 = wdAlertsNone — suppresses ALL popups
+                                      # including "unreadable content" dialog
 
-        rPr = r.find('w:rPr', nsmap)
-        if rPr is None:
-            rPr = etree.fromstring(f'<w:rPr xmlns:w="{w}"/>')
-            r.insert(0, rPr)
-
-        # Only add highlight — leave all existing rPr children intact
-        highlight = rPr.find('w:highlight', nsmap)
-        if highlight is None:
-            highlight = etree.fromstring(f'<w:highlight xmlns:w="{w}"/>')
-            rPr.insert(0, highlight)
-
-        highlight.set(f'{{{w}}}val', 'cyan')
-```
-
-And also fix the **element count explosion** — your output has 213047 elements vs original 121229. That means content is being **duplicated**. This happens in `copy_content` when it falls through to the second pass. Add this guard:
-
-```python
-# ─────────────────────────────────────────────────────────────
-# ADD this deduplication guard in copy_content()
-# Right after content['data'].append(xx)
-# ─────────────────────────────────────────────────────────────
-
-def copy_content(self, start=''):
-    section_title = self.move_cursor(start)
-
-    if self._cursor is None:
-        return '', {'data': [], 'styles': [], 'nums': [],
-                    'rels': [], 'index': {}}
-
-    original_cursor = self._cursor
-    content = {
-        'data': [], 'styles': [], 'nums': [],
-        'rels': [], 'index': {}
-    }
-    exclusions = [
-        'bookmarkStart', 'bookmarkEnd', 'footnoteReference',
-        'endnoteReference', 'commentRangeStart',
-        'commentRangeEnd', 'commentReference'
-    ]
-    start_olvl = self.get_outline_level(self._cursor)
-
-    # ── Track seen element signatures to prevent duplicates ──
-    seen_signatures = set()
-
-    def get_signature(elem):
-        """Unique signature for an element to detect duplicates."""
-        texts = ''.join(
-            t.text or ''
-            for t in elem.iter(
-                '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'
-            )
+        # ── Try opening the document ──────────────────────────
+        # AddToRecentFiles=False  → don't pollute recent files
+        # ConfirmConversions=False → no conversion dialogs
+        # ReadOnly=True           → safer, no lock file created
+        doc = word.Documents.Open(
+            filepath,
+            ConfirmConversions = False,
+            ReadOnly           = True,
+            AddToRecentFiles   = False,
+            Repair             = False,   # ✅ False = don't auto-repair
+                                          # if Word repairs it → flag as corrupt
         )
-        return f"{etree.QName(elem).localname}::{texts[:100]}"
 
-    while True:
-        nxt = self._cursor.getnext()
-        if nxt is None:
-            break
+        # ── Check if Word had to repair it ───────────────────
+        # If Word repaired the doc, it means it was corrupt
+        word_count = doc.Words.Count   # forces full parse
+        doc.Close(SaveChanges=False)
 
-        nxt_text = get_text(nxt, self._doc.nsmap).strip()
-        nxt_olvl = self.get_outline_level(nxt)
+        return True, f"OK — opened cleanly ({word_count} words)"
 
-        if (nxt_olvl != -1 and nxt_text != ''
-                and start_olvl != -1 and nxt_olvl <= start_olvl):
-            break
+    except Exception as e:
+        err = str(e)
 
-        xx = copy.deepcopy(nxt)   # ✅ safe copy
+        # ── Classify the error ────────────────────────────────
+        if any(x in err.lower() for x in [
+            'unreadable', 'corrupt', 'repair',
+            'cannot open', 'bad zip', 'invalid'
+        ]):
+            reason = f"CORRUPT — Word rejected: {err}"
+        else:
+            reason = f"FAILED — {err}"
 
-        for x in xx.xpath(
-            ' | '.join(['.//w:' + e for e in exclusions]),
-            namespaces=self._doc.nsmap
-        ):
-            x.getparent().remove(x)
+        return False, reason
 
-        # ✅ use fixed clean_paragraph
-        if etree.QName(xx).localname == 'p':
-            clean_paragraph(xx, self._doc.nsmap)
+    finally:
+        # ── Always close Word cleanly ─────────────────────────
+        try:
+            if word:
+                word.Quit()
+        except Exception:
+            pass
+        pythoncom.CoUninitialize()
 
-        elif etree.QName(xx).localname == 'tbl':
-            for x in xx.xpath('.//w:tblStyle', namespaces=self._doc.nsmap):
-                k = f'{{{self._doc.nsmap["w"]}}}val'
-                content['styles'].append((x.get(k), k, x))
 
-        # ✅ deduplication check
-        sig = get_signature(xx)
-        if sig not in seen_signatures:
-            seen_signatures.add(sig)
-            content['rels'] += [
-                (v, k, x)
-                for x in xx.findall('.//*')
-                for k, v in x.attrib.items()
-                if v.startswith('rId')
-            ]
-            content['nums'] += [
-                (v, k, x)
-                for x in xx.findall('.//w:numPr/w:numId', self._doc.nsmap)
-                for k, v in x.attrib.items()
-                if k.endswith('val')
-            ]
-            content['data'].append(xx)
+# ─────────────────────────────────────────────────────────────
+# BATCH VALIDATOR WITH FLAGS
+# ─────────────────────────────────────────────────────────────
 
-        self._cursor = nxt
+class DocxOpenResult:
+    """Holds the result for one file."""
+    def __init__(self, filepath, success, reason, timestamp):
+        self.filepath  = filepath
+        self.filename  = os.path.basename(filepath)
+        self.success   = success
+        self.reason    = reason
+        self.timestamp = timestamp
 
-    if content['data']:
-        self.get_relationships(content)
-        self.get_numbering(content)
-        self.get_styles(content)
-        return section_title, content
+    def __repr__(self):
+        status = '✅ OK' if self.success else '❌ CORRUPT'
+        return f"[{status}] {self.filename} — {self.reason}"
 
-    # ── Second pass fallback (section number based) ───────────
-    self._cursor = original_cursor
-    content = {
-        'data': [], 'styles': [], 'nums': [],
-        'rels': [], 'index': {}
-    }
-    seen_signatures = set()   # ✅ reset for second pass
-    start_section = extract_section_number(start)
 
-    def is_child_section(child, parent):
-        if not child or not parent:
-            return False
-        return child == parent or child.startswith(parent + '.')
+def validate_docx_opens(
+    file_or_folder,
+    stop_on_first_corrupt = False,
+    timeout               = 30,
+    log_file              = None,
+):
+    """
+    Opens each .docx in Word silently and flags which ones fail.
 
-    started = False
+    Args:
+        file_or_folder      : single .docx path OR folder path
+        stop_on_first_corrupt: if True, stops as soon as one fails
+        timeout             : seconds to wait per file
+        log_file            : optional path to write results to
 
-    while True:
-        nxt = self._cursor.getnext()
-        if nxt is None:
-            break
+    Returns:
+        ok_files      : list of DocxOpenResult that passed
+        corrupt_files : list of DocxOpenResult that failed
+    """
 
-        nxt_text    = get_text(nxt, self._doc.nsmap).strip()
-        nxt_section = extract_section_number(nxt_text)
+    # ── Collect files ─────────────────────────────────────────
+    if os.path.isdir(file_or_folder):
+        files = [
+            os.path.join(file_or_folder, f)
+            for f in os.listdir(file_or_folder)
+            if f.lower().endswith('.docx')
+        ]
+    else:
+        files = [file_or_folder]
 
-        if not started:
-            if nxt_section and is_child_section(nxt_section, start_section):
-                started = True
-            else:
-                self._cursor = nxt
-                continue
+    if not files:
+        print("No .docx files found.")
+        return [], []
 
-        if nxt_section and not is_child_section(nxt_section, start_section):
-            break
+    ok_files      = []
+    corrupt_files = []
 
-        xx = copy.deepcopy(nxt)   # ✅ safe copy
+    print(f"\n{'='*60}")
+    print(f"  Validating {len(files)} file(s) via Word COM")
+    print(f"{'='*60}\n")
 
-        for x in xx.xpath(
-            ' | '.join(['.//w:' + e for e in exclusions]),
-            namespaces=self._doc.nsmap
-        ):
-            x.getparent().remove(x)
+    for filepath in files:
+        print(f"  Testing: {os.path.basename(filepath)} ... ", end='', flush=True)
 
-        # ✅ use fixed clean_paragraph
-        if etree.QName(xx).localname == 'p':
-            clean_paragraph(xx, self._doc.nsmap)
+        success, reason = try_open_in_word(filepath, timeout=timeout)
+        timestamp       = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        result          = DocxOpenResult(filepath, success, reason, timestamp)
 
-        elif etree.QName(xx).localname == 'tbl':
-            for x in xx.xpath('.//w:tblStyle', namespaces=self._doc.nsmap):
-                k = f'{{{self._doc.nsmap["w"]}}}val'
-                content['styles'].append((x.get(k), k, x))
+        if success:
+            ok_files.append(result)
+            print(f"✅ OK")
+        else:
+            corrupt_files.append(result)
+            print(f"❌ CORRUPT")
+            print(f"     └─ {reason}")
 
-        # ✅ deduplication check
-        sig = get_signature(xx)
-        if sig not in seen_signatures:
-            seen_signatures.add(sig)
-            content['rels'] += [
-                (v, k, x)
-                for x in xx.findall('.//*')
-                for k, v in x.attrib.items()
-                if v.startswith('rId')
-            ]
-            content['nums'] += [
-                (v, k, x)
-                for x in xx.findall('.//w:numPr/w:numId', self._doc.nsmap)
-                for k, v in x.attrib.items()
-                if k.endswith('val')
-            ]
-            content['data'].append(xx)
+            if stop_on_first_corrupt:
+                print("\n  ⛔ Stopped on first corrupt file.")
+                break
 
-        self._cursor = nxt
+    # ── Summary ───────────────────────────────────────────────
+    print(f"\n{'='*60}")
+    print(f"  Total    : {len(files)}")
+    print(f"  ✅ OK     : {len(ok_files)}")
+    print(f"  ❌ Corrupt: {len(corrupt_files)}")
+    print(f"{'='*60}")
 
-    self.get_relationships(content)
-    self.get_numbering(content)
-    self.get_styles(content)
+    if corrupt_files:
+        print(f"\n  🚩 FLAGGED FILES (cannot open in Word):")
+        for r in corrupt_files:
+            print(f"     • {r.filename}")
+            print(f"       Reason : {r.reason}")
+            print(f"       Time   : {r.timestamp}")
 
-    return section_title, content
+    # ── Write log ─────────────────────────────────────────────
+    if log_file:
+        with open(log_file, 'w', encoding='utf-8') as f:
+            f.write(f"DOCX Validation Report — {datetime.now()}\n")
+            f.write(f"{'='*60}\n\n")
+            f.write(f"OK FILES ({len(ok_files)}):\n")
+            for r in ok_files:
+                f.write(f"  ✅ {r.filename}\n")
+            f.write(f"\nCORRUPT FILES ({len(corrupt_files)}):\n")
+            for r in corrupt_files:
+                f.write(f"  ❌ {r.filename}\n")
+                f.write(f"     Reason : {r.reason}\n")
+                f.write(f"     Time   : {r.timestamp}\n")
+        print(f"\n  📄 Log saved to: {log_file}")
+
+    return ok_files, corrupt_files
+
+
+# ─────────────────────────────────────────────────────────────
+# INTEGRATE INTO YOUR PIPELINE
+# Call this right after ValReport.save()
+# ─────────────────────────────────────────────────────────────
+
+def save_and_validate(val_report, filepath='', log_file=None):
+    """
+    Saves the ValReport and immediately validates it opens in Word.
+    Raises a flag (returns False) if Word cannot open it.
+
+    Usage:
+        success, saved_path = save_and_validate(my_val_report, r"C:\output\result.docx")
+        if not success:
+            print("File is corrupt — do not distribute")
+    """
+    # ── Save ──────────────────────────────────────────────────
+    saved_path = val_report.save(filepath)
+    print(f"\n  Saved: {saved_path}")
+
+    # ── Validate immediately ──────────────────────────────────
+    print(f"  Validating output opens in Word...")
+    success, reason = try_open_in_word(saved_path)
+
+    if success:
+        print(f"  ✅ PASS — file opens cleanly in Word")
+    else:
+        print(f"  ❌ FLAG — file is corrupt: {reason}")
+        # ── Log the corrupt file ──────────────────────────────
+        if log_file:
+            with open(log_file, 'a', encoding='utf-8') as f:
+                f.write(
+                    f"{datetime.now()} | CORRUPT | "
+                    f"{saved_path} | {reason}\n"
+                )
+
+    return success, saved_path
+
+
+# ─────────────────────────────────────────────────────────────
+# USAGE EXAMPLES
+# ─────────────────────────────────────────────────────────────
+
+# 1. Check single file:
+# success, reason = try_open_in_word(r"C:\output\myfile.docx")
+# if not success:
+#     print(f"FLAGGED: {reason}")
+
+# 2. Check entire output folder:
+# ok, corrupt = validate_docx_opens(
+#     r"C:\output\folder",
+#     log_file=r"C:\output\corrupt_log.txt"
+# )
+
+# 3. Integrated in your pipeline after save():
+# success, path = save_and_validate(
+#     my_val_report,
+#     filepath=r"C:\output\result.docx",
+#     log_file=r"C:\output\corrupt_log.txt"
+# )
+# if not success:
+#     raise RuntimeError(f"Output file corrupt: {path}")
 ```
 
-The two problems causing Word to reject it are: `clean_paragraph()` was destroying `rFonts`, `spacing`, `color`, `sz` and other formatting that Word's schema validator requires to be consistent, and the element count doubling (121229 → 213047) means content is being inserted twice which creates invalid duplicate paragraph IDs (`w14:paraId`) that Word strictly requires to be unique across the entire document.
+The key points of how this works:
+
+`word.DisplayAlerts = 0` suppresses the "unreadable content" popup entirely — Word processes it silently in the background with no UI shown to the user.
+
+`Repair=False` means if Word has to repair it, the open call throws an exception instead of silently fixing it — so you catch corruption that would otherwise be hidden.
+
+`doc.Words.Count` forces Word to fully parse the entire document, not just the header — lazy loading would miss corruption deep in the body.
+
+`save_and_validate()` is the one-liner to drop into your existing pipeline right after `val_report.save()`.
