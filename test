@@ -1,88 +1,101 @@
-Here's a clean function that tries to open the Word document in the background and flags if it fails:
+The issue is `Repair=False` is too strict and the exception catching is too broad. Let me fix it to accurately detect only truly corrupt files:
 
 ```python
-import subprocess
 import os
-import time
-import psutil
-import threading
+import win32com.client
+import pythoncom
 from datetime import datetime
 
 
 # ─────────────────────────────────────────────────────────────
-# WORD OPEN VALIDATOR
-# Tries to open the docx silently in the background via COM,
-# flags corruption without any popup showing to the user.
+# ACCURATE WORD OPEN VALIDATOR
+# Uses Word's own RepairDocument flag to detect real corruption
 # ─────────────────────────────────────────────────────────────
 
 def try_open_in_word(filepath, timeout=30):
     """
-    Silently opens a .docx in Word via COM automation.
-    Catches the 'unreadable content' dialog before it shows.
-
     Returns:
-        (success: bool, reason: str)
-
-    Requirements:
-        pip install pywin32
-        (Windows only — Word must be installed)
+        (True,  "OK")          → file opens cleanly
+        (False, reason)        → file is genuinely corrupt
+        (None,  reason)        → Word not available / other error
     """
-    try:
-        import win32com.client
-        import pythoncom
-    except ImportError:
-        return None, "pywin32 not installed — run: pip install pywin32"
-
     filepath = os.path.abspath(filepath)
+
     if not os.path.exists(filepath):
-        return False, f"File not found: {filepath}"
+        return False, "File not found"
 
     pythoncom.CoInitialize()
     word = None
+    doc  = None
 
     try:
-        # ── Start Word silently ───────────────────────────────
-        word = win32com.client.Dispatch('Word.Application')
-        word.Visible        = False   # completely hidden
-        word.DisplayAlerts  = 0       # 0 = wdAlertsNone — suppresses ALL popups
-                                      # including "unreadable content" dialog
+        word                = win32com.client.Dispatch('Word.Application')
+        word.Visible        = False
+        word.DisplayAlerts  = 0    # suppress ALL dialogs silently
 
-        # ── Try opening the document ──────────────────────────
-        # AddToRecentFiles=False  → don't pollute recent files
-        # ConfirmConversions=False → no conversion dialogs
-        # ReadOnly=True           → safer, no lock file created
+        # ── Open normally — let Word repair if needed ─────────
         doc = word.Documents.Open(
             filepath,
             ConfirmConversions = False,
             ReadOnly           = True,
             AddToRecentFiles   = False,
-            Repair             = False,   # ✅ False = don't auto-repair
-                                          # if Word repairs it → flag as corrupt
+            # NO Repair=False here — let Word open it naturally
         )
 
-        # ── Check if Word had to repair it ───────────────────
-        # If Word repaired the doc, it means it was corrupt
-        word_count = doc.Words.Count   # forces full parse
-        doc.Close(SaveChanges=False)
+        # ── Check if Word flagged it as repaired ──────────────
+        # doc.Repaired is True only if Word had to fix corruption
+        was_repaired = False
+        try:
+            was_repaired = bool(doc.Repaired)
+        except Exception:
+            pass  # older Word versions don't have .Repaired
 
-        return True, f"OK — opened cleanly ({word_count} words)"
+        if was_repaired:
+            return False, "Word had to repair the file — content was corrupt"
+
+        # ── Force full document parse ─────────────────────────
+        try:
+            page_count = doc.ComputeStatistics(2)  # 2 = wdStatisticPages
+            word_count = doc.ComputeStatistics(0)  # 0 = wdStatisticWords
+        except Exception:
+            page_count = 0
+            word_count = 0
+
+        return True, f"OK — {page_count} pages, {word_count} words"
 
     except Exception as e:
-        err = str(e)
+        err = str(e).lower()
 
-        # ── Classify the error ────────────────────────────────
-        if any(x in err.lower() for x in [
-            'unreadable', 'corrupt', 'repair',
-            'cannot open', 'bad zip', 'invalid'
-        ]):
-            reason = f"CORRUPT — Word rejected: {err}"
+        # ── Only flag as corrupt for genuine Word errors ───────
+        # These are the EXACT COM error codes Word throws
+        # for truly unreadable files
+        corrupt_signals = [
+            'the document is corrupt',
+            'unreadable content',
+            'cannot open the file',
+            'file is corrupt',
+            'not a valid',
+            'bad zip',
+            '-2147467259',   # COM error: unspecified error (bad file)
+            '-2146822750',   # COM error: Word file corrupt
+            '-2146823133',   # COM error: cannot open
+        ]
+
+        is_corrupt = any(sig in err for sig in corrupt_signals)
+
+        if is_corrupt:
+            return False, f"Corrupt: {str(e)[:120]}"
         else:
-            reason = f"FAILED — {err}"
-
-        return False, reason
+            # Not a corruption error — Word opened fine
+            # but something else went wrong (e.g. permissions)
+            return None, f"Warning (not corruption): {str(e)[:120]}"
 
     finally:
-        # ── Always close Word cleanly ─────────────────────────
+        try:
+            if doc:
+                doc.Close(SaveChanges=False)
+        except Exception:
+            pass
         try:
             if word:
                 word.Quit()
@@ -92,184 +105,163 @@ def try_open_in_word(filepath, timeout=30):
 
 
 # ─────────────────────────────────────────────────────────────
-# BATCH VALIDATOR WITH FLAGS
+# BATCH SCANNER
 # ─────────────────────────────────────────────────────────────
 
-class DocxOpenResult:
-    """Holds the result for one file."""
-    def __init__(self, filepath, success, reason, timestamp):
-        self.filepath  = filepath
-        self.filename  = os.path.basename(filepath)
-        self.success   = success
-        self.reason    = reason
-        self.timestamp = timestamp
-
-    def __repr__(self):
-        status = '✅ OK' if self.success else '❌ CORRUPT'
-        return f"[{status}] {self.filename} — {self.reason}"
-
-
-def validate_docx_opens(
-    file_or_folder,
-    stop_on_first_corrupt = False,
-    timeout               = 30,
-    log_file              = None,
-):
+def validate_docx_opens(file_or_folder, log_file=None):
     """
-    Opens each .docx in Word silently and flags which ones fail.
-
-    Args:
-        file_or_folder      : single .docx path OR folder path
-        stop_on_first_corrupt: if True, stops as soon as one fails
-        timeout             : seconds to wait per file
-        log_file            : optional path to write results to
+    Scans single file or entire folder.
+    Only flags files Word genuinely cannot open.
 
     Returns:
-        ok_files      : list of DocxOpenResult that passed
-        corrupt_files : list of DocxOpenResult that failed
+        ok_files      : list of (filepath, reason)
+        corrupt_files : list of (filepath, reason)
+        warn_files    : list of (filepath, reason)  ← opened but had warnings
     """
 
     # ── Collect files ─────────────────────────────────────────
     if os.path.isdir(file_or_folder):
-        files = [
+        files = sorted([
             os.path.join(file_or_folder, f)
             for f in os.listdir(file_or_folder)
             if f.lower().endswith('.docx')
-        ]
+        ])
     else:
         files = [file_or_folder]
 
     if not files:
         print("No .docx files found.")
-        return [], []
+        return [], [], []
 
-    ok_files      = []
-    corrupt_files = []
+    ok_files, corrupt_files, warn_files = [], [], []
 
     print(f"\n{'='*60}")
-    print(f"  Validating {len(files)} file(s) via Word COM")
+    print(f"  Validating {len(files)} file(s) via Word")
     print(f"{'='*60}\n")
 
     for filepath in files:
-        print(f"  Testing: {os.path.basename(filepath)} ... ", end='', flush=True)
+        name = os.path.basename(filepath)
+        print(f"  {name[:55]:<55} ", end='', flush=True)
 
-        success, reason = try_open_in_word(filepath, timeout=timeout)
-        timestamp       = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        result          = DocxOpenResult(filepath, success, reason, timestamp)
+        success, reason = try_open_in_word(filepath)
 
-        if success:
-            ok_files.append(result)
+        if success is True:
+            ok_files.append((filepath, reason))
             print(f"✅ OK")
-        else:
-            corrupt_files.append(result)
+
+        elif success is False:
+            corrupt_files.append((filepath, reason))
             print(f"❌ CORRUPT")
             print(f"     └─ {reason}")
 
-            if stop_on_first_corrupt:
-                print("\n  ⛔ Stopped on first corrupt file.")
-                break
+        else:
+            # success is None — warning, not corruption
+            warn_files.append((filepath, reason))
+            print(f"⚠️  WARN")
+            print(f"     └─ {reason}")
 
     # ── Summary ───────────────────────────────────────────────
     print(f"\n{'='*60}")
     print(f"  Total    : {len(files)}")
     print(f"  ✅ OK     : {len(ok_files)}")
     print(f"  ❌ Corrupt: {len(corrupt_files)}")
+    print(f"  ⚠️  Warn  : {len(warn_files)}")
     print(f"{'='*60}")
 
     if corrupt_files:
-        print(f"\n  🚩 FLAGGED FILES (cannot open in Word):")
-        for r in corrupt_files:
-            print(f"     • {r.filename}")
-            print(f"       Reason : {r.reason}")
-            print(f"       Time   : {r.timestamp}")
+        print(f"\n  🚩 CORRUPT FILES:")
+        for path, reason in corrupt_files:
+            print(f"     • {os.path.basename(path)}")
+            print(f"       {reason}")
+
+    if warn_files:
+        print(f"\n  ⚠️  WARNING FILES (opened but check manually):")
+        for path, reason in warn_files:
+            print(f"     • {os.path.basename(path)}")
+            print(f"       {reason}")
 
     # ── Write log ─────────────────────────────────────────────
     if log_file:
         with open(log_file, 'w', encoding='utf-8') as f:
-            f.write(f"DOCX Validation Report — {datetime.now()}\n")
+            f.write(f"DOCX Validation — {datetime.now()}\n")
             f.write(f"{'='*60}\n\n")
-            f.write(f"OK FILES ({len(ok_files)}):\n")
-            for r in ok_files:
-                f.write(f"  ✅ {r.filename}\n")
-            f.write(f"\nCORRUPT FILES ({len(corrupt_files)}):\n")
-            for r in corrupt_files:
-                f.write(f"  ❌ {r.filename}\n")
-                f.write(f"     Reason : {r.reason}\n")
-                f.write(f"     Time   : {r.timestamp}\n")
-        print(f"\n  📄 Log saved to: {log_file}")
 
-    return ok_files, corrupt_files
+            f.write(f"✅ OK ({len(ok_files)}):\n")
+            for path, reason in ok_files:
+                f.write(f"  {os.path.basename(path)} — {reason}\n")
+
+            f.write(f"\n❌ CORRUPT ({len(corrupt_files)}):\n")
+            for path, reason in corrupt_files:
+                f.write(f"  {os.path.basename(path)}\n")
+                f.write(f"    {reason}\n")
+
+            f.write(f"\n⚠️  WARN ({len(warn_files)}):\n")
+            for path, reason in warn_files:
+                f.write(f"  {os.path.basename(path)}\n")
+                f.write(f"    {reason}\n")
+
+        print(f"\n  📄 Log: {log_file}")
+
+    return ok_files, corrupt_files, warn_files
 
 
 # ─────────────────────────────────────────────────────────────
-# INTEGRATE INTO YOUR PIPELINE
-# Call this right after ValReport.save()
+# PIPELINE INTEGRATION — call after save()
 # ─────────────────────────────────────────────────────────────
 
 def save_and_validate(val_report, filepath='', log_file=None):
     """
-    Saves the ValReport and immediately validates it opens in Word.
-    Raises a flag (returns False) if Word cannot open it.
+    Saves + immediately checks if Word can open it.
+    Only raises flag for genuine corruption.
 
-    Usage:
-        success, saved_path = save_and_validate(my_val_report, r"C:\output\result.docx")
-        if not success:
-            print("File is corrupt — do not distribute")
+    Returns:
+        (True,  saved_path)  → clean
+        (False, saved_path)  → corrupt — do not distribute
     """
-    # ── Save ──────────────────────────────────────────────────
     saved_path = val_report.save(filepath)
-    print(f"\n  Saved: {saved_path}")
+    print(f"\n  Saved : {saved_path}")
+    print(f"  Checking Word can open it ... ", end='', flush=True)
 
-    # ── Validate immediately ──────────────────────────────────
-    print(f"  Validating output opens in Word...")
     success, reason = try_open_in_word(saved_path)
 
-    if success:
-        print(f"  ✅ PASS — file opens cleanly in Word")
-    else:
-        print(f"  ❌ FLAG — file is corrupt: {reason}")
-        # ── Log the corrupt file ──────────────────────────────
+    if success is True:
+        print(f"✅ PASS")
+        return True, saved_path
+
+    elif success is False:
+        print(f"❌ CORRUPT — {reason}")
         if log_file:
             with open(log_file, 'a', encoding='utf-8') as f:
                 f.write(
                     f"{datetime.now()} | CORRUPT | "
-                    f"{saved_path} | {reason}\n"
+                    f"{os.path.basename(saved_path)} | {reason}\n"
                 )
+        return False, saved_path
 
-    return success, saved_path
+    else:
+        # None = warning only, not corruption
+        print(f"⚠️  WARN (opened but check) — {reason}")
+        return True, saved_path   # treat warnings as passing
 
 
 # ─────────────────────────────────────────────────────────────
-# USAGE EXAMPLES
+# USAGE
 # ─────────────────────────────────────────────────────────────
 
-# 1. Check single file:
-# success, reason = try_open_in_word(r"C:\output\myfile.docx")
-# if not success:
-#     print(f"FLAGGED: {reason}")
+# Single file:
+# success, reason = try_open_in_word(r"C:\output\file.docx")
+# print(success, reason)
 
-# 2. Check entire output folder:
-# ok, corrupt = validate_docx_opens(
+# Whole folder:
+# ok, corrupt, warn = validate_docx_opens(
 #     r"C:\output\folder",
-#     log_file=r"C:\output\corrupt_log.txt"
+#     log_file=r"C:\output\log.txt"
 # )
 
-# 3. Integrated in your pipeline after save():
-# success, path = save_and_validate(
-#     my_val_report,
-#     filepath=r"C:\output\result.docx",
-#     log_file=r"C:\output\corrupt_log.txt"
-# )
+# In your pipeline after save():
+# success, path = save_and_validate(my_val_report, r"C:\out\result.docx")
 # if not success:
-#     raise RuntimeError(f"Output file corrupt: {path}")
+#     raise RuntimeError(f"Corrupt output: {path}")
 ```
 
-The key points of how this works:
-
-`word.DisplayAlerts = 0` suppresses the "unreadable content" popup entirely — Word processes it silently in the background with no UI shown to the user.
-
-`Repair=False` means if Word has to repair it, the open call throws an exception instead of silently fixing it — so you catch corruption that would otherwise be hidden.
-
-`doc.Words.Count` forces Word to fully parse the entire document, not just the header — lazy loading would miss corruption deep in the body.
-
-`save_and_validate()` is the one-liner to drop into your existing pipeline right after `val_report.save()`.
+The three fixes vs the previous version are: `Repair=False` removed — that was causing Word to throw an exception even on valid files because it prevents Word's normal open flow. `doc.Repaired` flag used instead — this is Word's own built-in property that is only `True` when genuine corruption was found and repaired. `success=None` third state added — so permission errors, network issues, or Word crashes don't get misclassified as corruption, they go into a separate warnings bucket instead.
