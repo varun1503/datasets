@@ -1,383 +1,270 @@
-No, this code **will not work on GCP or AWS** because it uses `win32com` which requires:
-
-- **Windows OS** — GCP/AWS Linux instances don't have it
-- **Microsoft Word installed** — servers never have Word
-- **COM automation** — Linux has no COM layer
-
-Here are your alternatives depending on your cloud setup:
+Here is the clean single file validator only:
 
 ```python
-# ─────────────────────────────────────────────────────────────
-# OPTION 1: LibreOffice (Best for GCP/AWS Linux)
-# Install: sudo apt-get install libreoffice
-# Free, no license needed, works headless
-# ─────────────────────────────────────────────────────────────
-
-import subprocess
+import zipfile
 import os
-import tempfile
-import shutil
-from datetime import datetime
+from lxml import etree
+
+W   = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+R   = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+MC  = 'http://schemas.openxmlformats.org/markup-compatibility/2006'
+W14 = 'http://schemas.microsoft.com/office/word/2010/wordml'
 
 
-def try_open_libreoffice(filepath, timeout=60):
+def will_word_open(filepath):
     """
-    Uses LibreOffice headless to convert docx → pdf.
-    If conversion fails → file is corrupt.
-    If conversion succeeds → file opens cleanly.
-
-    Works on: Linux, GCP, AWS, Docker
-    Install  : sudo apt-get install -y libreoffice
+    Checks if Word will open this docx cleanly.
+    Returns:
+        (True,  "OK")    → Word will open it
+        (False, reason)  → Word will show corrupt dialog
     """
+    issues = []
     filepath = os.path.abspath(filepath)
 
+    # ── Level 1: File checks ──────────────────────────────────
     if not os.path.exists(filepath):
-        return False, "File not found"
+        return False, "File does not exist"
 
-    # ── Use temp output dir so we don't pollute working dir ──
-    tmp_dir = tempfile.mkdtemp()
+    if os.path.getsize(filepath) == 0:
+        return False, "File is 0 bytes"
+
+    if not zipfile.is_zipfile(filepath):
+        return False, "Not a valid ZIP archive"
 
     try:
-        result = subprocess.run(
-            [
-                'libreoffice',
-                '--headless',
-                '--norestore',        # don't restore previous crashes
-                '--nofirststartwizard',
-                '--convert-to', 'pdf',
-                '--outdir', tmp_dir,
-                filepath,
-            ],
-            stdout  = subprocess.PIPE,
-            stderr  = subprocess.PIPE,
-            timeout = timeout,
-        )
+        zf = zipfile.ZipFile(filepath, 'r')
+    except zipfile.BadZipFile as e:
+        return False, f"BadZipFile: {e}"
 
-        stdout = result.stdout.decode('utf-8', errors='replace')
-        stderr = result.stderr.decode('utf-8', errors='replace')
+    with zf:
+        names = zf.namelist()
 
-        # ── Check output PDF was actually created ─────────────
-        filename_no_ext = os.path.splitext(os.path.basename(filepath))[0]
-        pdf_path = os.path.join(tmp_dir, filename_no_ext + '.pdf')
-        pdf_exists = os.path.exists(pdf_path)
-        pdf_size   = os.path.getsize(pdf_path) if pdf_exists else 0
+        # ── Level 2: ZIP checks ───────────────────────────────
+        with open(filepath, 'rb') as f:
+            raw_zip = f.read()
+        if b'PK\x06\x06' in raw_zip:
+            issues.append("ZIP64 format — Word rejects this")
 
-        # ── Detect corruption from output ─────────────────────
-        corrupt_signals = [
-            'error',
-            'failed',
-            'corrupt',
-            'cannot open',
-            'password',
-            'filter not found',
-        ]
-
-        output_lower = (stdout + stderr).lower()
-        has_error    = any(s in output_lower for s in corrupt_signals)
-
-        if result.returncode != 0 or has_error or not pdf_exists or pdf_size == 0:
-            return False, (
-                f"LibreOffice failed "
-                f"(returncode={result.returncode}, "
-                f"pdf_exists={pdf_exists}, "
-                f"pdf_size={pdf_size})\n"
-                f"stdout: {stdout[:200]}\n"
-                f"stderr: {stderr[:200]}"
+        if names and names[0] != '[Content_Types].xml':
+            issues.append(
+                f"[Content_Types].xml not first entry "
+                f"(found '{names[0]}')"
             )
 
-        return True, f"OK — PDF created ({pdf_size} bytes)"
+        # ── Level 3: Required parts ───────────────────────────
+        for part in [
+            '[Content_Types].xml',
+            'word/document.xml',
+            'word/_rels/document.xml.rels',
+            'word/styles.xml',
+        ]:
+            if part not in names:
+                issues.append(f"Missing: {part}")
 
-    except subprocess.TimeoutExpired:
-        return False, f"Timed out after {timeout}s — file may be corrupt or too large"
+        if issues:
+            return False, " | ".join(issues)
 
-    except FileNotFoundError:
-        return None, "LibreOffice not installed — run: sudo apt-get install -y libreoffice"
+        # ── Level 4: XML declaration ──────────────────────────
+        missing_decl = []
+        for name in names:
+            if not (name.endswith('.xml') or name.endswith('.rels')):
+                continue
+            with zf.open(name) as f:
+                header = f.read(60)
+            if not header.strip().startswith(b'<?xml'):
+                missing_decl.append(name)
 
-    except Exception as e:
-        return None, f"Unexpected error: {e}"
+        if missing_decl:
+            issues.append(
+                f"Missing XML declaration in {len(missing_decl)} "
+                f"file(s): {', '.join(missing_decl[:3])}"
+                f"{'...' if len(missing_decl) > 3 else ''}"
+            )
 
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        # ── Level 5: XML parse ────────────────────────────────
+        parsed = {}
+        for name in names:
+            if not (name.endswith('.xml') or name.endswith('.rels')):
+                continue
+            try:
+                with zf.open(name) as f:
+                    parsed[name] = etree.parse(f).getroot()
+            except etree.XMLSyntaxError as e:
+                issues.append(f"XML error in {name}: {str(e)[:80]}")
 
+        if issues:
+            return False, " | ".join(issues)
 
-# ─────────────────────────────────────────────────────────────
-# OPTION 2: python-docx structural check (No install needed)
-# Lighter than LibreOffice — pure Python
-# Catches most corruption without needing Word or LibreOffice
-# ─────────────────────────────────────────────────────────────
+        # ── Level 6: Relationship checks ─────────────────────
+        rels = parsed.get('word/_rels/document.xml.rels')
+        if rels is not None:
+            seen_ids = {}
+            for rel in rels:
+                rid = rel.get('Id', '')
+                if rid in seen_ids:
+                    issues.append(f"Duplicate rId: {rid}")
+                seen_ids[rid] = True
 
-def try_open_python_docx(filepath):
-    """
-    Uses python-docx to open and parse the document.
-    Catches XML errors, missing parts, broken structure.
+            for rel in rels:
+                target = rel.get('Target', '')
+                mode   = rel.get('TargetMode', '')
+                if mode == 'External' or not target:
+                    continue
+                full = (
+                    f"word/{target}"
+                    if not target.startswith('/')
+                    else target.lstrip('/')
+                )
+                if full not in names:
+                    issues.append(f"Missing target: {full}")
 
-    Install: pip install python-docx
-    Works on: Linux, GCP, AWS, Docker, anywhere
-    """
-    try:
-        from docx import Document
-        from docx.opc.exceptions import PackageNotFoundError
-    except ImportError:
-        return None, "python-docx not installed — run: pip install python-docx"
+        # ── Level 7: document.xml content ────────────────────
+        doc = parsed.get('word/document.xml')
+        if doc is not None:
 
-    filepath = os.path.abspath(filepath)
+            body = doc.find(f'.//{{{W}}}body')
+            if body is None:
+                issues.append("Missing <w:body>")
+            else:
+                children = list(body)
+                if children:
+                    last = etree.QName(children[-1]).localname
+                    if last != 'sectPr':
+                        issues.append(
+                            f"<w:body> ends with <{last}>"
+                            f" not <sectPr>"
+                        )
 
-    if not os.path.exists(filepath):
-        return False, "File not found"
+            # Duplicate paraId
+            seen_ids = {}
+            for p in doc.iter(f'{{{W}}}p'):
+                pid = p.get(f'{{{W14}}}paraId')
+                if pid:
+                    if pid in seen_ids:
+                        issues.append(f"Duplicate paraId: {pid}")
+                    seen_ids[pid] = True
 
-    try:
-        # ── Open and fully parse ──────────────────────────────
-        doc = Document(filepath)
+            # Null bytes
+            for t in doc.iter(f'{{{W}}}t'):
+                if t.text and '\x00' in t.text:
+                    issues.append("Null byte in <w:t>")
+                    break
 
-        # ── Force full content read ───────────────────────────
-        para_count  = len(doc.paragraphs)
-        table_count = len(doc.tables)
-        section_count = len(doc.sections)
+            # Hyperlinks
+            for hl in doc.iter(f'{{{W}}}hyperlink'):
+                if (not hl.get(f'{{{R}}}id')
+                        and not hl.get(f'{{{W}}}anchor')):
+                    issues.append(
+                        "<w:hyperlink> missing r:id and w:anchor"
+                    )
+                    break
 
-        # ── Check paragraphs are readable ─────────────────────
-        total_text = 0
-        for para in doc.paragraphs:
-            total_text += len(para.text)
+            # AlternateContent
+            for ac in doc.iter(f'{{{MC}}}AlternateContent'):
+                if ac.find(f'{{{MC}}}Fallback') is None:
+                    issues.append(
+                        "mc:AlternateContent missing Fallback"
+                    )
+                    break
 
-        # ── Check tables are readable ─────────────────────────
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    _ = cell.text
+        # ── Level 8: Styles ───────────────────────────────────
+        stdoc = parsed.get('word/styles.xml')
+        if stdoc is not None and doc is not None:
+            defined = set(
+                stdoc.xpath(
+                    './w:style/@w:styleId',
+                    namespaces={'w': W}
+                )
+            )
+            missing = set()
+            for tag in (
+                f'{{{W}}}pStyle',
+                f'{{{W}}}rStyle',
+                f'{{{W}}}tblStyle'
+            ):
+                for elem in doc.iter(tag):
+                    val = elem.get(f'{{{W}}}val', '')
+                    if val and val not in defined:
+                        missing.add(val)
+            for s in list(missing)[:3]:
+                issues.append(f"Undefined style: '{s}'")
 
-        return True, (
-            f"OK — {para_count} paragraphs, "
-            f"{table_count} tables, "
-            f"{total_text} chars"
-        )
+        # ── Level 9: Numbering ────────────────────────────────
+        numdoc = parsed.get('word/numbering.xml')
+        if numdoc is not None and doc is not None:
+            defined_nums = set(
+                numdoc.xpath(
+                    './w:num/@w:numId',
+                    namespaces={'w': W}
+                )
+            )
+            for elem in doc.iter(f'{{{W}}}numId'):
+                val = elem.get(f'{{{W}}}val', '')
+                if val and val != '0' and val not in defined_nums:
+                    issues.append(f"Missing numId: '{val}'")
+                    break
 
-    except PackageNotFoundError as e:
-        return False, f"Corrupt — not a valid docx package: {e}"
+            tags     = [etree.QName(c).localname for c in numdoc]
+            seen_num = False
+            for tag in tags:
+                if tag == 'num':
+                    seen_num = True
+                if tag == 'abstractNum' and seen_num:
+                    issues.append(
+                        "numbering.xml: abstractNum after num"
+                    )
+                    break
 
-    except Exception as e:
-        err = str(e).lower()
-        corrupt_signals = [
-            'corrupt', 'invalid', 'bad zip',
-            'xml', 'unexpected', 'missing',
-            'none', 'attribute', 'parse'
-        ]
-        if any(s in err for s in corrupt_signals):
-            return False, f"Corrupt — {e}"
-        else:
-            return None, f"Warning (not corruption): {e}"
+        # ── Level 10: Tables ──────────────────────────────────
+        if doc is not None:
+            for tbl in doc.iter(f'{{{W}}}tbl'):
+                if tbl.find(f'{{{W}}}tblGrid') is None:
+                    issues.append("<w:tbl> missing <w:tblGrid>")
+                    break
 
+            for tc in doc.iter(f'{{{W}}}tc'):
+                tcPr = tc.find(f'{{{W}}}tcPr')
+                if tcPr is None or tcPr.find(f'{{{W}}}tcW') is None:
+                    issues.append("<w:tc> missing <w:tcW>")
+                    break
 
-# ─────────────────────────────────────────────────────────────
-# COMBINED VALIDATOR
-# Uses both checks together for maximum accuracy on cloud
-# ─────────────────────────────────────────────────────────────
+    # ── Result ────────────────────────────────────────────────
+    if issues:
+        return False, " | ".join(issues)
 
-def try_open_in_cloud(filepath, method='auto'):
-    """
-    Auto-selects best available method for cloud environments.
+    return True, "OK"
 
-    method:
-        'auto'        → tries LibreOffice first, falls back to python-docx
-        'libreoffice' → LibreOffice only
-        'python-docx' → python-docx only
-        'both'        → runs both, flags if either fails
-
-    Returns:
-        (True,  reason)  → clean
-        (False, reason)  → corrupt
-        (None,  reason)  → could not validate (missing tools)
-    """
-    filepath = os.path.abspath(filepath)
-
-    if method == 'libreoffice':
-        return try_open_libreoffice(filepath)
-
-    if method == 'python-docx':
-        return try_open_python_docx(filepath)
-
-    if method == 'both':
-        lo_ok,  lo_reason  = try_open_libreoffice(filepath)
-        pdx_ok, pdx_reason = try_open_python_docx(filepath)
-
-        if lo_ok is False:
-            return False, f"LibreOffice: {lo_reason}"
-        if pdx_ok is False:
-            return False, f"python-docx: {pdx_reason}"
-        if lo_ok is True and pdx_ok is True:
-            return True, f"Both checks passed"
-
-        return None, f"LO={lo_reason} | PDX={pdx_reason}"
-
-    # ── auto: try LibreOffice first ───────────────────────────
-    if shutil.which('libreoffice'):
-        ok, reason = try_open_libreoffice(filepath)
-        if ok is not None:
-            return ok, f"[LibreOffice] {reason}"
-
-    # ── fallback to python-docx ───────────────────────────────
-    return try_open_python_docx(filepath)
-
-
-# ─────────────────────────────────────────────────────────────
-# BATCH SCANNER FOR CLOUD
-# ─────────────────────────────────────────────────────────────
-
-def validate_docx_opens_cloud(
-    file_or_folder,
-    method   = 'auto',
-    log_file = None,
-):
-    """
-    Cloud-compatible batch validator.
-    Drop-in replacement for validate_docx_opens().
-    """
-    if os.path.isdir(file_or_folder):
-        files = sorted([
-            os.path.join(file_or_folder, f)
-            for f in os.listdir(file_or_folder)
-            if f.lower().endswith('.docx')
-        ])
-    else:
-        files = [file_or_folder]
-
-    if not files:
-        print("No .docx files found.")
-        return [], [], []
-
-    ok_files, corrupt_files, warn_files = [], [], []
-
-    print(f"\n{'='*60}")
-    print(f"  Cloud DOCX Validator  (method={method})")
-    print(f"  Validating {len(files)} file(s)")
-    print(f"{'='*60}\n")
-
-    for filepath in files:
-        name = os.path.basename(filepath)
-        print(f"  {name[:50]:<50} ", end='', flush=True)
-
-        success, reason = try_open_in_cloud(filepath, method=method)
-
-        if success is True:
-            ok_files.append((filepath, reason))
-            print("✅ OK")
-
-        elif success is False:
-            corrupt_files.append((filepath, reason))
-            print("❌ CORRUPT")
-            print(f"     └─ {reason}")
-
-        else:
-            warn_files.append((filepath, reason))
-            print("⚠️  WARN")
-            print(f"     └─ {reason}")
-
-    # ── Summary ───────────────────────────────────────────────
-    print(f"\n{'='*60}")
-    print(f"  ✅ OK     : {len(ok_files)}")
-    print(f"  ❌ Corrupt: {len(corrupt_files)}")
-    print(f"  ⚠️  Warn  : {len(warn_files)}")
-    print(f"{'='*60}")
-
-    if corrupt_files:
-        print(f"\n  🚩 CORRUPT FILES:")
-        for path, reason in corrupt_files:
-            print(f"     • {os.path.basename(path)}")
-            print(f"       {reason}")
-
-    # ── Log ───────────────────────────────────────────────────
-    if log_file:
-        with open(log_file, 'w', encoding='utf-8') as f:
-            f.write(f"Cloud DOCX Validation — {datetime.now()}\n")
-            f.write(f"Method: {method}\n{'='*60}\n\n")
-            f.write(f"OK ({len(ok_files)}):\n")
-            for p, r in ok_files:
-                f.write(f"  {os.path.basename(p)} — {r}\n")
-            f.write(f"\nCORRUPT ({len(corrupt_files)}):\n")
-            for p, r in corrupt_files:
-                f.write(f"  {os.path.basename(p)}\n    {r}\n")
-            f.write(f"\nWARN ({len(warn_files)}):\n")
-            for p, r in warn_files:
-                f.write(f"  {os.path.basename(p)}\n    {r}\n")
-        print(f"\n  📄 Log: {log_file}")
-
-    return ok_files, corrupt_files, warn_files
-
-
-# ─────────────────────────────────────────────────────────────
-# PIPELINE INTEGRATION
-# ─────────────────────────────────────────────────────────────
-
-def save_and_validate_cloud(val_report, filepath='', log_file=None):
-    """
-    Save + validate in one call. Works on GCP/AWS/Docker.
-    """
-    saved_path = val_report.save(filepath)
-    print(f"\n  Saved : {saved_path}")
-    print(f"  Validating ... ", end='', flush=True)
-
-    success, reason = try_open_in_cloud(saved_path)
-
-    if success is True:
-        print(f"✅ PASS — {reason}")
-        return True, saved_path
-    elif success is False:
-        print(f"❌ CORRUPT — {reason}")
-        if log_file:
-            with open(log_file, 'a', encoding='utf-8') as f:
-                f.write(f"{datetime.now()} | CORRUPT | {saved_path} | {reason}\n")
-        return False, saved_path
-    else:
-        print(f"⚠️  WARN — {reason}")
-        return True, saved_path
-
-
-# ─────────────────────────────────────────────────────────────
-# SETUP COMMANDS FOR GCP / AWS
-# ─────────────────────────────────────────────────────────────
-
-SETUP_COMMANDS = """
-# ── GCP / AWS Ubuntu setup ────────────────────────────────────
-
-# Install LibreOffice (recommended — most accurate):
-sudo apt-get update
-sudo apt-get install -y libreoffice
-
-# Install python-docx (lightweight fallback):
-pip install python-docx
-
-# ── Docker setup ──────────────────────────────────────────────
-# Add to your Dockerfile:
-# RUN apt-get update && apt-get install -y libreoffice
-# RUN pip install python-docx
-"""
 
 # ─────────────────────────────────────────────────────────────
 # USAGE
 # ─────────────────────────────────────────────────────────────
 
-# Single file (auto picks best method):
-# ok, reason = try_open_in_cloud("/output/file.docx")
+# ok, reason = will_word_open(r"C:\output\file.docx")
+# if not ok:
+#     print(f"❌ CORRUPT: {reason}")
+# else:
+#     print(f"✅ OK")
 
-# Folder scan:
-# ok, corrupt, warn = validate_docx_opens_cloud(
-#     "/output/folder",
-#     method="both",           # strictest — both LO + python-docx
-#     log_file="/output/log.txt"
-# )
 
-# In pipeline:
-# success, path = save_and_validate_cloud(my_val_report, "/output/result.docx")
-# if not success:
-#     raise RuntimeError(f"Corrupt output: {path}")
+# ── In your pipeline after save() ────────────────────────────
+
+def save_and_validate(val_report, filepath=''):
+    saved_path = val_report.save(filepath)
+
+    ok, reason = will_word_open(saved_path)
+
+    if ok:
+        print(f"✅ PASS — {saved_path}")
+    else:
+        print(f"❌ CORRUPT — {reason}")
+
+    return ok, saved_path
 ```
 
-Quick comparison of which method to use:
+Usage is just two lines anywhere in your code:
 
-| Method | Accuracy | Speed | Needs install |
-|--------|----------|-------|---------------|
-| `libreoffice` | ⭐⭐⭐⭐⭐ Closest to Word | Slow ~5-10s/file | `apt-get install libreoffice` |
-| `python-docx` | ⭐⭐⭐ Good for structure | Fast ~0.1s/file | `pip install python-docx` |
-| `both` | ⭐⭐⭐⭐⭐ Most strict | Slow | Both above |
-| `auto` | ⭐⭐⭐⭐ Best available | Depends | Whatever is installed |
-
-For GCP/AWS **LibreOffice is the closest thing to Word** you can get on Linux — it uses the same OOXML parser and will catch the same corruption Word catches.
+```python
+ok, reason = will_word_open(r"C:\output\myfile.docx")
+if not ok:
+    print(f"FLAGGED: {reason}")
+```
