@@ -1,125 +1,236 @@
-The issue is `Repair=False` is too strict and the exception catching is too broad. Let me fix it to accurately detect only truly corrupt files:
+No, this code **will not work on GCP or AWS** because it uses `win32com` which requires:
+
+- **Windows OS** — GCP/AWS Linux instances don't have it
+- **Microsoft Word installed** — servers never have Word
+- **COM automation** — Linux has no COM layer
+
+Here are your alternatives depending on your cloud setup:
 
 ```python
+# ─────────────────────────────────────────────────────────────
+# OPTION 1: LibreOffice (Best for GCP/AWS Linux)
+# Install: sudo apt-get install libreoffice
+# Free, no license needed, works headless
+# ─────────────────────────────────────────────────────────────
+
+import subprocess
 import os
-import win32com.client
-import pythoncom
+import tempfile
+import shutil
 from datetime import datetime
 
 
-# ─────────────────────────────────────────────────────────────
-# ACCURATE WORD OPEN VALIDATOR
-# Uses Word's own RepairDocument flag to detect real corruption
-# ─────────────────────────────────────────────────────────────
-
-def try_open_in_word(filepath, timeout=30):
+def try_open_libreoffice(filepath, timeout=60):
     """
-    Returns:
-        (True,  "OK")          → file opens cleanly
-        (False, reason)        → file is genuinely corrupt
-        (None,  reason)        → Word not available / other error
+    Uses LibreOffice headless to convert docx → pdf.
+    If conversion fails → file is corrupt.
+    If conversion succeeds → file opens cleanly.
+
+    Works on: Linux, GCP, AWS, Docker
+    Install  : sudo apt-get install -y libreoffice
     """
     filepath = os.path.abspath(filepath)
 
     if not os.path.exists(filepath):
         return False, "File not found"
 
-    pythoncom.CoInitialize()
-    word = None
-    doc  = None
+    # ── Use temp output dir so we don't pollute working dir ──
+    tmp_dir = tempfile.mkdtemp()
 
     try:
-        word                = win32com.client.Dispatch('Word.Application')
-        word.Visible        = False
-        word.DisplayAlerts  = 0    # suppress ALL dialogs silently
-
-        # ── Open normally — let Word repair if needed ─────────
-        doc = word.Documents.Open(
-            filepath,
-            ConfirmConversions = False,
-            ReadOnly           = True,
-            AddToRecentFiles   = False,
-            # NO Repair=False here — let Word open it naturally
+        result = subprocess.run(
+            [
+                'libreoffice',
+                '--headless',
+                '--norestore',        # don't restore previous crashes
+                '--nofirststartwizard',
+                '--convert-to', 'pdf',
+                '--outdir', tmp_dir,
+                filepath,
+            ],
+            stdout  = subprocess.PIPE,
+            stderr  = subprocess.PIPE,
+            timeout = timeout,
         )
 
-        # ── Check if Word flagged it as repaired ──────────────
-        # doc.Repaired is True only if Word had to fix corruption
-        was_repaired = False
-        try:
-            was_repaired = bool(doc.Repaired)
-        except Exception:
-            pass  # older Word versions don't have .Repaired
+        stdout = result.stdout.decode('utf-8', errors='replace')
+        stderr = result.stderr.decode('utf-8', errors='replace')
 
-        if was_repaired:
-            return False, "Word had to repair the file — content was corrupt"
+        # ── Check output PDF was actually created ─────────────
+        filename_no_ext = os.path.splitext(os.path.basename(filepath))[0]
+        pdf_path = os.path.join(tmp_dir, filename_no_ext + '.pdf')
+        pdf_exists = os.path.exists(pdf_path)
+        pdf_size   = os.path.getsize(pdf_path) if pdf_exists else 0
 
-        # ── Force full document parse ─────────────────────────
-        try:
-            page_count = doc.ComputeStatistics(2)  # 2 = wdStatisticPages
-            word_count = doc.ComputeStatistics(0)  # 0 = wdStatisticWords
-        except Exception:
-            page_count = 0
-            word_count = 0
+        # ── Detect corruption from output ─────────────────────
+        corrupt_signals = [
+            'error',
+            'failed',
+            'corrupt',
+            'cannot open',
+            'password',
+            'filter not found',
+        ]
 
-        return True, f"OK — {page_count} pages, {word_count} words"
+        output_lower = (stdout + stderr).lower()
+        has_error    = any(s in output_lower for s in corrupt_signals)
+
+        if result.returncode != 0 or has_error or not pdf_exists or pdf_size == 0:
+            return False, (
+                f"LibreOffice failed "
+                f"(returncode={result.returncode}, "
+                f"pdf_exists={pdf_exists}, "
+                f"pdf_size={pdf_size})\n"
+                f"stdout: {stdout[:200]}\n"
+                f"stderr: {stderr[:200]}"
+            )
+
+        return True, f"OK — PDF created ({pdf_size} bytes)"
+
+    except subprocess.TimeoutExpired:
+        return False, f"Timed out after {timeout}s — file may be corrupt or too large"
+
+    except FileNotFoundError:
+        return None, "LibreOffice not installed — run: sudo apt-get install -y libreoffice"
+
+    except Exception as e:
+        return None, f"Unexpected error: {e}"
+
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# ─────────────────────────────────────────────────────────────
+# OPTION 2: python-docx structural check (No install needed)
+# Lighter than LibreOffice — pure Python
+# Catches most corruption without needing Word or LibreOffice
+# ─────────────────────────────────────────────────────────────
+
+def try_open_python_docx(filepath):
+    """
+    Uses python-docx to open and parse the document.
+    Catches XML errors, missing parts, broken structure.
+
+    Install: pip install python-docx
+    Works on: Linux, GCP, AWS, Docker, anywhere
+    """
+    try:
+        from docx import Document
+        from docx.opc.exceptions import PackageNotFoundError
+    except ImportError:
+        return None, "python-docx not installed — run: pip install python-docx"
+
+    filepath = os.path.abspath(filepath)
+
+    if not os.path.exists(filepath):
+        return False, "File not found"
+
+    try:
+        # ── Open and fully parse ──────────────────────────────
+        doc = Document(filepath)
+
+        # ── Force full content read ───────────────────────────
+        para_count  = len(doc.paragraphs)
+        table_count = len(doc.tables)
+        section_count = len(doc.sections)
+
+        # ── Check paragraphs are readable ─────────────────────
+        total_text = 0
+        for para in doc.paragraphs:
+            total_text += len(para.text)
+
+        # ── Check tables are readable ─────────────────────────
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    _ = cell.text
+
+        return True, (
+            f"OK — {para_count} paragraphs, "
+            f"{table_count} tables, "
+            f"{total_text} chars"
+        )
+
+    except PackageNotFoundError as e:
+        return False, f"Corrupt — not a valid docx package: {e}"
 
     except Exception as e:
         err = str(e).lower()
-
-        # ── Only flag as corrupt for genuine Word errors ───────
-        # These are the EXACT COM error codes Word throws
-        # for truly unreadable files
         corrupt_signals = [
-            'the document is corrupt',
-            'unreadable content',
-            'cannot open the file',
-            'file is corrupt',
-            'not a valid',
-            'bad zip',
-            '-2147467259',   # COM error: unspecified error (bad file)
-            '-2146822750',   # COM error: Word file corrupt
-            '-2146823133',   # COM error: cannot open
+            'corrupt', 'invalid', 'bad zip',
+            'xml', 'unexpected', 'missing',
+            'none', 'attribute', 'parse'
         ]
-
-        is_corrupt = any(sig in err for sig in corrupt_signals)
-
-        if is_corrupt:
-            return False, f"Corrupt: {str(e)[:120]}"
+        if any(s in err for s in corrupt_signals):
+            return False, f"Corrupt — {e}"
         else:
-            # Not a corruption error — Word opened fine
-            # but something else went wrong (e.g. permissions)
-            return None, f"Warning (not corruption): {str(e)[:120]}"
-
-    finally:
-        try:
-            if doc:
-                doc.Close(SaveChanges=False)
-        except Exception:
-            pass
-        try:
-            if word:
-                word.Quit()
-        except Exception:
-            pass
-        pythoncom.CoUninitialize()
+            return None, f"Warning (not corruption): {e}"
 
 
 # ─────────────────────────────────────────────────────────────
-# BATCH SCANNER
+# COMBINED VALIDATOR
+# Uses both checks together for maximum accuracy on cloud
 # ─────────────────────────────────────────────────────────────
 
-def validate_docx_opens(file_or_folder, log_file=None):
+def try_open_in_cloud(filepath, method='auto'):
     """
-    Scans single file or entire folder.
-    Only flags files Word genuinely cannot open.
+    Auto-selects best available method for cloud environments.
+
+    method:
+        'auto'        → tries LibreOffice first, falls back to python-docx
+        'libreoffice' → LibreOffice only
+        'python-docx' → python-docx only
+        'both'        → runs both, flags if either fails
 
     Returns:
-        ok_files      : list of (filepath, reason)
-        corrupt_files : list of (filepath, reason)
-        warn_files    : list of (filepath, reason)  ← opened but had warnings
+        (True,  reason)  → clean
+        (False, reason)  → corrupt
+        (None,  reason)  → could not validate (missing tools)
     """
+    filepath = os.path.abspath(filepath)
 
-    # ── Collect files ─────────────────────────────────────────
+    if method == 'libreoffice':
+        return try_open_libreoffice(filepath)
+
+    if method == 'python-docx':
+        return try_open_python_docx(filepath)
+
+    if method == 'both':
+        lo_ok,  lo_reason  = try_open_libreoffice(filepath)
+        pdx_ok, pdx_reason = try_open_python_docx(filepath)
+
+        if lo_ok is False:
+            return False, f"LibreOffice: {lo_reason}"
+        if pdx_ok is False:
+            return False, f"python-docx: {pdx_reason}"
+        if lo_ok is True and pdx_ok is True:
+            return True, f"Both checks passed"
+
+        return None, f"LO={lo_reason} | PDX={pdx_reason}"
+
+    # ── auto: try LibreOffice first ───────────────────────────
+    if shutil.which('libreoffice'):
+        ok, reason = try_open_libreoffice(filepath)
+        if ok is not None:
+            return ok, f"[LibreOffice] {reason}"
+
+    # ── fallback to python-docx ───────────────────────────────
+    return try_open_python_docx(filepath)
+
+
+# ─────────────────────────────────────────────────────────────
+# BATCH SCANNER FOR CLOUD
+# ─────────────────────────────────────────────────────────────
+
+def validate_docx_opens_cloud(
+    file_or_folder,
+    method   = 'auto',
+    log_file = None,
+):
+    """
+    Cloud-compatible batch validator.
+    Drop-in replacement for validate_docx_opens().
+    """
     if os.path.isdir(file_or_folder):
         files = sorted([
             os.path.join(file_or_folder, f)
@@ -136,33 +247,32 @@ def validate_docx_opens(file_or_folder, log_file=None):
     ok_files, corrupt_files, warn_files = [], [], []
 
     print(f"\n{'='*60}")
-    print(f"  Validating {len(files)} file(s) via Word")
+    print(f"  Cloud DOCX Validator  (method={method})")
+    print(f"  Validating {len(files)} file(s)")
     print(f"{'='*60}\n")
 
     for filepath in files:
         name = os.path.basename(filepath)
-        print(f"  {name[:55]:<55} ", end='', flush=True)
+        print(f"  {name[:50]:<50} ", end='', flush=True)
 
-        success, reason = try_open_in_word(filepath)
+        success, reason = try_open_in_cloud(filepath, method=method)
 
         if success is True:
             ok_files.append((filepath, reason))
-            print(f"✅ OK")
+            print("✅ OK")
 
         elif success is False:
             corrupt_files.append((filepath, reason))
-            print(f"❌ CORRUPT")
+            print("❌ CORRUPT")
             print(f"     └─ {reason}")
 
         else:
-            # success is None — warning, not corruption
             warn_files.append((filepath, reason))
-            print(f"⚠️  WARN")
+            print("⚠️  WARN")
             print(f"     └─ {reason}")
 
     # ── Summary ───────────────────────────────────────────────
     print(f"\n{'='*60}")
-    print(f"  Total    : {len(files)}")
     print(f"  ✅ OK     : {len(ok_files)}")
     print(f"  ❌ Corrupt: {len(corrupt_files)}")
     print(f"  ⚠️  Warn  : {len(warn_files)}")
@@ -174,94 +284,100 @@ def validate_docx_opens(file_or_folder, log_file=None):
             print(f"     • {os.path.basename(path)}")
             print(f"       {reason}")
 
-    if warn_files:
-        print(f"\n  ⚠️  WARNING FILES (opened but check manually):")
-        for path, reason in warn_files:
-            print(f"     • {os.path.basename(path)}")
-            print(f"       {reason}")
-
-    # ── Write log ─────────────────────────────────────────────
+    # ── Log ───────────────────────────────────────────────────
     if log_file:
         with open(log_file, 'w', encoding='utf-8') as f:
-            f.write(f"DOCX Validation — {datetime.now()}\n")
-            f.write(f"{'='*60}\n\n")
-
-            f.write(f"✅ OK ({len(ok_files)}):\n")
-            for path, reason in ok_files:
-                f.write(f"  {os.path.basename(path)} — {reason}\n")
-
-            f.write(f"\n❌ CORRUPT ({len(corrupt_files)}):\n")
-            for path, reason in corrupt_files:
-                f.write(f"  {os.path.basename(path)}\n")
-                f.write(f"    {reason}\n")
-
-            f.write(f"\n⚠️  WARN ({len(warn_files)}):\n")
-            for path, reason in warn_files:
-                f.write(f"  {os.path.basename(path)}\n")
-                f.write(f"    {reason}\n")
-
+            f.write(f"Cloud DOCX Validation — {datetime.now()}\n")
+            f.write(f"Method: {method}\n{'='*60}\n\n")
+            f.write(f"OK ({len(ok_files)}):\n")
+            for p, r in ok_files:
+                f.write(f"  {os.path.basename(p)} — {r}\n")
+            f.write(f"\nCORRUPT ({len(corrupt_files)}):\n")
+            for p, r in corrupt_files:
+                f.write(f"  {os.path.basename(p)}\n    {r}\n")
+            f.write(f"\nWARN ({len(warn_files)}):\n")
+            for p, r in warn_files:
+                f.write(f"  {os.path.basename(p)}\n    {r}\n")
         print(f"\n  📄 Log: {log_file}")
 
     return ok_files, corrupt_files, warn_files
 
 
 # ─────────────────────────────────────────────────────────────
-# PIPELINE INTEGRATION — call after save()
+# PIPELINE INTEGRATION
 # ─────────────────────────────────────────────────────────────
 
-def save_and_validate(val_report, filepath='', log_file=None):
+def save_and_validate_cloud(val_report, filepath='', log_file=None):
     """
-    Saves + immediately checks if Word can open it.
-    Only raises flag for genuine corruption.
-
-    Returns:
-        (True,  saved_path)  → clean
-        (False, saved_path)  → corrupt — do not distribute
+    Save + validate in one call. Works on GCP/AWS/Docker.
     """
     saved_path = val_report.save(filepath)
     print(f"\n  Saved : {saved_path}")
-    print(f"  Checking Word can open it ... ", end='', flush=True)
+    print(f"  Validating ... ", end='', flush=True)
 
-    success, reason = try_open_in_word(saved_path)
+    success, reason = try_open_in_cloud(saved_path)
 
     if success is True:
-        print(f"✅ PASS")
+        print(f"✅ PASS — {reason}")
         return True, saved_path
-
     elif success is False:
         print(f"❌ CORRUPT — {reason}")
         if log_file:
             with open(log_file, 'a', encoding='utf-8') as f:
-                f.write(
-                    f"{datetime.now()} | CORRUPT | "
-                    f"{os.path.basename(saved_path)} | {reason}\n"
-                )
+                f.write(f"{datetime.now()} | CORRUPT | {saved_path} | {reason}\n")
         return False, saved_path
-
     else:
-        # None = warning only, not corruption
-        print(f"⚠️  WARN (opened but check) — {reason}")
-        return True, saved_path   # treat warnings as passing
+        print(f"⚠️  WARN — {reason}")
+        return True, saved_path
 
+
+# ─────────────────────────────────────────────────────────────
+# SETUP COMMANDS FOR GCP / AWS
+# ─────────────────────────────────────────────────────────────
+
+SETUP_COMMANDS = """
+# ── GCP / AWS Ubuntu setup ────────────────────────────────────
+
+# Install LibreOffice (recommended — most accurate):
+sudo apt-get update
+sudo apt-get install -y libreoffice
+
+# Install python-docx (lightweight fallback):
+pip install python-docx
+
+# ── Docker setup ──────────────────────────────────────────────
+# Add to your Dockerfile:
+# RUN apt-get update && apt-get install -y libreoffice
+# RUN pip install python-docx
+"""
 
 # ─────────────────────────────────────────────────────────────
 # USAGE
 # ─────────────────────────────────────────────────────────────
 
-# Single file:
-# success, reason = try_open_in_word(r"C:\output\file.docx")
-# print(success, reason)
+# Single file (auto picks best method):
+# ok, reason = try_open_in_cloud("/output/file.docx")
 
-# Whole folder:
-# ok, corrupt, warn = validate_docx_opens(
-#     r"C:\output\folder",
-#     log_file=r"C:\output\log.txt"
+# Folder scan:
+# ok, corrupt, warn = validate_docx_opens_cloud(
+#     "/output/folder",
+#     method="both",           # strictest — both LO + python-docx
+#     log_file="/output/log.txt"
 # )
 
-# In your pipeline after save():
-# success, path = save_and_validate(my_val_report, r"C:\out\result.docx")
+# In pipeline:
+# success, path = save_and_validate_cloud(my_val_report, "/output/result.docx")
 # if not success:
 #     raise RuntimeError(f"Corrupt output: {path}")
 ```
 
-The three fixes vs the previous version are: `Repair=False` removed — that was causing Word to throw an exception even on valid files because it prevents Word's normal open flow. `doc.Repaired` flag used instead — this is Word's own built-in property that is only `True` when genuine corruption was found and repaired. `success=None` third state added — so permission errors, network issues, or Word crashes don't get misclassified as corruption, they go into a separate warnings bucket instead.
+Quick comparison of which method to use:
+
+| Method | Accuracy | Speed | Needs install |
+|--------|----------|-------|---------------|
+| `libreoffice` | ⭐⭐⭐⭐⭐ Closest to Word | Slow ~5-10s/file | `apt-get install libreoffice` |
+| `python-docx` | ⭐⭐⭐ Good for structure | Fast ~0.1s/file | `pip install python-docx` |
+| `both` | ⭐⭐⭐⭐⭐ Most strict | Slow | Both above |
+| `auto` | ⭐⭐⭐⭐ Best available | Depends | Whatever is installed |
+
+For GCP/AWS **LibreOffice is the closest thing to Word** you can get on Linux — it uses the same OOXML parser and will catch the same corruption Word catches.
