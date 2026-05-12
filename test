@@ -1,59 +1,280 @@
-Here's a simple step-by-step test to verify the fix works:
+Add `will_word_open` at the top of your file before `test_chart_copy`. Here is the complete self-contained test file with everything in one place:
 
 ```python
-# ─────────────────────────────────────────────────────────────
-# CHART COPY VERIFIER
-# Run this AFTER paste_content() and BEFORE save()
-# to confirm all chart deps copied correctly
-# ─────────────────────────────────────────────────────────────
-
-import os
 import zipfile
+import os
 from lxml import etree
 
 
+# ─────────────────────────────────────────────────────────────
+# CONSTANTS
+# ─────────────────────────────────────────────────────────────
+
+W   = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+R   = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+MC  = 'http://schemas.openxmlformats.org/markup-compatibility/2006'
+W14 = 'http://schemas.microsoft.com/office/word/2010/wordml'
+
+
+# ─────────────────────────────────────────────────────────────
+# 1. will_word_open
+# ─────────────────────────────────────────────────────────────
+
+def will_word_open(filepath):
+    """
+    Checks if Word will open this docx cleanly.
+    Returns:
+        (True,  "OK")    → Word will open it
+        (False, reason)  → Word will show corrupt dialog
+    """
+    issues   = []
+    filepath = os.path.abspath(filepath)
+
+    if not os.path.exists(filepath):
+        return False, "File does not exist"
+
+    if os.path.getsize(filepath) == 0:
+        return False, "File is 0 bytes"
+
+    if not zipfile.is_zipfile(filepath):
+        return False, "Not a valid ZIP archive"
+
+    try:
+        zf = zipfile.ZipFile(filepath, 'r')
+    except zipfile.BadZipFile as e:
+        return False, f"BadZipFile: {e}"
+
+    with zf:
+        names = zf.namelist()
+
+        # ── ZIP64 check ───────────────────────────────────────
+        with open(filepath, 'rb') as f:
+            raw_zip = f.read()
+        if b'PK\x06\x06' in raw_zip:
+            issues.append("ZIP64 format — Word rejects this")
+
+        # ── [Content_Types].xml must be first ─────────────────
+        if names and names[0] != '[Content_Types].xml':
+            issues.append(
+                f"[Content_Types].xml not first "
+                f"(found '{names[0]}')"
+            )
+
+        # ── Required parts ────────────────────────────────────
+        for part in [
+            '[Content_Types].xml',
+            'word/document.xml',
+            'word/_rels/document.xml.rels',
+            'word/styles.xml',
+        ]:
+            if part not in names:
+                issues.append(f"Missing: {part}")
+
+        if issues:
+            return False, " | ".join(issues)
+
+        # ── XML declaration check ─────────────────────────────
+        missing_decl = []
+        for name in names:
+            if not (name.endswith('.xml') or name.endswith('.rels')):
+                continue
+            with zf.open(name) as f:
+                header = f.read(60)
+            if not header.strip().startswith(b'<?xml'):
+                missing_decl.append(name)
+
+        if missing_decl:
+            issues.append(
+                f"Missing XML declaration in "
+                f"{len(missing_decl)} file(s): "
+                f"{', '.join(missing_decl[:3])}"
+                f"{'...' if len(missing_decl) > 3 else ''}"
+            )
+
+        # ── XML parse check ───────────────────────────────────
+        parsed = {}
+        for name in names:
+            if not (name.endswith('.xml') or name.endswith('.rels')):
+                continue
+            try:
+                with zf.open(name) as f:
+                    parsed[name] = etree.parse(f).getroot()
+            except etree.XMLSyntaxError as e:
+                issues.append(
+                    f"XML error in {name}: {str(e)[:80]}"
+                )
+
+        if issues:
+            return False, " | ".join(issues)
+
+        # ── Relationship checks ───────────────────────────────
+        rels = parsed.get('word/_rels/document.xml.rels')
+        if rels is not None:
+            seen_ids = {}
+            for rel in rels:
+                rid = rel.get('Id', '')
+                if rid in seen_ids:
+                    issues.append(f"Duplicate rId: {rid}")
+                seen_ids[rid] = True
+
+            for rel in rels:
+                target = rel.get('Target', '')
+                mode   = rel.get('TargetMode', '')
+                if mode == 'External' or not target:
+                    continue
+                full = (
+                    f"word/{target}"
+                    if not target.startswith('/')
+                    else target.lstrip('/')
+                )
+                if full not in names:
+                    issues.append(f"Missing target: {full}")
+
+        # ── document.xml content ──────────────────────────────
+        doc = parsed.get('word/document.xml')
+        if doc is not None:
+
+            body = doc.find(f'.//{{{W}}}body')
+            if body is None:
+                issues.append("Missing <w:body>")
+            else:
+                children = list(body)
+                if children:
+                    last = etree.QName(children[-1]).localname
+                    if last != 'sectPr':
+                        issues.append(
+                            f"<w:body> ends with <{last}>"
+                            f" not <sectPr>"
+                        )
+
+            # Duplicate paraId
+            seen_para = {}
+            for p in doc.iter(f'{{{W}}}p'):
+                pid = p.get(f'{{{W14}}}paraId')
+                if pid:
+                    if pid in seen_para:
+                        issues.append(
+                            f"Duplicate paraId: {pid}"
+                        )
+                    seen_para[pid] = True
+
+            # Null bytes
+            for t in doc.iter(f'{{{W}}}t'):
+                if t.text and '\x00' in t.text:
+                    issues.append("Null byte in <w:t>")
+                    break
+
+            # Hyperlinks
+            for hl in doc.iter(f'{{{W}}}hyperlink'):
+                if (not hl.get(f'{{{R}}}id')
+                        and not hl.get(f'{{{W}}}anchor')):
+                    issues.append(
+                        "<w:hyperlink> missing r:id and w:anchor"
+                    )
+                    break
+
+            # AlternateContent
+            for ac in doc.iter(f'{{{MC}}}AlternateContent'):
+                if ac.find(f'{{{MC}}}Fallback') is None:
+                    issues.append(
+                        "mc:AlternateContent missing Fallback"
+                    )
+                    break
+
+        # ── Styles check ──────────────────────────────────────
+        stdoc = parsed.get('word/styles.xml')
+        if stdoc is not None and doc is not None:
+            defined = set(
+                stdoc.xpath(
+                    './w:style/@w:styleId',
+                    namespaces={'w': W}
+                )
+            )
+            missing = set()
+            for tag in (
+                f'{{{W}}}pStyle',
+                f'{{{W}}}rStyle',
+                f'{{{W}}}tblStyle',
+            ):
+                for elem in doc.iter(tag):
+                    val = elem.get(f'{{{W}}}val', '')
+                    if val and val not in defined:
+                        missing.add(val)
+            for s in list(missing)[:3]:
+                issues.append(f"Undefined style: '{s}'")
+
+        # ── Numbering check ───────────────────────────────────
+        numdoc = parsed.get('word/numbering.xml')
+        if numdoc is not None and doc is not None:
+            defined_nums = set(
+                numdoc.xpath(
+                    './w:num/@w:numId',
+                    namespaces={'w': W}
+                )
+            )
+            for elem in doc.iter(f'{{{W}}}numId'):
+                val = elem.get(f'{{{W}}}val', '')
+                if val and val != '0' and val not in defined_nums:
+                    issues.append(f"Missing numId: '{val}'")
+                    break
+
+            tags     = [etree.QName(c).localname for c in numdoc]
+            seen_num = False
+            for tag in tags:
+                if tag == 'num':
+                    seen_num = True
+                if tag == 'abstractNum' and seen_num:
+                    issues.append(
+                        "numbering.xml: abstractNum after num"
+                    )
+                    break
+
+        # ── Table check ───────────────────────────────────────
+        if doc is not None:
+            for tbl in doc.iter(f'{{{W}}}tbl'):
+                if tbl.find(f'{{{W}}}tblGrid') is None:
+                    issues.append("<w:tbl> missing <w:tblGrid>")
+                    break
+            for tc in doc.iter(f'{{{W}}}tc'):
+                tcPr = tc.find(f'{{{W}}}tcPr')
+                if tcPr is None or tcPr.find(f'{{{W}}}tcW') is None:
+                    issues.append("<w:tc> missing <w:tcW>")
+                    break
+
+    if issues:
+        return False, " | ".join(issues)
+    return True, "OK"
+
+
+# ─────────────────────────────────────────────────────────────
+# 2. verify_chart_copy
+# ─────────────────────────────────────────────────────────────
+
 def verify_chart_copy(val_report_path):
-    """
-    Checks the unpacked ValReport folder (before save)
-    to confirm every chart's dependencies are present.
-
-    val_report_path : ValReport._path  (the temp folder)
-
-    Usage:
-        val = ValReport(...)
-        val.paste_content(...)
-        verify_chart_copy(val._path)   # ← run before save()
-        val.save(...)
-    """
     charts_dir = os.path.join(val_report_path, 'word', 'charts')
     rels_dir   = os.path.join(charts_dir, '_rels')
 
     if not os.path.exists(charts_dir):
-        print("❌ No charts directory found")
-        return False
+        print("  ℹ️  No charts directory found")
+        return True
 
-    # ── Collect all chart xml files ───────────────────────────
     chart_files = [
         f for f in os.listdir(charts_dir)
         if f.endswith('.xml')
     ]
 
     if not chart_files:
-        print("ℹ️  No charts found — nothing to verify")
+        print("  ℹ️  No charts found")
         return True
 
-    print(f"\n{'='*60}")
-    print(f"  Chart Copy Verifier")
-    print(f"  Found {len(chart_files)} chart file(s)")
-    print(f"{'='*60}\n")
-
+    print(f"  Found {len(chart_files)} chart file(s)\n")
     all_ok = True
 
     for chart_file in sorted(chart_files):
         print(f"  📊 {chart_file}")
         chart_ok = True
 
-        # ── 1. Chart XML has declaration ──────────────────────
+        # XML declaration
         chart_path = os.path.join(charts_dir, chart_file)
         with open(chart_path, 'rb') as f:
             header = f.read(60)
@@ -61,92 +282,76 @@ def verify_chart_copy(val_report_path):
             print(f"     ❌ Missing XML declaration")
             chart_ok = False
         else:
-            print(f"     ✅ XML declaration present")
+            print(f"     ✅ XML declaration OK")
 
-        # ── 2. Chart .rels exists ─────────────────────────────
+        # .rels exists
         rels_file = os.path.join(rels_dir, chart_file + '.rels')
         if not os.path.exists(rels_file):
-            print(f"     ❌ Missing .rels file")
-            chart_ok = False
-            all_ok   = False
+            print(f"     ❌ Missing .rels")
+            all_ok = False
             continue
         else:
-            print(f"     ✅ .rels file exists")
+            print(f"     ✅ .rels exists")
 
-        # ── 3. Parse .rels and check every target exists ──────
+        # Every dep in .rels exists
         try:
             rels_root = etree.parse(rels_file).getroot()
         except Exception as e:
             print(f"     ❌ Cannot parse .rels: {e}")
-            chart_ok = False
-            all_ok   = False
+            all_ok = False
             continue
 
         for rel in rels_root:
             target = rel.get('Target', '')
             mode   = rel.get('TargetMode', '')
             rtype  = rel.get('Type', '').split('/')[-1]
-
             if mode == 'External' or not target:
                 continue
 
             dep_path = os.path.normpath(
                 os.path.join(charts_dir, target)
             )
-
             if not os.path.exists(dep_path):
-                print(f"     ❌ Missing dep [{rtype}]: {target}")
+                print(f"     ❌ Missing [{rtype}]: {target}")
                 chart_ok = False
                 all_ok   = False
             else:
-                # ── 4. Each dep XML has declaration ───────────
                 if dep_path.endswith('.xml'):
                     with open(dep_path, 'rb') as f:
-                        dep_header = f.read(60)
-                    if not dep_header.strip().startswith(b'<?xml'):
+                        dh = f.read(60)
+                    if not dh.strip().startswith(b'<?xml'):
                         print(
-                            f"     ❌ Dep missing declaration"
-                            f" [{rtype}]: {target}"
+                            f"     ❌ No declaration "
+                            f"[{rtype}]: {target}"
                         )
                         chart_ok = False
                         all_ok   = False
                     else:
-                        print(f"     ✅ Dep OK [{rtype}]: "
-                              f"{os.path.basename(target)}")
+                        print(
+                            f"     ✅ [{rtype}]: "
+                            f"{os.path.basename(target)}"
+                        )
                 else:
-                    print(f"     ✅ Dep OK [{rtype}]: "
-                          f"{os.path.basename(target)}")
+                    print(
+                        f"     ✅ [{rtype}]: "
+                        f"{os.path.basename(target)}"
+                    )
 
-        if chart_ok:
-            print(f"     ── Result: ✅ CLEAN\n")
-        else:
-            print(f"     ── Result: ❌ CORRUPT DEPS\n")
-            all_ok = False
-
-    # ── Summary ───────────────────────────────────────────────
-    print(f"{'='*60}")
-    if all_ok:
-        print(f"  ✅ ALL CHARTS OK — safe to save()")
-    else:
-        print(f"  ❌ CHART ISSUES FOUND — fix before save()")
-    print(f"{'='*60}\n")
+        print(
+            f"     Result: "
+            f"{'✅ CLEAN' if chart_ok else '❌ CORRUPT'}\n"
+        )
 
     return all_ok
 
 
 # ─────────────────────────────────────────────────────────────
-# FULL PIPELINE TEST
-# Copy this exactly and run it to test end to end
+# 3. test_chart_copy  — uses both functions above
 # ─────────────────────────────────────────────────────────────
 
 def test_chart_copy(model_doc_path, val_report_path, section_name):
     """
-    End to end test of chart copying.
-
-    Args:
-        model_doc_path  : path to your ModelDoc .docx
-        val_report_path : path to your ValReport .docx
-        section_name    : section to copy e.g. '3.1 Performance'
+    Full end-to-end test.
 
     Usage:
         test_chart_copy(
@@ -160,7 +365,7 @@ def test_chart_copy(model_doc_path, val_report_path, section_name):
     print(f"  Section : {section_name}")
     print(f"{'='*60}\n")
 
-    # ── Step 1: Open docs ─────────────────────────────────────
+    # Step 1: Open
     print("  Step 1: Opening documents ... ", end='', flush=True)
     try:
         model = ModelDoc(model_doc_path)
@@ -170,21 +375,23 @@ def test_chart_copy(model_doc_path, val_report_path, section_name):
         print(f"❌\n  Error: {e}")
         return False
 
-    # ── Step 2: Copy section ──────────────────────────────────
+    # Step 2: Copy section
     print("  Step 2: Copying section  ... ", end='', flush=True)
     try:
         title, content = model.copy_content(section_name)
         if not content['data']:
-            print(f"❌\n  No content found for '{section_name}'")
+            print(f"❌  No content for '{section_name}'")
             return False
-        print(f"✅ ({len(content['data'])} elements, "
-              f"{len(content['rels'])} rels)")
+        print(
+            f"✅  {len(content['data'])} elements, "
+            f"{len(content['rels'])} rels"
+        )
     except Exception as e:
         print(f"❌\n  Error: {e}")
         return False
 
-    # ── Step 3: Check chart rels collected ────────────────────
-    print("  Step 3: Chart rels found ... ", end='', flush=True)
+    # Step 3: Chart rels
+    print("  Step 3: Charts found     ... ", end='', flush=True)
     chart_rels = [
         r for r in content['rels']
         if r.get('type') == 'chart'
@@ -192,12 +399,11 @@ def test_chart_copy(model_doc_path, val_report_path, section_name):
     if not chart_rels:
         print("ℹ️  No charts in this section")
     else:
-        print(f"✅ ({len(chart_rels)} chart(s))")
+        print(f"✅  {len(chart_rels)} chart(s)")
         for cr in chart_rels:
-            src = cr.get('source', 'unknown')
-            print(f"     • {os.path.basename(src)}")
+            print(f"     • {os.path.basename(cr.get('source','?'))}")
 
-    # ── Step 4: Paste content ─────────────────────────────────
+    # Step 4: Paste
     print("  Step 4: Pasting content  ... ", end='', flush=True)
     try:
         val.paste_content(content, after='team response', index='99')
@@ -206,41 +412,43 @@ def test_chart_copy(model_doc_path, val_report_path, section_name):
         print(f"❌\n  Error: {e}")
         return False
 
-    # ── Step 5: Verify chart deps ─────────────────────────────
-    print("\n  Step 5: Verifying chart deps:")
+    # Step 5: Verify chart deps
+    print("\n  Step 5: Verifying charts:")
     deps_ok = verify_chart_copy(val._path)
 
-    # ── Step 6: Validate XML ──────────────────────────────────
+    # Step 6: XML validation
     print("\n  Step 6: XML validation:")
     val.validate_xml_parts()
 
-    # ── Step 7: Save ──────────────────────────────────────────
+    # Step 7: Save
     print("\n  Step 7: Saving ... ", end='', flush=True)
     try:
-        out_path = val_report_path.replace('.docx', '_TEST_OUTPUT.docx')
-        val.save(out_path)
-        print(f"✅\n  Saved: {out_path}")
+        out = val_report_path.replace('.docx', '_TEST_OUTPUT.docx')
+        val.save(out)
+        print(f"✅  {out}")
     except Exception as e:
         print(f"❌\n  Error: {e}")
         return False
 
-    # ── Step 8: Final check ───────────────────────────────────
-    print("\n  Step 8: Final file check ... ", end='', flush=True)
-    ok, reason = will_word_open(out_path)
+    # Step 8: Final check
+    print("\n  Step 8: Word open check  ... ", end='', flush=True)
+    ok, reason = will_word_open(out)
     if ok:
-        print(f"✅ PASS — Word will open this file")
+        print(f"✅ PASS")
     else:
         print(f"❌ FAIL — {reason}")
 
     print(f"\n{'='*60}")
-    print(f"  Result: {'✅ ALL PASSED' if ok and deps_ok else '❌ ISSUES FOUND'}")
+    print(
+        f"  Result: "
+        f"{'✅ ALL PASSED' if ok and deps_ok else '❌ ISSUES FOUND'}"
+    )
     print(f"{'='*60}\n")
-
     return ok and deps_ok
 
 
 # ─────────────────────────────────────────────────────────────
-# USAGE — paste your paths and run
+# RUN — paste your paths here
 # ─────────────────────────────────────────────────────────────
 
 test_chart_copy(
@@ -250,15 +458,4 @@ test_chart_copy(
 )
 ```
 
-What each step tells you:
-
-| Step | What it checks | If it fails |
-|------|---------------|-------------|
-| 1 | Docs open without error | Path wrong or file corrupt |
-| 2 | Section found and content extracted | Section name mismatch |
-| 3 | Chart relationships detected | Charts not in this section |
-| 4 | paste_content runs without exception | Bug in paste logic |
-| 5 | Every `colors.xml` / `style.xml` present | `ChartCopier` not working |
-| 6 | All XML has declaration | `_rewrite_with_declaration` missing |
-| 7 | File saves cleanly | ZIP issue |
-| 8 | `will_word_open` passes | Remaining corruption |
+All three functions are now in one file in the correct order — `will_word_open` first, then `verify_chart_copy`, then `test_chart_copy` which calls both. Just update the three paths at the bottom and run.
