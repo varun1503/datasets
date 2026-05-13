@@ -1,113 +1,172 @@
-Add `will_word_open` at the top of your file before `test_chart_copy`. Here is the complete self-contained test file with everything in one place:
+"""
+fix_docx.py — Repair a .docx file that raises:
+    KeyError: "no content type for partname '...xlsx' in [Content_Types].xml"
 
-```python
+Usage:
+    python fix_docx.py input.docx output_fixed.docx
+
+What it does:
+    1. Opens the .docx as a ZIP archive
+    2. Reads [Content_Types].xml
+    3. Scans every file inside the ZIP
+    4. Adds any missing content-type entries for unregistered parts
+    5. Writes the fixed file to a new .docx
+"""
+
 import zipfile
+import shutil
+import sys
 import os
-from lxml import etree
+import re
+from pathlib import Path
+
+# ── Content-type map by extension / known part names ─────────────────────────
+EXTENSION_CONTENT_TYPES = {
+    ".rels":   "application/vnd.openxmlformats-package.relationships+xml",
+    ".xml":    "application/xml",
+    ".jpeg":   "image/jpeg",
+    ".jpg":    "image/jpeg",
+    ".png":    "image/png",
+    ".gif":    "image/gif",
+    ".bmp":    "image/bmp",
+    ".tiff":   "image/tiff",
+    ".wmf":    "image/x-wmf",
+    ".emf":    "image/x-emf",
+    ".svg":    "image/svg+xml",
+    ".xlsx":   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xls":    "application/vnd.ms-excel",
+    ".docx":   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pptx":   "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".bin":    "application/vnd.ms-office.activeX+binary",
+    ".sigs":   "application/vnd.ms-office.activex+xml",
+}
+
+# Override content types for specific known part names (override extension map)
+OVERRIDE_CONTENT_TYPES = {
+    "/word/document.xml":
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
+    "/word/styles.xml":
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml",
+    "/word/settings.xml":
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml",
+    "/word/webSettings.xml":
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.webSettings+xml",
+    "/word/fontTable.xml":
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml",
+    "/word/theme/theme1.xml":
+        "application/vnd.openxmlformats-officedocument.theme+xml",
+    "/docProps/core.xml":
+        "application/vnd.openxmlformats-package.core-properties+xml",
+    "/docProps/app.xml":
+        "application/vnd.openxmlformats-officedocument.extended-properties+xml",
+}
 
 
-# ─────────────────────────────────────────────────────────────
-# CONSTANTS
-# ─────────────────────────────────────────────────────────────
-
-W   = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
-R   = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
-MC  = 'http://schemas.openxmlformats.org/markup-compatibility/2006'
-W14 = 'http://schemas.microsoft.com/office/word/2010/wordml'
+def get_content_type_for_part(partname: str) -> str | None:
+    """Return the best content-type guess for a given partname."""
+    if partname in OVERRIDE_CONTENT_TYPES:
+        return OVERRIDE_CONTENT_TYPES[partname]
+    ext = Path(partname).suffix.lower()
+    return EXTENSION_CONTENT_TYPES.get(ext)
 
 
-# ─────────────────────────────────────────────────────────────
-# 1. will_word_open
-# ─────────────────────────────────────────────────────────────
-
-def will_word_open(filepath):
+def parse_existing_entries(ct_xml: str) -> tuple[set, set]:
     """
-    Checks if Word will open this docx cleanly.
-    Returns:
-        (True,  "OK")    → Word will open it
-        (False, reason)  → Word will show corrupt dialog
+    Return (defaults_set, overrides_set) from [Content_Types].xml text.
+    defaults_set  → set of lowercase extensions already registered
+    overrides_set → set of partnames already registered
     """
-    issues   = []
-    filepath = os.path.abspath(filepath)
+    defaults = set(re.findall(r'<Default[^>]+Extension="([^"]+)"', ct_xml, re.IGNORECASE))
+    overrides = set(re.findall(r'<Override[^>]+PartName="([^"]+)"', ct_xml, re.IGNORECASE))
+    return {d.lower() for d in defaults}, overrides
 
-    if not os.path.exists(filepath):
-        return False, "File does not exist"
 
-    if os.path.getsize(filepath) == 0:
-        return False, "File is 0 bytes"
+def fix_docx(input_path: str, output_path: str) -> None:
+    input_path = Path(input_path)
+    output_path = Path(output_path)
 
-    if not zipfile.is_zipfile(filepath):
-        return False, "Not a valid ZIP archive"
+    if not input_path.exists():
+        print(f"[ERROR] File not found: {input_path}")
+        sys.exit(1)
 
-    try:
-        zf = zipfile.ZipFile(filepath, 'r')
-    except zipfile.BadZipFile as e:
-        return False, f"BadZipFile: {e}"
+    # Copy original → output first, then modify output in-place
+    shutil.copy2(input_path, output_path)
 
-    with zf:
-        names = zf.namelist()
+    with zipfile.ZipFile(input_path, "r") as zin:
+        all_names = zin.namelist()
 
-        # ── ZIP64 check ───────────────────────────────────────
-        with open(filepath, 'rb') as f:
-            raw_zip = f.read()
-        if b'PK\x06\x06' in raw_zip:
-            issues.append("ZIP64 format — Word rejects this")
+        # Read existing [Content_Types].xml
+        ct_xml = zin.read("[Content_Types].xml").decode("utf-8")
 
-        # ── [Content_Types].xml must be first ─────────────────
-        if names and names[0] != '[Content_Types].xml':
-            issues.append(
-                f"[Content_Types].xml not first "
-                f"(found '{names[0]}')"
-            )
+    existing_defaults, existing_overrides = parse_existing_entries(ct_xml)
 
-        # ── Required parts ────────────────────────────────────
-        for part in [
-            '[Content_Types].xml',
-            'word/document.xml',
-            'word/_rels/document.xml.rels',
-            'word/styles.xml',
-        ]:
-            if part not in names:
-                issues.append(f"Missing: {part}")
+    new_overrides: list[str] = []   # lines to inject
+    new_defaults:  list[str] = []
 
-        if issues:
-            return False, " | ".join(issues)
+    for name in all_names:
+        if name == "[Content_Types].xml":
+            continue
 
-        # ── XML declaration check ─────────────────────────────
-        missing_decl = []
-        for name in names:
-            if not (name.endswith('.xml') or name.endswith('.rels')):
-                continue
-            with zf.open(name) as f:
-                header = f.read(60)
-            if not header.strip().startswith(b'<?xml'):
-                missing_decl.append(name)
+        partname = "/" + name  # OPC partnames start with /
+        ext = Path(name).suffix.lower().lstrip(".")
 
-        if missing_decl:
-            issues.append(
-                f"Missing XML declaration in "
-                f"{len(missing_decl)} file(s): "
-                f"{', '.join(missing_decl[:3])}"
-                f"{'...' if len(missing_decl) > 3 else ''}"
-            )
+        content_type = get_content_type_for_part(partname)
+        if content_type is None:
+            print(f"[SKIP]  No content type known for: {partname}")
+            continue
 
-        # ── XML parse check ───────────────────────────────────
-        parsed = {}
-        for name in names:
-            if not (name.endswith('.xml') or name.endswith('.rels')):
-                continue
-            try:
-                with zf.open(name) as f:
-                    parsed[name] = etree.parse(f).getroot()
-            except etree.XMLSyntaxError as e:
-                issues.append(
-                    f"XML error in {name}: {str(e)[:80]}"
-                )
+        if partname in existing_overrides:
+            continue  # already registered
 
-        if issues:
-            return False, " | ".join(issues)
+        # Prefer Override for specific-path types, Default for extensions
+        if partname in OVERRIDE_CONTENT_TYPES:
+            entry = f'  <Override PartName="{partname}" ContentType="{content_type}"/>'
+            new_overrides.append((partname, entry))
+            print(f"[ADD Override]  {partname}  →  {content_type}")
+        else:
+            if ext and ext not in existing_defaults:
+                entry = f'  <Default Extension="{ext}" ContentType="{content_type}"/>'
+                new_defaults.append((ext, entry))
+                existing_defaults.add(ext)  # avoid duplicates in loop
+                print(f"[ADD Default]   .{ext}  →  {content_type}")
+            elif ext in existing_defaults:
+                # Extension already covered, but specific part might still fail.
+                # Add an Override to be safe.
+                entry = f'  <Override PartName="{partname}" ContentType="{content_type}"/>'
+                new_overrides.append((partname, entry))
+                print(f"[ADD Override]  {partname}  →  {content_type}")
 
-        # ── Relationship checks ───────────────────────────────
+    if not new_overrides and not new_defaults:
+        print("[OK] No missing content types found. File may already be valid.")
+        return
+
+    # Inject new entries before </Types>
+    injected = "\n".join(e for _, e in new_defaults) + \
+               "\n" + "\n".join(e for _, e in new_overrides)
+
+    fixed_ct = ct_xml.replace("</Types>", injected + "\n</Types>")
+
+    # Rewrite the output zip with the patched [Content_Types].xml
+    tmp_path = output_path.with_suffix(".tmp.docx")
+    with zipfile.ZipFile(output_path, "r") as zin, \
+         zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            if item.filename == "[Content_Types].xml":
+                zout.writestr(item, fixed_ct.encode("utf-8"))
+            else:
+                zout.writestr(item, zin.read(item.filename))
+
+    tmp_path.replace(output_path)
+    print(f"\n[DONE] Fixed file written to: {output_path}")
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        print("Usage: python fix_docx.py <input.docx> <output_fixed.docx>")
+        sys.exit(1)
+
+    fix_docx(sys.argv[1], sys.argv[2])
         rels = parsed.get('word/_rels/document.xml.rels')
         if rels is not None:
             seen_ids = {}
