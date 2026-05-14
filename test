@@ -1,169 +1,331 @@
-"""
-fix_docx.py — Repair a .docx file that raises:
-    KeyError: "no content type for partname '...xlsx' in [Content_Types].xml"
+from orchestrators.qc_langgraph_flow import *
+from orchestrators.mrmg_orchestrator import mrmg_execute_vr
+from pydantic import BaseModel, Field
+from utils.config_management import *
+from utils.ELFLogging import *
+import asyncio
+from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from concurrent.futures import ThreadPoolExecutor
+from multiprocessing import Value
+import nest_asyncio
+from typing import Optional
+from sqlalchemy import create_engine
+from base_model import ImvpDetailsInput, ValidationReportInput, DownloadReportInput, ModifiedQuestionsReport, UpdateReportInput, QCInput
+from base_response import ValidationReportResponse, DownloadReportResponse, UpdateReportResponse, QCResponse
+from sqlalchemy.orm import sessionmaker
+from utils.string_template_query_utils import StringTemplateQueryUtils
+from services.endpoints.download_annotated_file import *
+from services.endpoints.upload_modified_file import *
+import threading
 
-Usage:
-    python fix_docx.py input.docx output_fixed.docx
+nest_asyncio.apply()
 
-What it does:
-    1. Opens the .docx as a ZIP archive
-    2. Reads [Content_Types].xml
-    3. Scans every file inside the ZIP
-    4. Adds any missing content-type entries for unregistered parts
-    5. Writes the fixed file to a new .docx
-"""
+app = FastAPI()
 
-import zipfile
-import shutil
-import sys
-import os
-import re
-from pathlib import Path
+# Only 1 worker per POD
+executor = ThreadPoolExecutor(max_workers=1)
 
-# ── Content-type map by extension / known part names ─────────────────────────
-EXTENSION_CONTENT_TYPES = {
-    ".rels":   "application/vnd.openxmlformats-package.relationships+xml",
-    ".xml":    "application/xml",
-    ".jpeg":   "image/jpeg",
-    ".jpg":    "image/jpeg",
-    ".png":    "image/png",
-    ".gif":    "image/gif",
-    ".bmp":    "image/bmp",
-    ".tiff":   "image/tiff",
-    ".wmf":    "image/x-wmf",
-    ".emf":    "image/x-emf",
-    ".svg":    "image/svg+xml",
-    ".xlsx":   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ".xls":    "application/vnd.ms-excel",
-    ".docx":   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    ".pptx":   "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    ".bin":    "application/vnd.ms-office.activeX+binary",
-    ".sigs":   "application/vnd.ms-office.activex+xml",
-}
+# Shared busy flag (multiprocessing-safe)
+is_busy = Value('b', False)
 
-# Override content types for specific known part names (override extension map)
-OVERRIDE_CONTENT_TYPES = {
-    "/word/document.xml":
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
-    "/word/styles.xml":
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml",
-    "/word/settings.xml":
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml",
-    "/word/webSettings.xml":
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.webSettings+xml",
-    "/word/fontTable.xml":
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml",
-    "/word/theme/theme1.xml":
-        "application/vnd.openxmlformats-officedocument.theme+xml",
-    "/docProps/core.xml":
-        "application/vnd.openxmlformats-package.core-properties+xml",
-    "/docProps/app.xml":
-        "application/vnd.openxmlformats-officedocument.extended-properties+xml",
-}
+origins = ["*"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
-def get_content_type_for_part(partname: str) -> str | None:
-    """Return the best content-type guess for a given partname."""
-    if partname in OVERRIDE_CONTENT_TYPES:
-        return OVERRIDE_CONTENT_TYPES[partname]
-    ext = Path(partname).suffix.lower()
-    return EXTENSION_CONTENT_TYPES.get(ext)
+# ─────────────────────────────────────────────
+# STARTUP
+# ─────────────────────────────────────────────
+@app.on_event("startup")
+async def startup_event():
+    print("=== STARTUP BEGIN ===", flush=True)
+    logger.info("=== STARTUP BEGIN ===")
+
+    # Step 1: Config
+    try:
+        print("STARTUP Step 1: Reading config...", flush=True)
+        logger.info("STARTUP Step 1: Reading config...")
+        app.state.config = read_config_set_env(app)
+        logger.info(f"STARTUP Step 1: Config loaded successfully. Keys: {list(app.state.config.keys())}")
+        print(f"STARTUP Step 1: Config loaded. Keys: {list(app.state.config.keys())}", flush=True)
+    except Exception as e:
+        logger.error(f"STARTUP FAILED at Step 1 (config): {e}")
+        print(f"STARTUP FAILED at Step 1 (config): {e}", flush=True)
+        raise
+
+    # Step 2: Secrets
+    try:
+        print("STARTUP Step 2: Loading secrets...", flush=True)
+        logger.info("STARTUP Step 2: Loading secrets...")
+        app.state.secrets = Properties()
+        secrets_path = app.state.config['DEFAULT']['SECRETS_PATH']
+        logger.info(f"STARTUP Step 2: Secrets path = {secrets_path}")
+        print(f"STARTUP Step 2: Secrets path = {secrets_path}", flush=True)
+        with open(secrets_path, 'rb') as secrets_file:
+            app.state.secrets.load(secrets_file)
+        logger.info("STARTUP Step 2: Secrets loaded successfully")
+        print("STARTUP Step 2: Secrets loaded successfully", flush=True)
+    except FileNotFoundError as e:
+        logger.error(f"STARTUP FAILED at Step 2 (secrets file not found): {e}")
+        print(f"STARTUP FAILED at Step 2 (secrets file not found): {e}", flush=True)
+        raise
+    except Exception as e:
+        logger.error(f"STARTUP FAILED at Step 2 (secrets): {e}")
+        print(f"STARTUP FAILED at Step 2 (secrets): {e}", flush=True)
+        raise
+
+    # Step 3: ENV secrets to environment variables
+    try:
+        print("STARTUP Step 3: Setting env secrets...", flush=True)
+        logger.info("STARTUP Step 3: Setting env secrets...")
+        env = app.state.secrets.get("ENV").data
+        logger.info(f"STARTUP Step 3: ENV = {env}")
+        secrets_to_env(app.state.config)
+        logger.info("STARTUP Step 3: Secrets applied to environment successfully")
+        print("STARTUP Step 3: Secrets applied to environment", flush=True)
+    except Exception as e:
+        logger.error(f"STARTUP FAILED at Step 3 (env secrets): {e}")
+        print(f"STARTUP FAILED at Step 3 (env secrets): {e}", flush=True)
+        raise
+
+    # Step 4: S3
+    try:
+        print("STARTUP Step 4: Initializing S3Utils...", flush=True)
+        logger.info("STARTUP Step 4: Initializing S3Utils...")
+        app.state.s3Utils = S3Utils(app.state.config["s3_details"], app.state.secrets)
+        logger.info("STARTUP Step 4: S3Utils initialized successfully")
+        print("STARTUP Step 4: S3Utils initialized successfully", flush=True)
+    except Exception as e:
+        logger.error(f"STARTUP FAILED at Step 4 (S3Utils): {e}")
+        print(f"STARTUP FAILED at Step 4 (S3Utils): {e}", flush=True)
+        raise
+
+    # Step 5: Postgres
+    try:
+        print("STARTUP Step 5: Connecting to Postgres...", flush=True)
+        logger.info("STARTUP Step 5: Connecting to Postgres...")
+        db_user = app.state.secrets.get('POSTGRES_DB_USERNAME').data
+        db_pass = app.state.secrets.get('POSTGRES_DB_PASSWORD').data
+        db_host = app.state.config['HOSTNAME']
+        db_name = app.state.config['DATABASE_NAME']
+        database_url = (
+            f"postgresql+psycopg2://{db_user}:{db_pass}"
+            f"@{db_host}:5432/{db_name}"
+            f"?connect_timeout=10"           # ← prevents infinite hang
+        )
+        logger.info(f"STARTUP Step 5: DB URL (masked) = postgresql+psycopg2://***@{db_host}:5432/{db_name}")
+        print(f"STARTUP Step 5: DB URL host={db_host} db={db_name}", flush=True)
+
+        engine = create_engine(
+            database_url,
+            pool_size=15,
+            max_overflow=2,
+            pool_recycle=1800,
+            pool_pre_ping=True,
+            pool_timeout=30
+        )
+
+        # Force a real connection test so we fail fast here, not at first request
+        with engine.connect() as conn:
+            conn.execute("SELECT 1")
+        logger.info("STARTUP Step 5: Postgres connection verified")
+        print("STARTUP Step 5: Postgres connection verified", flush=True)
+
+        app.state.engine = engine
+        session_local = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        app.state.templates = StringTemplateQueryUtils(session_local)
+        logger.info("STARTUP Step 5: SQLAlchemy session and templates ready")
+        print("STARTUP Step 5: SQLAlchemy session and templates ready", flush=True)
+    except Exception as e:
+        logger.error(f"STARTUP FAILED at Step 5 (Postgres): {e}")
+        print(f"STARTUP FAILED at Step 5 (Postgres): {e}", flush=True)
+        raise
+
+    logger.info("=== STARTUP COMPLETE — APP IS READY ===")
+    print("=== STARTUP COMPLETE — APP IS READY ===", flush=True)
 
 
-def parse_existing_entries(ct_xml: str) -> tuple[set, set]:
+# ─────────────────────────────────────────────
+# HTTP MIDDLEWARE — Request/Response Logging
+# ─────────────────────────────────────────────
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    if request.url.path != "/gdhahealthcheck":
+        logger.info(f"Request: {request.method} {request.url}")
+
+    response = await call_next(request)
+
+    if request.url.path != "/gdhahealthcheck":
+        logger.info(f"STATUS_CODE: {response.status_code}")
+
+    if app_env != "e0":
+        await asyncio.to_thread(logger_provider.force_flush)
+
+    return response
+
+
+# ─────────────────────────────────────────────
+# HEALTH CHECK
+# ─────────────────────────────────────────────
+@app.get("/gdhahealthcheck")
+async def gdhahealthcheck():
     """
-    Return (defaults_set, overrides_set) from [Content_Types].xml text.
-    defaults_set  → set of lowercase extensions already registered
-    overrides_set → set of partnames already registered
+    Readiness Probe - returns 503 while a task is running.
     """
-    defaults = set(re.findall(r'<Default[^>]+Extension="([^"]+)"', ct_xml, re.IGNORECASE))
-    overrides = set(re.findall(r'<Override[^>]+PartName="([^"]+)"', ct_xml, re.IGNORECASE))
-    return {d.lower() for d in defaults}, overrides
+    if is_busy.value:
+        raise HTTPException(status_code=503, detail="busy")
+    return {"status": "ok"}
 
 
-def fix_docx(input_path: str, output_path: str) -> None:
-    input_path = Path(input_path)
-    output_path = Path(output_path)
+# ─────────────────────────────────────────────
+# HOME
+# ─────────────────────────────────────────────
+@app.get("/")
+async def home():
+    logger.info("Default endpoint hit")
+    return {"response": "Home Page"}
 
-    if not input_path.exists():
-        print(f"[ERROR] File not found: {input_path}")
-        sys.exit(1)
 
-    # Copy original → output first, then modify output in-place
-    shutil.copy2(input_path, output_path)
+# ─────────────────────────────────────────────
+# TASK WRAPPER — Fixed race condition
+# is_busy stays True until the submitted task
+# actually finishes (via done_callback).
+# ─────────────────────────────────────────────
+def task_wrapper(request, config, payload, df):
+    """
+    Submits mrmg_execute_vr to the thread pool.
+    is_busy is set True before submit and only
+    cleared in the done_callback after the future
+    completes (success or failure).
+    """
+    global is_busy
+    is_busy.value = True
+    logger.info("TASK_WRAPPER: Task submitted, is_busy=True")
 
-    with zipfile.ZipFile(input_path, "r") as zin:
-        all_names = zin.namelist()
-
-        # Read existing [Content_Types].xml
-        ct_xml = zin.read("[Content_Types].xml").decode("utf-8")
-
-    existing_defaults, existing_overrides = parse_existing_entries(ct_xml)
-
-    new_overrides: list[str] = []   # lines to inject
-    new_defaults:  list[str] = []
-
-    for name in all_names:
-        if name == "[Content_Types].xml":
-            continue
-
-        partname = "/" + name  # OPC partnames start with /
-        ext = Path(name).suffix.lower().lstrip(".")
-
-        content_type = get_content_type_for_part(partname)
-        if content_type is None:
-            print(f"[SKIP]  No content type known for: {partname}")
-            continue
-
-        if partname in existing_overrides:
-            continue  # already registered
-
-        # Prefer Override for specific-path types, Default for extensions
-        if partname in OVERRIDE_CONTENT_TYPES:
-            entry = f'  <Override PartName="{partname}" ContentType="{content_type}"/>'
-            new_overrides.append((partname, entry))
-            print(f"[ADD Override]  {partname}  →  {content_type}")
+    def done_callback(future):
+        is_busy.value = False
+        exc = future.exception()
+        if exc:
+            logger.error(f"TASK_WRAPPER: Task failed with exception: {exc}")
         else:
-            if ext and ext not in existing_defaults:
-                entry = f'  <Default Extension="{ext}" ContentType="{content_type}"/>'
-                new_defaults.append((ext, entry))
-                existing_defaults.add(ext)  # avoid duplicates in loop
-                print(f"[ADD Default]   .{ext}  →  {content_type}")
-            elif ext in existing_defaults:
-                # Extension already covered, but specific part might still fail.
-                # Add an Override to be safe.
-                entry = f'  <Override PartName="{partname}" ContentType="{content_type}"/>'
-                new_overrides.append((partname, entry))
-                print(f"[ADD Override]  {partname}  →  {content_type}")
+            logger.info("TASK_WRAPPER: Task completed successfully, is_busy=False")
 
-    if not new_overrides and not new_defaults:
-        print("[OK] No missing content types found. File may already be valid.")
-        return
-
-    # Inject new entries before </Types>
-    injected = "\n".join(e for _, e in new_defaults) + \
-               "\n" + "\n".join(e for _, e in new_overrides)
-
-    fixed_ct = ct_xml.replace("</Types>", injected + "\n</Types>")
-
-    # Rewrite the output zip with the patched [Content_Types].xml
-    tmp_path = output_path.with_suffix(".tmp.docx")
-    with zipfile.ZipFile(output_path, "r") as zin, \
-         zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zout:
-        for item in zin.infolist():
-            if item.filename == "[Content_Types].xml":
-                zout.writestr(item, fixed_ct.encode("utf-8"))
-            else:
-                zout.writestr(item, zin.read(item.filename))
-
-    tmp_path.replace(output_path)
-    print(f"\n[DONE] Fixed file written to: {output_path}")
+    try:
+        future = executor.submit(mrmg_execute_vr, request, config, payload, df)
+        future.add_done_callback(done_callback)
+    except Exception as e:
+        # If submit itself fails, release the lock immediately
+        is_busy.value = False
+        logger.error(f"TASK_WRAPPER: Failed to submit task: {e}")
+        raise
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("Usage: python fix_docx.py <input.docx> <output_fixed.docx>")
-        sys.exit(1)
+# ─────────────────────────────────────────────
+# ENDPOINTS
+# ─────────────────────────────────────────────
+@app.post("/validation_report_vr")
+async def validation_report_vr(request: Request, payload: ValidationReportInput):
+    if is_busy.value:
+        raise HTTPException(status_code=429, detail="POD is busy")
+    try:
+        logger.info(f"/validation_report_vr payload received - {dict(payload)}")
+        output = dict(payload)
+        results = [dict(item) for item in output["imvp_details"]]
+        df = pd.DataFrame(results)
+        task_wrapper(request, app.state.config, payload, df)
+        return "API triggered successfully"
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"/validation_report_vr Exception: {e}")
+        raise
 
-    fix_docx(sys.argv[1], sys.argv[2])
+
+def fire_and_forget(request, config, payload, df):
+    """
+    Alternative: plain thread instead of ThreadPoolExecutor.
+    Kept for reference but task_wrapper is preferred.
+    """
+    thread = threading.Thread(target=mrmg_execute_vr, args=(request, config, payload, df))
+    thread.daemon = True
+    thread.start()
+
+
+@app.post("/download_report", response_model=DownloadReportResponse)
+async def download_report(payload: DownloadReportInput):
+    try:
+        logger.info(f"/download_report payload received - {dict(payload)}")
+        payload = dict(payload)
+        annotated_path = download_annotated_file(app.state.config, payload)
+        return DownloadReportResponse(annotated_path=annotated_path)
+    except Exception as e:
+        logger.error(f"/download_report Exception: {e}")
+        raise
+
+
+@app.post("/update_annotated_report", response_model=UpdateReportResponse)
+async def update_report(payload: UpdateReportInput):
+    try:
+        logger.info(f"/update_annotated_report payload received - {dict(payload)}")
+        payload = dict(payload)
+        updated_VR_output_path = update_annotated_file(app.state.config, payload)
+        return UpdateReportResponse(updated_VR_output_path=updated_VR_output_path)
+    except Exception as e:
+        logger.error(f"/update_annotated_report Exception: {e}")
+        raise
+
+
+@app.post("/QC", response_model=QCResponse)
+async def qc(request: Request, payload: QCInput):
+    try:
+        logger.info(f"/QC payload received - {dict(payload)}")
+        payload = dict(payload)
+        scorecard_output_path, Model_doc_file_s3_path = qc_langgraph_execute(
+            request, payload, app.state.config
+        )
+        return QCResponse(
+            scorecard_output_path=scorecard_output_path,
+            Model_doc_file_s3_path=Model_doc_file_s3_path
+        )
+    except Exception as e:
+        logger.error(f"/QC Exception: {e}")
+        raise
+
+
+# ─────────────────────────────────────────────
+# SHUTDOWN
+# ─────────────────────────────────────────────
+@app.on_event("shutdown")
+def shutdown_event():
+    logger.info("=== APPLICATION SHUTDOWN ===")
+    print("=== APPLICATION SHUTDOWN ===", flush=True)
+    executor.shutdown(wait=False)
+    if hasattr(app.state, "engine"):
+        try:
+            app.state.engine.dispose()
+            logger.info("SHUTDOWN: SQLAlchemy engine disposed cleanly")
+        except Exception as e:
+            logger.error(f"SHUTDOWN: Error disposing engine: {e}")
+
+
+# ─────────────────────────────────────────────
+# GLOBAL EXCEPTION HANDLER
+# ─────────────────────────────────────────────
+@app.exception_handler(Exception)
+async def generate_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled error: {exc} | Request path: {request.url.path}")
+    return JSONResponse(
+        status_code=500,
+        content={
+            "message": f"An unexpected error occurred: {exc}",
+            "details": str(exc),
+            "path": request.url.path
+        }
+    )
