@@ -1,391 +1,169 @@
-from orchestrators.qc_langgraph_flow import *
-from orchestrators.mrmg_orchestrator import mrmg_execute_vr
-from pydantic import BaseModel, Field
-from utils.config_management import *
-from utils.ELFLogging import *
-import asyncio
-from fastapi.responses import JSONResponse
-from fastapi import FastAPI, HTTPException, Request, Depends
-from fastapi.middleware.cors import CORSMiddleware
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Session
-from utils.string_template_query_utils import StringTemplateQueryUtils
-from services.endpoints.download_annotated_file import *
-from services.endpoints.upload_modified_file import *
-from typing import Optional, List
-import threading
+"""
+fix_docx.py — Repair a .docx file that raises:
+    KeyError: "no content type for partname '...xlsx' in [Content_Types].xml"
+
+Usage:
+    python fix_docx.py input.docx output_fixed.docx
+
+What it does:
+    1. Opens the .docx as a ZIP archive
+    2. Reads [Content_Types].xml
+    3. Scans every file inside the ZIP
+    4. Adds any missing content-type entries for unregistered parts
+    5. Writes the fixed file to a new .docx
+"""
+
+import zipfile
+import shutil
+import sys
+import os
+import re
+from pathlib import Path
+
+# ── Content-type map by extension / known part names ─────────────────────────
+EXTENSION_CONTENT_TYPES = {
+    ".rels":   "application/vnd.openxmlformats-package.relationships+xml",
+    ".xml":    "application/xml",
+    ".jpeg":   "image/jpeg",
+    ".jpg":    "image/jpeg",
+    ".png":    "image/png",
+    ".gif":    "image/gif",
+    ".bmp":    "image/bmp",
+    ".tiff":   "image/tiff",
+    ".wmf":    "image/x-wmf",
+    ".emf":    "image/x-emf",
+    ".svg":    "image/svg+xml",
+    ".xlsx":   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xls":    "application/vnd.ms-excel",
+    ".docx":   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pptx":   "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".bin":    "application/vnd.ms-office.activeX+binary",
+    ".sigs":   "application/vnd.ms-office.activex+xml",
+}
+
+# Override content types for specific known part names (override extension map)
+OVERRIDE_CONTENT_TYPES = {
+    "/word/document.xml":
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
+    "/word/styles.xml":
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml",
+    "/word/settings.xml":
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml",
+    "/word/webSettings.xml":
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.webSettings+xml",
+    "/word/fontTable.xml":
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml",
+    "/word/theme/theme1.xml":
+        "application/vnd.openxmlformats-officedocument.theme+xml",
+    "/docProps/core.xml":
+        "application/vnd.openxmlformats-package.core-properties+xml",
+    "/docProps/app.xml":
+        "application/vnd.openxmlformats-officedocument.extended-properties+xml",
+}
 
 
-# ---------------------------------------------------------------------------
-# Lifespan – replaces deprecated @app.on_event("startup") / ("shutdown")
-# ---------------------------------------------------------------------------
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # ── STARTUP ──────────────────────────────────────────────────────────────
-    app.state.config = read_config_set_env(app)
-    app.state.secrets = Properties()
-
-    with open(app.state.config["DEFAULT"]["SECRETS_PATH"], "rb") as secrets_file:
-        app.state.secrets.load(secrets_file)
-
-    secrets_to_env(app.state.config)
-    app.state.s3Utils = S3Utils(app.state.config["s3_details"], app.state.secrets)
-
-    database_url = (
-        f"postgresql+psycopg2://"
-        f"{app.state.secrets.get('POSTGRES_DB_USERNAME').data}:"
-        f"{app.state.secrets.get('POSTGRES_DB_PASSWORD').data}@"
-        f"{app.state.config['HOSTNAME']}:5432/"
-        f"{app.state.config['DATABASE_NAME']}"
-    )
-
-    logger.info("Creating Postgres Engine...")
-    engine = create_engine(
-        database_url,
-        pool_size=15,
-        max_overflow=2,
-        pool_recycle=1800,
-        pool_pre_ping=True,
-        pool_timeout=30,
-    )
-    app.state.engine = engine
-
-    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    app.state.SessionLocal = SessionLocal
-    app.state.templates = StringTemplateQueryUtils(SessionLocal)
-    logger.info("Postgres Engine created successfully")
-
-    yield  # ── application runs here ──────────────────────────────────────
-
-    # ── SHUTDOWN ─────────────────────────────────────────────────────────────
-    logger.info("Application Shutdown")
-    if hasattr(app.state, "engine"):
-        try:
-            app.state.engine.dispose()
-            logger.info("SQLAlchemy engine disposed cleanly on shutdown")
-        except Exception as e:
-            logger.error(f"Error disposing engine: {e}")
+def get_content_type_for_part(partname: str) -> str | None:
+    """Return the best content-type guess for a given partname."""
+    if partname in OVERRIDE_CONTENT_TYPES:
+        return OVERRIDE_CONTENT_TYPES[partname]
+    ext = Path(partname).suffix.lower()
+    return EXTENSION_CONTENT_TYPES.get(ext)
 
 
-# ---------------------------------------------------------------------------
-# App initialisation
-# ---------------------------------------------------------------------------
-app = FastAPI(lifespan=lifespan)
-
-# Only 1 worker per POD — keeps the pod single-tenant for heavy ML tasks
-executor = ThreadPoolExecutor(max_workers=1)
-
-# Use a threading.Event (correct primitive for threads; multiprocessing.Value
-# is only needed when sharing state across OS-level processes)
-_busy_event = threading.Event()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-# ---------------------------------------------------------------------------
-# Dependency helpers
-# ---------------------------------------------------------------------------
-def get_config(request: Request) -> dict:
-    return request.app.state.config
-
-
-def get_s3(request: Request):
-    return request.app.state.s3Utils
-
-
-def get_db(request: Request) -> Session:
-    """Yield a per-request DB session and close it when the request is done."""
-    SessionLocal = request.app.state.SessionLocal
-    db: Session = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-# ---------------------------------------------------------------------------
-# Middleware
-# ---------------------------------------------------------------------------
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    skip = request.url.path == "/liveness"
-    if not skip:
-        logger.info(f"Request: {request.method} {request.url}")
-    response = await call_next(request)
-    if not skip:
-        logger.info(f"STATUS_CODE: {response.status_code}")
-    if app_env != "e0" and request.url.path not in ["/docs", "/openapi.json"]:
-        try:
-            asyncio.create_task(asyncio.to_thread(logger_provider.force_flush))
-        except Exception:
-            pass
-    return response
-
-
-# ---------------------------------------------------------------------------
-# Health / readiness probes  (split so k8s can distinguish them)
-# ---------------------------------------------------------------------------
-@app.get("/liveness", tags=["ops"])
-async def liveness():
-    """Liveness probe – is the container alive?"""
-    return {"status": "ok"}
-
-
-@app.get("/readiness", tags=["ops"])
-async def readiness():
-    """Readiness probe – can the pod accept new requests?"""
-    if _busy_event.is_set():
-        raise HTTPException(status_code=503, detail="Pod is busy – try another instance")
-    return {"status": "ready"}
-
-
-# Keep the old name alive so existing callers aren't broken
-@app.get("/gdhahealthcheck", tags=["ops"], deprecated=True)
-async def gdhahealthcheck():
-    return await readiness()
-
-
-@app.get("/", tags=["ops"])
-async def home():
-    logger.info("default endpoint hit")
-    return {"response": "Home Page"}
-
-
-# ---------------------------------------------------------------------------
-# Pydantic models
-# ---------------------------------------------------------------------------
-class ImvpDetailsInput(BaseModel):
-    msg_id: str = Field(default=None, example="d11e510c-b8db-43a8-8543-661a61b1ce28")
-    section: str = Field(default=None, example="1")
-    question: str = Field(default=None, example="What is the model's purpose?")
-    sl_no: str = Field(default=None, example="Test S1")
-    is_na: bool = Field(default=None, example=False)
-    eff_challenge: bool = Field(default=None, example=False)
-    finding_iss_open: bool = Field(default=None, example=False)
-    finding_iss_closed: bool = Field(default=None, example=False)
-    val_comments: str = Field(default=None, example="This is good")
-
-
-class ValidationReportInput(BaseModel):
-    stage_id: str = Field(default=None, example="d11e510c-b8db-43a8-8543-661a61b1ce28")
-    imvp_details: List[ImvpDetailsInput]
-    model_s3_path: str = Field(default=None, example="Model.docx")
-    model_file_name: Optional[str] = Field(default=None, example="model-123")
-    model_id: Optional[str] = Field(default=None, example="model-123")
-    model_name: Optional[str] = Field(default=None, example="model-abc")
-    model_version: Optional[str] = Field(default=None, example="1.0")
-    market: Optional[str] = Field(default=None, example="US")
-    business_process: Optional[str] = Field(default=None, example="Finance")
-    scope: Optional[str] = Field(default=None, example="All")
-    criticality: Optional[str] = Field(default=None, example="High")
-    findings_s3_path: Optional[str] = Field(
-        default=None,
-        example="Model_Validation_Acceleration/Input/Validation/Active/3a22289f/Finding.xlsx",
-    )
-    rfr_s3_path: Optional[str] = Field(
-        default=None,
-        example="Model_Validation_Acceleration/Input/Validation/Active/3a22289f/RFR.docx",
-    )
-    is_ext_vendor: Optional[bool] = Field(default=None, example=False)
-
-
-class TriggerResponse(BaseModel):
-    message: str = Field(example="API triggered successfully")
-
-
-class ValidationReportResponse(BaseModel):
-    validation_report_output_path: str = Field(
-        default="The validation is ongoing.", example="S3 path"
-    )
-    annotated_path: Optional[str] = Field(default=None, example="S3 Annotated path")
-
-
-# ---------------------------------------------------------------------------
-# Background task helpers
-# ---------------------------------------------------------------------------
-def _run_vr_task(request: Request, config: dict, payload: ValidationReportInput, df) -> None:
+def parse_existing_entries(ct_xml: str) -> tuple[set, set]:
     """
-    Runs inside the thread-pool worker.
-    Sets the busy flag, executes the heavy task, then clears the flag.
+    Return (defaults_set, overrides_set) from [Content_Types].xml text.
+    defaults_set  → set of lowercase extensions already registered
+    overrides_set → set of partnames already registered
     """
-    _busy_event.set()
-    try:
-        mrmg_execute_vr(request, config, payload, df)
-    except Exception as e:
-        logger.exception(f"Background VR task failed: {e}")
-    finally:
-        _busy_event.clear()
+    defaults = set(re.findall(r'<Default[^>]+Extension="([^"]+)"', ct_xml, re.IGNORECASE))
+    overrides = set(re.findall(r'<Override[^>]+PartName="([^"]+)"', ct_xml, re.IGNORECASE))
+    return {d.lower() for d in defaults}, overrides
 
 
-def submit_vr_task(request: Request, config: dict, payload: ValidationReportInput, df) -> None:
-    """Submit the VR task to the single-worker executor."""
-    executor.submit(_run_vr_task, request, config, payload, df)
+def fix_docx(input_path: str, output_path: str) -> None:
+    input_path = Path(input_path)
+    output_path = Path(output_path)
+
+    if not input_path.exists():
+        print(f"[ERROR] File not found: {input_path}")
+        sys.exit(1)
+
+    # Copy original → output first, then modify output in-place
+    shutil.copy2(input_path, output_path)
+
+    with zipfile.ZipFile(input_path, "r") as zin:
+        all_names = zin.namelist()
+
+        # Read existing [Content_Types].xml
+        ct_xml = zin.read("[Content_Types].xml").decode("utf-8")
+
+    existing_defaults, existing_overrides = parse_existing_entries(ct_xml)
+
+    new_overrides: list[str] = []   # lines to inject
+    new_defaults:  list[str] = []
+
+    for name in all_names:
+        if name == "[Content_Types].xml":
+            continue
+
+        partname = "/" + name  # OPC partnames start with /
+        ext = Path(name).suffix.lower().lstrip(".")
+
+        content_type = get_content_type_for_part(partname)
+        if content_type is None:
+            print(f"[SKIP]  No content type known for: {partname}")
+            continue
+
+        if partname in existing_overrides:
+            continue  # already registered
+
+        # Prefer Override for specific-path types, Default for extensions
+        if partname in OVERRIDE_CONTENT_TYPES:
+            entry = f'  <Override PartName="{partname}" ContentType="{content_type}"/>'
+            new_overrides.append((partname, entry))
+            print(f"[ADD Override]  {partname}  →  {content_type}")
+        else:
+            if ext and ext not in existing_defaults:
+                entry = f'  <Default Extension="{ext}" ContentType="{content_type}"/>'
+                new_defaults.append((ext, entry))
+                existing_defaults.add(ext)  # avoid duplicates in loop
+                print(f"[ADD Default]   .{ext}  →  {content_type}")
+            elif ext in existing_defaults:
+                # Extension already covered, but specific part might still fail.
+                # Add an Override to be safe.
+                entry = f'  <Override PartName="{partname}" ContentType="{content_type}"/>'
+                new_overrides.append((partname, entry))
+                print(f"[ADD Override]  {partname}  →  {content_type}")
+
+    if not new_overrides and not new_defaults:
+        print("[OK] No missing content types found. File may already be valid.")
+        return
+
+    # Inject new entries before </Types>
+    injected = "\n".join(e for _, e in new_defaults) + \
+               "\n" + "\n".join(e for _, e in new_overrides)
+
+    fixed_ct = ct_xml.replace("</Types>", injected + "\n</Types>")
+
+    # Rewrite the output zip with the patched [Content_Types].xml
+    tmp_path = output_path.with_suffix(".tmp.docx")
+    with zipfile.ZipFile(output_path, "r") as zin, \
+         zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            if item.filename == "[Content_Types].xml":
+                zout.writestr(item, fixed_ct.encode("utf-8"))
+            else:
+                zout.writestr(item, zin.read(item.filename))
+
+    tmp_path.replace(output_path)
+    print(f"\n[DONE] Fixed file written to: {output_path}")
 
 
-# ---------------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------------
-@app.post(
-    "/validation_report_vr",
-    response_model=TriggerResponse,
-    status_code=202,
-    tags=["validation"],
-)
-async def validation_report_vr(
-    request: Request,
-    payload: ValidationReportInput,
-    config: dict = Depends(get_config),
-):
-    if _busy_event.is_set():
-        raise HTTPException(status_code=429, detail="Pod is busy – retry later")
+# ── Entry point ───────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        print("Usage: python fix_docx.py <input.docx> <output_fixed.docx>")
+        sys.exit(1)
 
-    logger.info(f"validation_report_vr payload received: stage_id={payload.stage_id}")
-
-    results = [item.dict() for item in payload.imvp_details]
-    df = pd.DataFrame(results)
-
-    submit_vr_task(request, config, payload, df)
-    return TriggerResponse(message="Validation report generation triggered successfully")
-
-
-# ── Download annotated report ────────────────────────────────────────────────
-class DownloadReportInput(BaseModel):
-    stage_id: str = Field(default=None, example="e505ad75-e29c-4d28-bbea-406d6a82eaa0")
-    model_s3_path: str = Field(
-        default=None,
-        example="Model_Validation_Acceleration/Input/Validation/Active/e505ad75/Model Documentation.docx",
-    )
-
-
-class DownloadReportResponse(BaseModel):
-    annotated_path: Optional[str] = Field(default=None, example="S3 Annotated path")
-
-
-@app.post("/download_report", response_model=DownloadReportResponse, tags=["validation"])
-async def download_report(
-    payload: DownloadReportInput,
-    config: dict = Depends(get_config),
-):
-    logger.info(f"download_report payload received: stage_id={payload.stage_id}")
-    annotated_path = download_annotated_file(config, payload.dict())
-    return DownloadReportResponse(annotated_path=annotated_path)
-
-
-# ── Update annotated report ──────────────────────────────────────────────────
-class ModifiedQuestionsReport(BaseModel):
-    question: str = Field(example="What is the model's purpose?")
-    text: str = Field(example="serial number TestS1")
-    modelling_team_answer: str = Field(example="Model response")
-    mrmg_answer: str = Field(example="MRMG assessment")
-    rfr: Optional[str] = Field(default=None, example="rfr")
-    finding: Optional[str] = Field(default=None, example="finding")
-    section_number: str = Field(example="1")
-    Section: str = Field(example="Section Name")
-    sections: str = Field(example="Sections Name")
-    addnl_sections: Optional[List[dict]] = Field(
-        default=None, example=[{"Section1": "Value"}, {"Section2": "Value"}]
-    )
-    is_na: bool = Field(example=False)
-
-
-class UpdateReportInput(BaseModel):
-    stage_id: str = Field(default=None, example="e505ad75-e29c-4d28-bbea-406d6a82eaa0")
-    model_s3_path: str = Field(
-        default=None,
-        example="Model_Validation_Acceleration/Input/Validation/Active/e505ad75/Model Documentation.docx",
-    )
-    findings_s3_path: Optional[str] = Field(
-        default=None,
-        example="Model_Validation_Acceleration/Input/Validation/Active/3a22289f/Finding.xlsx",
-    )
-    model_id: Optional[str] = Field(default=None, example="model-123")
-    model_name: Optional[str] = Field(default=None, example="model-abc")
-    model_version: Optional[str] = Field(default=None, example="1.0")
-    market: Optional[str] = Field(default=None, example="US")
-    business_process: Optional[str] = Field(default=None, example="Finance")
-    scope: Optional[str] = Field(default=None, example="All")
-    criticality: Optional[str] = Field(default=None, example="High")
-    # Renamed field: was `ModifiedQuestionsReport` which shadowed the class above
-    modified_questions: List[ModifiedQuestionsReport] = Field(alias="ModifiedQuestionsReport")
-    is_ext_vendor: Optional[bool] = Field(default=None, example=False)
-
-    class Config:
-        populate_by_name = True
-
-
-class UpdateReportResponse(BaseModel):
-    updated_VR_output_path: Optional[str] = Field(
-        default=None, example="S3 updated VR Output path"
-    )
-
-
-@app.post(
-    "/update_annotated_report",
-    response_model=UpdateReportResponse,
-    tags=["validation"],
-)
-async def update_annotated_report(
-    payload: UpdateReportInput,
-    config: dict = Depends(get_config),
-):
-    logger.info(f"update_annotated_report payload received: stage_id={payload.stage_id}")
-    # Pass the original dict so downstream code keeps the original key name
-    updated_path = update_annotated_file(config, payload.dict(by_alias=True))
-    return UpdateReportResponse(updated_VR_output_path=updated_path)
-
-
-# ── QC ───────────────────────────────────────────────────────────────────────
-class QCInput(BaseModel):
-    stage_id: str = Field(default=None, example="e505ad75-e29c-4d28-bbea-406d6a82eaa0")
-    qc_s3_path: str = Field(
-        default=None,
-        example="Model_Validation_Acceleration/Input/Validation_QC/Active/f64fc236/4926_AskAmexDemo_1.0_ValidationReport.docx",
-    )
-    business_process: str = Field(default=None, example="Finance")
-    criticality: str = Field(default=None, example="High")
-    emm_id: str = Field(default=None, example="1208")
-
-
-class QCResponse(BaseModel):
-    scorecard_output_path: Optional[str] = Field(default=None, example="S3 updated VR Output path")
-    Model_doc_file_s3_path: Optional[str] = Field(default=None, example="S3 Model doc file path")
-
-
-@app.post("/QC", response_model=QCResponse, tags=["qc"])
-async def qc(
-    request: Request,
-    payload: QCInput,
-    config: dict = Depends(get_config),
-):
-    logger.info(f"QC payload received: stage_id={payload.stage_id}")
-    scorecard_output_path, model_doc_file_s3_path = qc_langgraph_execute(
-        request, payload.dict(), config
-    )
-    return QCResponse(
-        scorecard_output_path=scorecard_output_path,
-        Model_doc_file_s3_path=model_doc_file_s3_path,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Global exception handler
-# ---------------------------------------------------------------------------
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    logger.error(f"Unhandled error: {exc} | path: {request.url.path}")
-    return JSONResponse(
-        status_code=500,
-        content={
-            "message": f"An unexpected error occurred: {exc}",
-            "details": str(exc),
-            "path": request.url.path,
-        },
-    )
+    fix_docx(sys.argv[1], sys.argv[2])
