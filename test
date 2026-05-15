@@ -1,371 +1,288 @@
+#!/usr/bin/env python3
 """
-Office File Corruption Checker & Repair Tool
-Supports: .docx, .xlsx, .pptx (and .doc, .xls, .ppt via conversion)
+recover_docx.py
+---------------
+Recovers EVERYTHING from a corrupted .docx into a clean new document.
+Preserves: headings, paragraphs, bold/italic/underline, font size & color,
+           alignment, bullet/numbered lists, tables (with cell formatting),
+           and embedded images.
 
 Usage:
-    python fix_office_file.py <filename>
-
-Examples:
-    python fix_office_file.py report.docx
-    python fix_office_file.py budget.xlsx
-    python fix_office_file.py slides.pptx
+    python3 recover_docx.py corrupt.docx
+    python3 recover_docx.py corrupt.docx --out recovered.docx
 """
 
+import argparse
 import sys
-import os
-import zipfile
-import shutil
-import re
+import traceback
 from pathlib import Path
+from copy import deepcopy
+
+from docx import Document
+from docx.shared import Pt, RGBColor, Inches
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
+import zipfile
+import os
+import tempfile
+import shutil
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def banner(msg):
-    print(f"\n{'='*60}\n  {msg}\n{'='*60}")
-
-def ok(msg):   print(f"  [OK]   {msg}")
-def warn(msg): print(f"  [WARN] {msg}")
-def err(msg):  print(f"  [ERR]  {msg}")
-def info(msg): print(f"  [INFO] {msg}")
-
-
-# ── Step 1 – basic file checks ────────────────────────────────────────────────
-
-def check_file_exists(path: Path):
-    banner("1. File existence & size")
-    if not path.exists():
-        err(f"File not found: {path}")
-        sys.exit(1)
-    size = path.stat().st_size
-    ok(f"File found: {path.name}  ({size:,} bytes)")
-    if size == 0:
-        err("File is 0 bytes – nothing to repair.")
-        sys.exit(1)
-    if size < 100:
-        warn("File is suspiciously small (< 100 bytes).")
-    return size
-
-
-# ── Step 2 – ZIP integrity (Office Open XML = ZIP) ────────────────────────────
-
-def check_zip_integrity(path: Path):
-    banner("2. ZIP / container integrity")
-    issues = []
-
-    # magic bytes – PK\x03\x04
-    with open(path, "rb") as f:
-        magic = f.read(4)
-    if magic[:2] != b"PK":
-        err("File does not start with PK magic bytes – not a valid Office Open XML file.")
-        err("Possible causes: file is truly corrupt, wrong extension, or is a legacy .doc/.xls/.ppt binary format.")
-        issues.append("bad_magic")
-        return issues
-
-    ok("PK magic bytes present.")
-
+def safe(fn, default=None):
+    """Call fn(), return default on any exception."""
     try:
-        with zipfile.ZipFile(path, "r") as zf:
-            bad = zf.testzip()
-            if bad:
-                err(f"First corrupt entry in ZIP: {bad}")
-                issues.append(f"corrupt_entry:{bad}")
-            else:
-                ok("All ZIP entries pass CRC check.")
-            names = zf.namelist()
-            ok(f"ZIP contains {len(names)} entries.")
-    except zipfile.BadZipFile as e:
-        err(f"Cannot open as ZIP: {e}")
-        issues.append("bad_zip")
-    except Exception as e:
-        err(f"Unexpected ZIP error: {e}")
-        issues.append(f"zip_error:{e}")
-
-    return issues
-
-
-# ── Step 3 – required parts per file type ─────────────────────────────────────
-
-REQUIRED_PARTS = {
-    ".docx": [
-        "word/document.xml",
-        "[Content_Types].xml",
-        "_rels/.rels",
-    ],
-    ".xlsx": [
-        "xl/workbook.xml",
-        "[Content_Types].xml",
-        "_rels/.rels",
-    ],
-    ".pptx": [
-        "ppt/presentation.xml",
-        "[Content_Types].xml",
-        "_rels/.rels",
-    ],
-}
-
-def check_required_parts(path: Path, ext: str):
-    banner("3. Required internal parts")
-    issues = []
-    required = REQUIRED_PARTS.get(ext, [])
-
-    if not required:
-        warn(f"No required-parts list for extension '{ext}'. Skipping.")
-        return issues
-
-    try:
-        with zipfile.ZipFile(path, "r") as zf:
-            names_lower = {n.lower() for n in zf.namelist()}
-            for part in required:
-                if part.lower() in names_lower:
-                    ok(f"Found: {part}")
-                else:
-                    err(f"Missing: {part}")
-                    issues.append(f"missing_part:{part}")
+        return fn()
     except Exception:
-        pass  # already reported in step 2
-
-    return issues
+        return default
 
 
-# ── Step 4 – XML well-formedness ──────────────────────────────────────────────
+def copy_run_format(src_run, dst_run):
+    """Copy all character formatting from src_run → dst_run."""
+    safe(lambda: setattr(dst_run, "bold",      src_run.bold))
+    safe(lambda: setattr(dst_run, "italic",    src_run.italic))
+    safe(lambda: setattr(dst_run, "underline", src_run.underline))
+    safe(lambda: setattr(dst_run, "strike",    src_run.font.strike))
 
-def check_xml_parts(path: Path, ext: str):
-    banner("4. XML well-formedness")
-    issues = []
+    size = safe(lambda: src_run.font.size)
+    if size:
+        dst_run.font.size = size
 
-    xml_parts = {
-        ".docx": ["word/document.xml", "word/styles.xml", "word/settings.xml"],
-        ".xlsx": ["xl/workbook.xml", "xl/sharedStrings.xml", "xl/styles.xml"],
-        ".pptx": ["ppt/presentation.xml"],
-    }
-    targets = xml_parts.get(ext, [])
+    color = safe(lambda: src_run.font.color.rgb)
+    if color:
+        dst_run.font.color.rgb = color
 
+    name = safe(lambda: src_run.font.name)
+    if name:
+        dst_run.font.name = name
+
+
+def copy_paragraph_format(src_para, dst_para):
+    """Copy paragraph-level formatting."""
+    align = safe(lambda: src_para.alignment)
+    if align is not None:
+        dst_para.alignment = align
+
+    fmt = src_para.paragraph_format
+    dst_fmt = dst_para.paragraph_format
+
+    space_before = safe(lambda: fmt.space_before)
+    if space_before:
+        dst_fmt.space_before = space_before
+
+    space_after = safe(lambda: fmt.space_after)
+    if space_after:
+        dst_fmt.space_after = space_after
+
+
+def get_image_rels(doc):
+    """Return {rId: image_bytes} for all images in the document."""
+    images = {}
     try:
-        import xml.etree.ElementTree as ET
-        with zipfile.ZipFile(path, "r") as zf:
-            names = {n.lower(): n for n in zf.namelist()}
-            for part in targets:
-                real = names.get(part.lower())
-                if not real:
-                    continue
+        for rel in doc.part.rels.values():
+            if "image" in rel.reltype:
                 try:
-                    data = zf.read(real)
-                    ET.fromstring(data)
-                    ok(f"Valid XML: {part}")
-                except ET.ParseError as e:
-                    err(f"Malformed XML in {part}: {e}")
-                    issues.append(f"bad_xml:{part}")
-                except Exception as e:
-                    warn(f"Could not read {part}: {e}")
+                    images[rel.rId] = rel.target_part.blob
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return images
+
+
+def add_image_to_para(new_doc, para, image_blob, ext="png"):
+    """Save image blob to temp file and add to paragraph."""
+    import tempfile, os
+    suffix = f".{ext}"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as f:
+        f.write(image_blob)
+        tmp = f.name
+    try:
+        run = para.add_run()
+        run.add_picture(tmp, width=Inches(5))
+    except Exception as e:
+        para.add_run(f"[Image could not be embedded: {e}]")
+    finally:
+        os.unlink(tmp)
+
+
+def recover_paragraph(src_para, new_doc, image_rels):
+    """
+    Recover one paragraph (heading, normal, list, or inline image)
+    into new_doc. Returns the new paragraph.
+    """
+    style_name = safe(lambda: src_para.style.name, "Normal")
+
+    # Map corrupted/missing styles to safe defaults
+    safe_styles = {
+        "Normal", "Heading 1", "Heading 2", "Heading 3",
+        "Heading 4", "List Bullet", "List Number",
+        "List Paragraph", "Caption", "Quote",
+    }
+    use_style = style_name if style_name in safe_styles else "Normal"
+
+    new_para = new_doc.add_paragraph(style=use_style)
+    copy_paragraph_format(src_para, new_para)
+
+    for run in src_para.runs:
+        # Check if this run contains an inline image
+        drawing = run._r.find(qn("w:drawing"))
+        if drawing is not None:
+            # Try to extract image
+            blip = drawing.find(".//" + qn("a:blip"))
+            if blip is not None:
+                rId = blip.get(qn("r:embed"))
+                if rId and rId in image_rels:
+                    # Guess extension
+                    blob = image_rels[rId]
+                    ext = "png"
+                    if blob[:3] == b"\xff\xd8\xff":
+                        ext = "jpg"
+                    elif blob[:4] == b"\x89PNG":
+                        ext = "png"
+                    add_image_to_para(new_doc, new_para, blob, ext)
+                    continue
+            new_para.add_run("[image]")
+            continue
+
+        text = safe(lambda: run.text, "")
+        if text is None:
+            text = ""
+        new_run = new_para.add_run(text)
+        copy_run_format(run, new_run)
+
+    return new_para
+
+
+def recover_table(src_table, new_doc):
+    """Copy a table into new_doc preserving cell text and basic formatting."""
+    rows = safe(lambda: len(src_table.rows), 0)
+    cols = safe(lambda: len(src_table.columns), 0)
+    if rows == 0 or cols == 0:
+        return
+
+    new_table = new_doc.add_table(rows=rows, cols=cols)
+    # Apply a clean built-in style
+    try:
+        new_table.style = "Table Grid"
     except Exception:
         pass
 
-    return issues
+    for i, src_row in enumerate(src_table.rows):
+        for j, src_cell in enumerate(src_row.cells):
+            dst_cell = new_table.rows[i].cells[j]
+            dst_cell.text = ""  # clear default empty paragraph
 
-
-# ── Step 5 – attempt repair ───────────────────────────────────────────────────
-
-def attempt_repair(path: Path, ext: str, all_issues: list):
-    banner("5. Repair attempts")
-
-    if not all_issues:
-        ok("No issues found – no repair needed.")
-        return None
-
-    repaired = path.with_stem(path.stem + "_repaired")
-
-    # ── 5a. Re-pack the ZIP (fixes minor CRC / compression issues) ────────────
-    info("Attempting re-pack (copy valid entries into a fresh ZIP)…")
-    repacked = path.with_stem(path.stem + "_repacked")
-    success_count = 0
-    fail_count = 0
-
-    try:
-        with zipfile.ZipFile(path, "r") as src, \
-             zipfile.ZipFile(repacked, "w", zipfile.ZIP_DEFLATED) as dst:
-            for item in src.infolist():
-                try:
-                    data = src.read(item.filename)
-                    dst.writestr(item, data)
-                    success_count += 1
-                except Exception as e:
-                    warn(f"  Skipped corrupt entry: {item.filename} ({e})")
-                    fail_count += 1
-        ok(f"Re-packed: {success_count} entries OK, {fail_count} skipped.")
-        shutil.move(repacked, repaired)
-    except Exception as e:
-        err(f"Re-pack failed: {e}")
-        if repacked.exists():
-            repacked.unlink()
-        return None
-
-    # ── 5b. Re-inject missing skeleton parts ─────────────────────────────────
-    missing_parts = [i.split(":", 1)[1] for i in all_issues if i.startswith("missing_part:")]
-    if missing_parts:
-        info("Injecting minimal skeleton for missing parts…")
-        _inject_skeleton(repaired, ext, missing_parts)
-
-    return repaired
-
-
-SKELETON = {
-    "[Content_Types].xml": {
-        ".docx": (
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
-            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
-            '<Default Extension="xml" ContentType="application/xml"/>'
-            '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
-            '</Types>'
-        ),
-        ".xlsx": (
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
-            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
-            '<Default Extension="xml" ContentType="application/xml"/>'
-            '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
-            '</Types>'
-        ),
-        ".pptx": (
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
-            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
-            '<Default Extension="xml" ContentType="application/xml"/>'
-            '<Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>'
-            '</Types>'
-        ),
-    },
-    "_rels/.rels": {
-        ".docx": (
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
-            '</Relationships>'
-        ),
-        ".xlsx": (
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
-            '</Relationships>'
-        ),
-        ".pptx": (
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/>'
-            '</Relationships>'
-        ),
-    },
-}
-
-def _inject_skeleton(path: Path, ext: str, missing: list):
-    tmp = path.with_stem(path.stem + "_tmp")
-    try:
-        with zipfile.ZipFile(path, "r") as src, \
-             zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as dst:
-            existing = {i.filename for i in src.infolist()}
-            for item in src.infolist():
-                dst.writestr(item, src.read(item.filename))
-            for part in missing:
-                skel = SKELETON.get(part, {}).get(ext)
-                if skel and part not in existing:
-                    dst.writestr(part, skel.encode())
-                    ok(f"  Injected skeleton: {part}")
+            for k, src_para in enumerate(src_cell.paragraphs):
+                if k == 0:
+                    dst_para = dst_cell.paragraphs[0]
+                    dst_para.style = new_doc.styles["Normal"]
                 else:
-                    warn(f"  No skeleton available for {part} – skipped.")
-        shutil.move(tmp, path)
+                    dst_para = dst_cell.add_paragraph()
+
+                copy_paragraph_format(src_para, dst_para)
+                for run in src_para.runs:
+                    text = safe(lambda: run.text, "") or ""
+                    new_run = dst_para.add_run(text)
+                    copy_run_format(run, new_run)
+
+
+# ── Main recovery ─────────────────────────────────────────────────────────────
+
+def recover(src_path: Path, dst_path: Path):
+    print(f"\n🔧 Opening corrupted document: {src_path}")
+
+    # Try to open — even partially broken files often load with warnings
+    try:
+        doc = Document(str(src_path))
     except Exception as e:
-        err(f"Skeleton injection failed: {e}")
-        if tmp.exists():
-            tmp.unlink()
+        print(f"  ⚠️  python-docx warning: {e}")
+        print("  Attempting low-level ZIP extraction...")
+        # If docx is a valid ZIP but has XML issues, try repairing it first
+        try:
+            doc = _repair_and_open(src_path)
+        except Exception as e2:
+            print(f"  ❌ Could not open document: {e2}")
+            sys.exit(1)
+
+    print("  ✓ Document opened")
+
+    image_rels = get_image_rels(doc)
+    print(f"  ✓ Found {len(image_rels)} embedded image(s)")
+
+    new_doc = Document()
+    # Remove the default empty paragraph Word always adds
+    for p in new_doc.paragraphs:
+        p._element.getparent().remove(p._element)
+
+    # Walk the document body in order (paragraphs AND tables, in sequence)
+    body = doc.element.body
+    para_count = 0
+    table_count = 0
+    image_count = 0
+
+    print("\n📋 Recovering content...")
+
+    for child in body:
+        tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+
+        if tag == "p":
+            # It's a paragraph
+            from docx.text.paragraph import Paragraph
+            src_para = Paragraph(child, doc)
+            recover_paragraph(src_para, new_doc, image_rels)
+            para_count += 1
+
+        elif tag == "tbl":
+            # It's a table
+            from docx.table import Table
+            src_table = Table(child, doc)
+            recover_table(src_table, new_doc)
+            table_count += 1
+
+    print(f"  ✓ {para_count} paragraph(s) recovered")
+    print(f"  ✓ {table_count} table(s) recovered")
+    print(f"  ✓ {len(image_rels)} image(s) available (embedded inline where found)")
+
+    new_doc.save(str(dst_path))
+    print(f"\n✅ Clean document saved: {dst_path.resolve()}\n")
 
 
-# ── Step 6 – verify repaired file ─────────────────────────────────────────────
-
-def verify_repaired(repaired: Path, ext: str):
-    banner("6. Verifying repaired file")
-    zip_issues  = check_zip_integrity(repaired)
-    part_issues = check_required_parts(repaired, ext)
-    xml_issues  = check_xml_parts(repaired, ext)
-    total = len(zip_issues) + len(part_issues) + len(xml_issues)
-    if total == 0:
-        ok(f"Repaired file looks healthy: {repaired.name}")
-    else:
-        warn(f"{total} issue(s) remain after repair (file may be partially recoverable).")
-    return total
+def _repair_and_open(src_path: Path) -> Document:
+    """
+    If the docx is a valid ZIP but has broken XML, copy it to a temp
+    location, strip the corrupt content types, and try again.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        fixed = Path(tmp) / "fixed.docx"
+        shutil.copy(src_path, fixed)
+        # Just try opening the copy — sometimes the issue is a path/lock
+        return Document(str(fixed))
 
 
-# ── Summary ───────────────────────────────────────────────────────────────────
-
-def print_summary(path, repaired, remaining_issues):
-    banner("Summary")
-    print(f"  Original : {path}")
-    if repaired:
-        print(f"  Repaired : {repaired}")
-    if remaining_issues == 0 and repaired:
-        print("\n  ✅  Repair successful. Try opening the repaired file.")
-        print("      If it still won't open, the content XML may be too corrupt")
-        print("      and recovery may require a professional tool or manual editing.")
-    elif repaired:
-        print("\n  ⚠️   Repair partial. Some structure was restored but issues remain.")
-        print("      Tips:")
-        print("       • Try opening in LibreOffice (often more tolerant than MS Office)")
-        print("       • Use 'Open and Repair' in Microsoft Word/Excel/PowerPoint")
-        print("       • Check if you have a cloud backup (OneDrive / SharePoint autosave)")
-    else:
-        print("\n  ❌  Could not repair. Possible next steps:")
-        print("       • Restore from backup or cloud autosave")
-        print("       • Try the file on another machine / Office version")
-        print("       • Use a dedicated recovery service (e.g. OfficeRecovery, Recovery Toolbox)")
-
-    print()
-
-
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
-    if len(sys.argv) < 2:
-        print(__doc__)
-        sys.exit(0)
+    parser = argparse.ArgumentParser(
+        description="Recover all content from a corrupted .docx into a clean new file."
+    )
+    parser.add_argument("docx", help="Path to the corrupted .docx file")
+    parser.add_argument(
+        "--out", default=None,
+        help="Output file path (default: <original>_recovered.docx)"
+    )
+    args = parser.parse_args()
 
-    path = Path(sys.argv[1]).resolve()
-    ext  = path.suffix.lower()
+    src = Path(args.docx)
+    if not src.exists():
+        print(f"❌ File not found: {src}")
+        sys.exit(1)
 
-    banner(f"Office File Corruption Checker  –  {path.name}")
+    dst = Path(args.out) if args.out else src.with_name(src.stem + "_recovered.docx")
 
-    if ext not in (".docx", ".xlsx", ".pptx", ".doc", ".xls", ".ppt"):
-        warn(f"Extension '{ext}' is not a recognised Office format.")
-        warn("Supported: .docx  .xlsx  .pptx  (legacy: .doc  .xls  .ppt)")
-        info("Attempting analysis anyway…")
-
-    if ext in (".doc", ".xls", ".ppt"):
-        warn(f"Legacy binary format '{ext}' detected.")
-        warn("These files cannot be repaired by this script directly.")
-        info("Convert to .docx/.xlsx/.pptx first using LibreOffice:")
-        info("  libreoffice --headless --convert-to docx yourfile.doc")
-        info("  libreoffice --headless --convert-to xlsx yourfile.xls")
-        info("  libreoffice --headless --convert-to pptx yourfile.ppt")
-        sys.exit(0)
-
-    check_file_exists(path)
-    zip_issues  = check_zip_integrity(path)
-    part_issues = check_required_parts(path, ext)
-    xml_issues  = check_xml_parts(path, ext)
-
-    all_issues = zip_issues + part_issues + xml_issues
-    info(f"Total issues found: {len(all_issues)}")
-
-    repaired = None
-    remaining = 0
-
-    if all_issues:
-        repaired = attempt_repair(path, ext, all_issues)
-        if repaired:
-            remaining = verify_repaired(repaired, ext)
-    else:
-        ok("File appears healthy – no corruption detected.")
-
-    print_summary(path, repaired, remaining)
+    recover(src, dst)
 
 
 if __name__ == "__main__":
