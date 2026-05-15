@@ -1,281 +1,121 @@
-#!/usr/bin/env python3
-"""
-recover_docx.py
----------------
-Recovers EVERYTHING from a corrupted .docx into a perfectly clean new document.
-Preserves: Title, Heading 1-9, Normal, List Bullet, List Number, Caption, Quote,
-           bold/italic/underline/strikethrough, font name/size/color,
-           paragraph alignment & spacing, tables (with bold headers),
-           and embedded images.
+Here's a Jupyter Notebook version of the DOCX to PDF converter:
 
-Usage:
-    python3 recover_docx.py corrupt.docx
-    python3 recover_docx.py corrupt.docx --out recovered.docx
-"""
+```python
+# Cell 1 - Install dependencies (run once)
+!apt-get install -y libreoffice > /dev/null 2>&1
+print("✅ LibreOffice installed")
+```
 
-import argparse
+```python
+# Cell 2 - Imports
+import subprocess
 import os
-import shutil
-import sys
-import tempfile
 from pathlib import Path
+from IPython.display import FileLink, display
+```
 
-from docx import Document
-from docx.oxml.ns import qn
-from docx.shared import Inches, Pt, RGBColor
-from docx.text.paragraph import Paragraph
-from docx.table import Table
+```python
+# Cell 3 - Converter Function
+def convert_docx_to_pdf(input_path: str, output_dir: str = ".") -> str:
+    """
+    Convert a .docx file to .pdf using LibreOffice.
 
+    Args:
+        input_path : Path to the .docx file
+        output_dir : Directory to save the output PDF
 
-# ── All built-in Word styles we want to preserve exactly ─────────────────────
-KNOWN_STYLES = {
-    "Normal", "Title", "Subtitle",
-    "Heading 1", "Heading 2", "Heading 3", "Heading 4",
-    "Heading 5", "Heading 6", "Heading 7", "Heading 8", "Heading 9",
-    "List Bullet", "List Bullet 2", "List Bullet 3",
-    "List Number", "List Number 2", "List Number 3",
-    "List Paragraph", "Caption", "Quote", "Intense Quote",
-    "No Spacing", "Body Text", "Body Text 2",
-}
+    Returns:
+        Path to the generated PDF file
+    """
+    input_path = str(input_path)
 
+    if not os.path.exists(input_path):
+        raise FileNotFoundError(f"❌ File not found: {input_path}")
 
-def safe(fn, default=None):
-    try:
-        return fn()
-    except Exception:
-        return default
+    os.makedirs(output_dir, exist_ok=True)
 
-
-# ── Run (character) formatting ────────────────────────────────────────────────
-def copy_run_format(src, dst):
-    safe(lambda: setattr(dst, "bold",      src.bold))
-    safe(lambda: setattr(dst, "italic",    src.italic))
-    safe(lambda: setattr(dst, "underline", src.underline))
-    safe(lambda: setattr(dst.font, "strike", src.font.strike))
-    safe(lambda: setattr(dst.font, "all_caps", src.font.all_caps))
-    safe(lambda: setattr(dst.font, "shadow", src.font.shadow))
-
-    size = safe(lambda: src.font.size)
-    if size:
-        dst.font.size = size
-
-    name = safe(lambda: src.font.name)
-    if name:
-        dst.font.name = name
-
-    try:
-        rgb = src.font.color.rgb
-        if rgb:
-            dst.font.color.rgb = rgb
-    except Exception:
-        pass
-
-    hl = safe(lambda: src.font.highlight_color)
-    if hl:
-        safe(lambda: setattr(dst.font, "highlight_color", hl))
-
-
-# ── Paragraph formatting ──────────────────────────────────────────────────────
-def copy_para_format(src, dst):
-    align = safe(lambda: src.alignment)
-    if align is not None:
-        dst.alignment = align
-
-    sf = src.paragraph_format
-    df = dst.paragraph_format
-
-    for attr in ("space_before", "space_after", "line_spacing",
-                 "left_indent", "right_indent", "first_line_indent"):
-        val = safe(lambda a=attr: getattr(sf, a))
-        if val is not None:
-            safe(lambda a=attr, v=val: setattr(df, a, v))
-
-    keep = safe(lambda: sf.keep_together)
-    if keep is not None:
-        df.keep_together = keep
-
-    page_break = safe(lambda: sf.page_break_before)
-    if page_break:
-        df.page_break_before = page_break
-
-
-# ── Images ────────────────────────────────────────────────────────────────────
-def get_image_rels(doc):
-    images = {}
-    try:
-        for rel in doc.part.rels.values():
-            if "image" in rel.reltype:
-                try:
-                    images[rel.rId] = rel.target_part.blob
-                except Exception:
-                    pass
-    except Exception:
-        pass
-    return images
-
-
-def embed_image(para, blob):
-    ext = "png"
-    if blob[:3] == b"\xff\xd8\xff":
-        ext = "jpg"
-    elif blob[:4] == b"GIF8":
-        ext = "gif"
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as f:
-        f.write(blob)
-        tmp = f.name
-    try:
-        run = para.add_run()
-        run.add_picture(tmp, width=Inches(5))
-    except Exception as e:
-        para.add_run(f"[Image could not be embedded: {e}]")
-    finally:
-        os.unlink(tmp)
-
-
-# ── Paragraph recovery ────────────────────────────────────────────────────────
-def recover_paragraph(src_para, new_doc, image_rels):
-    style_name = safe(lambda: src_para.style.name, "Normal") or "Normal"
-    use_style  = style_name if style_name in KNOWN_STYLES else "Normal"
-
-    new_para = new_doc.add_paragraph(style=use_style)
-    copy_para_format(src_para, new_para)
-
-    for run in src_para.runs:
-        drawing = run._r.find(qn("w:drawing"))
-        pict    = run._r.find(qn("w:pict"))
-
-        if drawing is not None:
-            blip = drawing.find(".//" + qn("a:blip"))
-            if blip is not None:
-                rId = blip.get(qn("r:embed"))
-                if rId and rId in image_rels:
-                    embed_image(new_para, image_rels[rId])
-                    continue
-            new_para.add_run("[image]")
-            continue
-
-        if pict is not None:
-            new_para.add_run("[embedded object]")
-            continue
-
-        text = safe(lambda: run.text, "") or ""
-        new_run = new_para.add_run(text)
-        copy_run_format(run, new_run)
-
-    return new_para
-
-
-# ── Table recovery ────────────────────────────────────────────────────────────
-def recover_table(src_table, new_doc, image_rels):
-    rows = safe(lambda: len(src_table.rows), 0)
-    cols = safe(lambda: len(src_table.columns), 0)
-    if rows == 0 or cols == 0:
-        return
-
-    new_table = new_doc.add_table(rows=rows, cols=cols)
-    try:
-        new_table.style = "Table Grid"
-    except Exception:
-        pass
-
-    for i, src_row in enumerate(src_table.rows):
-        for j, src_cell in enumerate(src_row.cells):
-            dst_cell = new_table.rows[i].cells[j]
-            for old_p in dst_cell.paragraphs:
-                old_p._element.getparent().remove(old_p._element)
-
-            for src_para in src_cell.paragraphs:
-                style_name = safe(lambda: src_para.style.name, "Normal") or "Normal"
-                use_style  = style_name if style_name in KNOWN_STYLES else "Normal"
-
-                dst_para = dst_cell.add_paragraph(style=use_style)
-                copy_para_format(src_para, dst_para)
-
-                for run in src_para.runs:
-                    drawing = run._r.find(qn("w:drawing"))
-                    if drawing is not None:
-                        blip = drawing.find(".//" + qn("a:blip"))
-                        if blip is not None:
-                            rId = blip.get(qn("r:embed"))
-                            if rId and rId in image_rels:
-                                embed_image(dst_para, image_rels[rId])
-                                continue
-                        dst_para.add_run("[image]")
-                        continue
-
-                    text = safe(lambda: run.text, "") or ""
-                    new_run = dst_para.add_run(text)
-                    copy_run_format(run, new_run)
-
-
-# ── Main ──────────────────────────────────────────────────────────────────────
-def recover(src_path: Path, dst_path: Path):
-    print(f"\n🔧 Opening: {src_path.name}")
-
-    try:
-        doc = Document(str(src_path))
-    except Exception as e:
-        print(f"  ⚠️  Warning: {e} — attempting anyway...")
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                copy = Path(tmp) / src_path.name
-                shutil.copy(src_path, copy)
-                doc = Document(str(copy))
-        except Exception as e2:
-            print(f"  ❌ Cannot open: {e2}")
-            sys.exit(1)
-
-    print("  ✓ Opened successfully")
-
-    image_rels = get_image_rels(doc)
-    print(f"  ✓ {len(image_rels)} embedded image(s) found")
-
-    new_doc = Document()
-    for p in new_doc.paragraphs:
-        p._element.getparent().remove(p._element)
-
-    para_count  = 0
-    table_count = 0
-    body = doc.element.body
-
-    print("\n📋 Recovering everything in order...")
-
-    for child in body:
-        tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
-
-        if tag == "p":
-            src_para = Paragraph(child, doc)
-            recover_paragraph(src_para, new_doc, image_rels)
-            para_count += 1
-
-        elif tag == "tbl":
-            src_table = Table(child, doc)
-            recover_table(src_table, new_doc, image_rels)
-            table_count += 1
-
-    new_doc.save(str(dst_path))
-
-    print(f"\n  ✅ {para_count} paragraphs  |  {table_count} tables  |  {len(image_rels)} images")
-    print(f"  💾 Saved → {dst_path.resolve()}\n")
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Copy everything from a corrupted .docx into a clean new file."
+    result = subprocess.run(
+        [
+            "libreoffice",
+            "--headless",
+            "--convert-to", "pdf",
+            "--outdir", output_dir,
+            input_path
+        ],
+        capture_output=True,
+        text=True
     )
-    parser.add_argument("docx", help="Path to corrupted .docx file")
-    parser.add_argument("--out", default=None, help="Output file path (optional)")
-    args = parser.parse_args()
 
-    src = Path(args.docx)
-    if not src.exists():
-        print(f"❌ File not found: {src}")
-        sys.exit(1)
+    if result.returncode != 0:
+        raise RuntimeError(f"❌ Conversion failed:\n{result.stderr}")
 
-    dst = Path(args.out) if args.out else src.with_name(src.stem + "_recovered.docx")
-    recover(src, dst)
+    base_name = Path(input_path).stem
+    output_path = os.path.join(output_dir, f"{base_name}.pdf")
 
+    if not os.path.exists(output_path):
+        raise FileNotFoundError(f"❌ Expected PDF not found: {output_path}")
 
-if __name__ == "__main__":
-    main()
+    return output_path
+```
+
+```python
+# Cell 4 - Run Conversion
+# ✏️ Change these paths as needed
+INPUT_DOCX  = "document.docx"   # Path to your .docx file
+OUTPUT_DIR  = "./output"         # Folder to save the PDF
+
+try:
+    pdf_path = convert_docx_to_pdf(INPUT_DOCX, OUTPUT_DIR)
+    size_kb = os.path.getsize(pdf_path) / 1024
+    print(f"✅ Conversion successful!")
+    print(f"📄 PDF saved to : {pdf_path}")
+    print(f"📦 File size    : {size_kb:.1f} KB")
+except FileNotFoundError as e:
+    print(e)
+except RuntimeError as e:
+    print(e)
+```
+
+```python
+# Cell 5 - Download Link (works in Jupyter / Colab)
+if os.path.exists(pdf_path):
+    display(FileLink(pdf_path, result_html_prefix="⬇️ Download PDF: "))
+```
+
+```python
+# Cell 6 - (Optional) Batch Convert Multiple Files
+import glob
+
+DOCX_FOLDER  = "./docs"    # Folder containing .docx files
+OUTPUT_FOLDER = "./output" # Folder to save all PDFs
+
+docx_files = glob.glob(os.path.join(DOCX_FOLDER, "*.docx"))
+
+if not docx_files:
+    print("⚠️  No .docx files found in", DOCX_FOLDER)
+else:
+    print(f"🔄 Found {len(docx_files)} file(s). Converting...\n")
+    for docx in docx_files:
+        try:
+            pdf = convert_docx_to_pdf(docx, OUTPUT_FOLDER)
+            print(f"  ✅ {os.path.basename(docx)} → {os.path.basename(pdf)}")
+        except Exception as e:
+            print(f"  ❌ {os.path.basename(docx)} failed: {e}")
+
+    print("\n✅ Batch conversion complete!")
+```
+
+---
+
+### How to Use
+
+| Step | Action |
+|------|--------|
+| **1** | Upload your `.docx` file to the notebook environment |
+| **2** | Run **Cell 1** once to install LibreOffice |
+| **3** | Run **Cells 2–3** to load imports and the function |
+| **4** | Set `INPUT_DOCX` in **Cell 4** to your filename, then run it |
+| **5** | Run **Cell 5** to get a download link for the PDF |
+| **6** | *(Optional)* Use **Cell 6** to batch-convert a whole folder |
+
+Works in **Jupyter Lab**, **Jupyter Notebook**, and **Google Colab**.
