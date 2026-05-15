@@ -1,121 +1,365 @@
-Here's a Jupyter Notebook version of the DOCX to PDF converter:
+#!/usr/bin/env python3
+"""
+recover_docx.py
+---------------
+Recovers EVERYTHING from a corrupted .docx into a clean new document.
 
-```python
-# Cell 1 - Install dependencies (run once)
-!apt-get install -y libreoffice > /dev/null 2>&1
-print("✅ LibreOffice installed")
-```
+Preserves:
+  Paragraphs  → Title, Heading 1-9, Normal, List Bullet/Number, Caption, Quote
+  Runs        → bold, italic, underline, strike, font name/size/color, highlight
+  Para format → alignment, spacing, indents, page break
+  Tables      → rotated/vertical text, cell shading, cell borders, cell width,
+                vertical alignment, merged cells, bold/font in cells, images in cells
+  Images      → embedded inline pictures
 
-```python
-# Cell 2 - Imports
-import subprocess
+Usage:
+    python3 recover_docx.py corrupt.docx
+    python3 recover_docx.py corrupt.docx --out recovered.docx
+"""
+
+import argparse
+import copy
 import os
+import shutil
+import sys
+import tempfile
 from pathlib import Path
-from IPython.display import FileLink, display
-```
 
-```python
-# Cell 3 - Converter Function
-def convert_docx_to_pdf(input_path: str, output_dir: str = ".") -> str:
+from docx import Document
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
+from docx.shared import Inches, Pt, RGBColor
+from docx.text.paragraph import Paragraph
+from docx.table import Table
+
+
+KNOWN_STYLES = {
+    "Normal", "Title", "Subtitle",
+    "Heading 1", "Heading 2", "Heading 3", "Heading 4",
+    "Heading 5", "Heading 6", "Heading 7", "Heading 8", "Heading 9",
+    "List Bullet", "List Bullet 2", "List Bullet 3",
+    "List Number", "List Number 2", "List Number 3",
+    "List Paragraph", "Caption", "Quote", "Intense Quote",
+    "No Spacing", "Body Text", "Body Text 2",
+}
+
+# Cell properties to deep-copy directly from source XML
+CELL_PR_TAGS = [
+    "w:tcW",           # cell width
+    "w:textDirection", # rotated / vertical text  ← KEY for your screenshot
+    "w:shd",           # shading / background color
+    "w:vAlign",        # vertical alignment
+    "w:tcBorders",     # individual cell borders
+    "w:noWrap",        # no wrap
+    "w:tcMar",         # cell margins
+    "w:gridSpan",      # horizontal merge
+    "w:vMerge",        # vertical merge
+]
+
+
+def safe(fn, default=None):
+    try:
+        return fn()
+    except Exception:
+        return default
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Run (character) formatting
+# ─────────────────────────────────────────────────────────────────────────────
+def copy_run_format(src, dst):
+    safe(lambda: setattr(dst, "bold",      src.bold))
+    safe(lambda: setattr(dst, "italic",    src.italic))
+    safe(lambda: setattr(dst, "underline", src.underline))
+    safe(lambda: setattr(dst.font, "strike",    src.font.strike))
+    safe(lambda: setattr(dst.font, "all_caps",  src.font.all_caps))
+    safe(lambda: setattr(dst.font, "shadow",    src.font.shadow))
+
+    size = safe(lambda: src.font.size)
+    if size:
+        dst.font.size = size
+
+    name = safe(lambda: src.font.name)
+    if name:
+        dst.font.name = name
+
+    try:
+        rgb = src.font.color.rgb
+        if rgb:
+            dst.font.color.rgb = rgb
+    except Exception:
+        pass
+
+    hl = safe(lambda: src.font.highlight_color)
+    if hl:
+        safe(lambda: setattr(dst.font, "highlight_color", hl))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Paragraph formatting
+# ─────────────────────────────────────────────────────────────────────────────
+def copy_para_format(src, dst):
+    align = safe(lambda: src.alignment)
+    if align is not None:
+        dst.alignment = align
+
+    sf = src.paragraph_format
+    df = dst.paragraph_format
+
+    for attr in ("space_before", "space_after", "line_spacing",
+                 "left_indent", "right_indent", "first_line_indent"):
+        val = safe(lambda a=attr: getattr(sf, a))
+        if val is not None:
+            safe(lambda a=attr, v=val: setattr(df, a, v))
+
+    for attr in ("keep_together", "keep_with_next", "page_break_before"):
+        val = safe(lambda a=attr: getattr(sf, a))
+        if val:
+            safe(lambda a=attr, v=val: setattr(df, a, v))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Images
+# ─────────────────────────────────────────────────────────────────────────────
+def get_image_rels(doc):
+    images = {}
+    try:
+        for rel in doc.part.rels.values():
+            if "image" in rel.reltype:
+                try:
+                    images[rel.rId] = rel.target_part.blob
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return images
+
+
+def embed_image(para, blob):
+    ext = "png"
+    if blob[:3] == b"\xff\xd8\xff":
+        ext = "jpg"
+    elif blob[:4] == b"GIF8":
+        ext = "gif"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as f:
+        f.write(blob)
+        tmp = f.name
+    try:
+        run = para.add_run()
+        run.add_picture(tmp, width=Inches(4))
+    except Exception as e:
+        para.add_run(f"[Image error: {e}]")
+    finally:
+        os.unlink(tmp)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fill runs into a paragraph (shared by body paras and table cells)
+# ─────────────────────────────────────────────────────────────────────────────
+def fill_runs(src_para, dst_para, image_rels):
+    for run in src_para.runs:
+        drawing = run._r.find(qn("w:drawing"))
+        pict    = run._r.find(qn("w:pict"))
+
+        if drawing is not None:
+            blip = drawing.find(".//" + qn("a:blip"))
+            if blip is not None:
+                rId = blip.get(qn("r:embed"))
+                if rId and rId in image_rels:
+                    embed_image(dst_para, image_rels[rId])
+                    continue
+            dst_para.add_run("[image]")
+            continue
+
+        if pict is not None:
+            dst_para.add_run("[embedded object]")
+            continue
+
+        text = safe(lambda: run.text, "") or ""
+        new_run = dst_para.add_run(text)
+        copy_run_format(run, new_run)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Paragraph recovery (body level)
+# ─────────────────────────────────────────────────────────────────────────────
+def recover_paragraph(src_para, new_doc, image_rels):
+    style_name = safe(lambda: src_para.style.name, "Normal") or "Normal"
+    use_style  = style_name if style_name in KNOWN_STYLES else "Normal"
+
+    new_para = new_doc.add_paragraph(style=use_style)
+    copy_para_format(src_para, new_para)
+    fill_runs(src_para, new_para, image_rels)
+    return new_para
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cell property copy  ← this is the KEY part for your table
+# ─────────────────────────────────────────────────────────────────────────────
+def copy_cell_properties(src_cell, dst_cell):
     """
-    Convert a .docx file to .pdf using LibreOffice.
-
-    Args:
-        input_path : Path to the .docx file
-        output_dir : Directory to save the output PDF
-
-    Returns:
-        Path to the generated PDF file
+    Deep-copy every property from source cell's <w:tcPr> to destination cell.
+    This preserves: rotation, shading, borders, width, vAlign, merges, etc.
     """
-    input_path = str(input_path)
+    src_tcPr = src_cell._tc.find(qn("w:tcPr"))
+    if src_tcPr is None:
+        return
 
-    if not os.path.exists(input_path):
-        raise FileNotFoundError(f"❌ File not found: {input_path}")
+    # Get or create tcPr on destination
+    dst_tc   = dst_cell._tc
+    dst_tcPr = dst_tc.find(qn("w:tcPr"))
+    if dst_tcPr is None:
+        dst_tcPr = OxmlElement("w:tcPr")
+        dst_tc.insert(0, dst_tcPr)
+    else:
+        # Clear existing so we don't double-up
+        for child in list(dst_tcPr):
+            dst_tcPr.remove(child)
 
-    os.makedirs(output_dir, exist_ok=True)
+    # Deep-copy every child element from source tcPr
+    for child in src_tcPr:
+        dst_tcPr.append(copy.deepcopy(child))
 
-    result = subprocess.run(
-        [
-            "libreoffice",
-            "--headless",
-            "--convert-to", "pdf",
-            "--outdir", output_dir,
-            input_path
-        ],
-        capture_output=True,
-        text=True
-    )
 
-    if result.returncode != 0:
-        raise RuntimeError(f"❌ Conversion failed:\n{result.stderr}")
+# ─────────────────────────────────────────────────────────────────────────────
+# Table recovery
+# ─────────────────────────────────────────────────────────────────────────────
+def recover_table(src_table, new_doc, image_rels):
+    rows = safe(lambda: len(src_table.rows), 0)
+    cols = safe(lambda: len(src_table.columns), 0)
+    if rows == 0 or cols == 0:
+        return
 
-    base_name = Path(input_path).stem
-    output_path = os.path.join(output_dir, f"{base_name}.pdf")
+    new_table = new_doc.add_table(rows=rows, cols=cols)
 
-    if not os.path.exists(output_path):
-        raise FileNotFoundError(f"❌ Expected PDF not found: {output_path}")
-
-    return output_path
-```
-
-```python
-# Cell 4 - Run Conversion
-# ✏️ Change these paths as needed
-INPUT_DOCX  = "document.docx"   # Path to your .docx file
-OUTPUT_DIR  = "./output"         # Folder to save the PDF
-
-try:
-    pdf_path = convert_docx_to_pdf(INPUT_DOCX, OUTPUT_DIR)
-    size_kb = os.path.getsize(pdf_path) / 1024
-    print(f"✅ Conversion successful!")
-    print(f"📄 PDF saved to : {pdf_path}")
-    print(f"📦 File size    : {size_kb:.1f} KB")
-except FileNotFoundError as e:
-    print(e)
-except RuntimeError as e:
-    print(e)
-```
-
-```python
-# Cell 5 - Download Link (works in Jupyter / Colab)
-if os.path.exists(pdf_path):
-    display(FileLink(pdf_path, result_html_prefix="⬇️ Download PDF: "))
-```
-
-```python
-# Cell 6 - (Optional) Batch Convert Multiple Files
-import glob
-
-DOCX_FOLDER  = "./docs"    # Folder containing .docx files
-OUTPUT_FOLDER = "./output" # Folder to save all PDFs
-
-docx_files = glob.glob(os.path.join(DOCX_FOLDER, "*.docx"))
-
-if not docx_files:
-    print("⚠️  No .docx files found in", DOCX_FOLDER)
-else:
-    print(f"🔄 Found {len(docx_files)} file(s). Converting...\n")
-    for docx in docx_files:
+    # Copy table-level style
+    tbl_style = safe(lambda: src_table.style.name)
+    if tbl_style:
         try:
-            pdf = convert_docx_to_pdf(docx, OUTPUT_FOLDER)
-            print(f"  ✅ {os.path.basename(docx)} → {os.path.basename(pdf)}")
-        except Exception as e:
-            print(f"  ❌ {os.path.basename(docx)} failed: {e}")
+            new_table.style = tbl_style
+        except Exception:
+            try:
+                new_table.style = "Table Grid"
+            except Exception:
+                pass
+    else:
+        try:
+            new_table.style = "Table Grid"
+        except Exception:
+            pass
 
-    print("\n✅ Batch conversion complete!")
-```
+    # Copy table-level properties (column widths, borders, layout)
+    src_tblPr = src_table._tbl.find(qn("w:tblPr"))
+    if src_tblPr is not None:
+        dst_tblPr = new_table._tbl.find(qn("w:tblPr"))
+        if dst_tblPr is None:
+            dst_tblPr = OxmlElement("w:tblPr")
+            new_table._tbl.insert(0, dst_tblPr)
+        for child in list(dst_tblPr):
+            dst_tblPr.remove(child)
+        for child in src_tblPr:
+            dst_tblPr.append(copy.deepcopy(child))
 
----
+    # Copy tblGrid (column definitions)
+    src_tblGrid = src_table._tbl.find(qn("w:tblGrid"))
+    if src_tblGrid is not None:
+        dst_tblGrid = new_table._tbl.find(qn("w:tblGrid"))
+        if dst_tblGrid is not None:
+            new_table._tbl.remove(dst_tblGrid)
+        new_table._tbl.insert(1, copy.deepcopy(src_tblGrid))
 
-### How to Use
+    # Copy each cell
+    for i, src_row in enumerate(src_table.rows):
+        for j, src_cell in enumerate(src_row.cells):
+            dst_cell = new_table.rows[i].cells[j]
 
-| Step | Action |
-|------|--------|
-| **1** | Upload your `.docx` file to the notebook environment |
-| **2** | Run **Cell 1** once to install LibreOffice |
-| **3** | Run **Cells 2–3** to load imports and the function |
-| **4** | Set `INPUT_DOCX` in **Cell 4** to your filename, then run it |
-| **5** | Run **Cell 5** to get a download link for the PDF |
-| **6** | *(Optional)* Use **Cell 6** to batch-convert a whole folder |
+            # 1. Copy ALL cell properties (rotation, shading, borders, width, vAlign…)
+            copy_cell_properties(src_cell, dst_cell)
 
-Works in **Jupyter Lab**, **Jupyter Notebook**, and **Google Colab**.
+            # 2. Clear auto-added paragraph
+            for old_p in dst_cell.paragraphs:
+                old_p._element.getparent().remove(old_p._element)
+
+            # 3. Copy each paragraph inside the cell
+            for src_para in src_cell.paragraphs:
+                style_name = safe(lambda: src_para.style.name, "Normal") or "Normal"
+                use_style  = style_name if style_name in KNOWN_STYLES else "Normal"
+
+                dst_para = dst_cell.add_paragraph(style=use_style)
+                copy_para_format(src_para, dst_para)
+                fill_runs(src_para, dst_para, image_rels)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main recovery
+# ─────────────────────────────────────────────────────────────────────────────
+def recover(src_path: Path, dst_path: Path):
+    print(f"\n🔧 Opening: {src_path.name}")
+
+    try:
+        doc = Document(str(src_path))
+    except Exception as e:
+        print(f"  ⚠️  Warning: {e} — attempting anyway...")
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                cp = Path(tmp) / src_path.name
+                shutil.copy(src_path, cp)
+                doc = Document(str(cp))
+        except Exception as e2:
+            print(f"  ❌ Cannot open: {e2}")
+            sys.exit(1)
+
+    print("  ✓ Opened successfully")
+
+    image_rels = get_image_rels(doc)
+    print(f"  ✓ {len(image_rels)} embedded image(s) found")
+
+    new_doc = Document()
+    for p in new_doc.paragraphs:
+        p._element.getparent().remove(p._element)
+
+    para_count  = 0
+    table_count = 0
+    body = doc.element.body
+
+    print("\n📋 Recovering everything in order...")
+
+    for child in body:
+        tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+
+        if tag == "p":
+            src_para = Paragraph(child, doc)
+            recover_paragraph(src_para, new_doc, image_rels)
+            para_count += 1
+
+        elif tag == "tbl":
+            src_table = Table(child, doc)
+            recover_table(src_table, new_doc, image_rels)
+            table_count += 1
+
+    new_doc.save(str(dst_path))
+
+    print(f"\n  ✅ {para_count} paragraphs  |  {table_count} tables  |  {len(image_rels)} images")
+    print(f"  💾 Saved → {dst_path.resolve()}\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Copy EVERYTHING from a corrupted .docx into a clean new file.\n"
+                    "Preserves rotated headers, shading, borders, merges, images, and all formatting."
+    )
+    parser.add_argument("docx", help="Path to corrupted .docx file")
+    parser.add_argument("--out", default=None, help="Output file path (optional)")
+    args = parser.parse_args()
+
+    src = Path(args.docx)
+    if not src.exists():
+        print(f"❌ File not found: {src}")
+        sys.exit(1)
+
+    dst = Path(args.out) if args.out else src.with_name(src.stem + "_recovered.docx")
+    recover(src, dst)
+
+
+if __name__ == "__main__":
+    main()
