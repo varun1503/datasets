@@ -1,30 +1,372 @@
-I can see Word is flagging `clean4.docx` as having unreadable content. The script I gave you fixes the validation issues but the **root cause is deeper** — likely malformed XML in the document itself, not just missing styles.
+"""
+Office File Corruption Checker & Repair Tool
+Supports: .docx, .xlsx, .pptx (and .doc, .xls, .ppt via conversion)
 
-To actually fix it I need the file. Without it I'm working blind and can only give you generic code that may not match your specific corruption.
+Usage:
+    python fix_office_file.py <filename>
 
-**Your options:**
+Examples:
+    python fix_office_file.py report.docx
+    python fix_office_file.py budget.xlsx
+    python fix_office_file.py slides.pptx
+"""
 
-1. **Upload `clean4.docx` here** — I'll repair it and send back a fixed file (fastest)
+import sys
+import os
+import zipfile
+import shutil
+import re
+from pathlib import Path
 
-2. **Click "Yes"** in that Word dialog — Word's built-in recovery often salvages the content, then Save As a new file
 
-3. **Run this deeper diagnostic** on your machine to see what's actually broken:
+# ── Helpers ──────────────────────────────────────────────────────────────────
 
-```bash
-python -c "
-import zipfile, sys
-path = 'clean4.docx'
-with zipfile.ZipFile(path) as z:
-    for name in z.namelist():
-        try:
-            data = z.read(name)
-            from lxml import etree
-            if name.endswith('.xml') or name.endswith('.rels'):
-                etree.fromstring(data)
-                print(f'OK     {name}')
-        except Exception as e:
-            print(f'ERROR  {name}: {e}')
-"
-```
+def banner(msg):
+    print(f"\n{'='*60}\n  {msg}\n{'='*60}")
 
-Paste the output and I can write a targeted fix. But uploading the file is really the only way I can guarantee a proper repair.
+def ok(msg):   print(f"  [OK]   {msg}")
+def warn(msg): print(f"  [WARN] {msg}")
+def err(msg):  print(f"  [ERR]  {msg}")
+def info(msg): print(f"  [INFO] {msg}")
+
+
+# ── Step 1 – basic file checks ────────────────────────────────────────────────
+
+def check_file_exists(path: Path):
+    banner("1. File existence & size")
+    if not path.exists():
+        err(f"File not found: {path}")
+        sys.exit(1)
+    size = path.stat().st_size
+    ok(f"File found: {path.name}  ({size:,} bytes)")
+    if size == 0:
+        err("File is 0 bytes – nothing to repair.")
+        sys.exit(1)
+    if size < 100:
+        warn("File is suspiciously small (< 100 bytes).")
+    return size
+
+
+# ── Step 2 – ZIP integrity (Office Open XML = ZIP) ────────────────────────────
+
+def check_zip_integrity(path: Path):
+    banner("2. ZIP / container integrity")
+    issues = []
+
+    # magic bytes – PK\x03\x04
+    with open(path, "rb") as f:
+        magic = f.read(4)
+    if magic[:2] != b"PK":
+        err("File does not start with PK magic bytes – not a valid Office Open XML file.")
+        err("Possible causes: file is truly corrupt, wrong extension, or is a legacy .doc/.xls/.ppt binary format.")
+        issues.append("bad_magic")
+        return issues
+
+    ok("PK magic bytes present.")
+
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            bad = zf.testzip()
+            if bad:
+                err(f"First corrupt entry in ZIP: {bad}")
+                issues.append(f"corrupt_entry:{bad}")
+            else:
+                ok("All ZIP entries pass CRC check.")
+            names = zf.namelist()
+            ok(f"ZIP contains {len(names)} entries.")
+    except zipfile.BadZipFile as e:
+        err(f"Cannot open as ZIP: {e}")
+        issues.append("bad_zip")
+    except Exception as e:
+        err(f"Unexpected ZIP error: {e}")
+        issues.append(f"zip_error:{e}")
+
+    return issues
+
+
+# ── Step 3 – required parts per file type ─────────────────────────────────────
+
+REQUIRED_PARTS = {
+    ".docx": [
+        "word/document.xml",
+        "[Content_Types].xml",
+        "_rels/.rels",
+    ],
+    ".xlsx": [
+        "xl/workbook.xml",
+        "[Content_Types].xml",
+        "_rels/.rels",
+    ],
+    ".pptx": [
+        "ppt/presentation.xml",
+        "[Content_Types].xml",
+        "_rels/.rels",
+    ],
+}
+
+def check_required_parts(path: Path, ext: str):
+    banner("3. Required internal parts")
+    issues = []
+    required = REQUIRED_PARTS.get(ext, [])
+
+    if not required:
+        warn(f"No required-parts list for extension '{ext}'. Skipping.")
+        return issues
+
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            names_lower = {n.lower() for n in zf.namelist()}
+            for part in required:
+                if part.lower() in names_lower:
+                    ok(f"Found: {part}")
+                else:
+                    err(f"Missing: {part}")
+                    issues.append(f"missing_part:{part}")
+    except Exception:
+        pass  # already reported in step 2
+
+    return issues
+
+
+# ── Step 4 – XML well-formedness ──────────────────────────────────────────────
+
+def check_xml_parts(path: Path, ext: str):
+    banner("4. XML well-formedness")
+    issues = []
+
+    xml_parts = {
+        ".docx": ["word/document.xml", "word/styles.xml", "word/settings.xml"],
+        ".xlsx": ["xl/workbook.xml", "xl/sharedStrings.xml", "xl/styles.xml"],
+        ".pptx": ["ppt/presentation.xml"],
+    }
+    targets = xml_parts.get(ext, [])
+
+    try:
+        import xml.etree.ElementTree as ET
+        with zipfile.ZipFile(path, "r") as zf:
+            names = {n.lower(): n for n in zf.namelist()}
+            for part in targets:
+                real = names.get(part.lower())
+                if not real:
+                    continue
+                try:
+                    data = zf.read(real)
+                    ET.fromstring(data)
+                    ok(f"Valid XML: {part}")
+                except ET.ParseError as e:
+                    err(f"Malformed XML in {part}: {e}")
+                    issues.append(f"bad_xml:{part}")
+                except Exception as e:
+                    warn(f"Could not read {part}: {e}")
+    except Exception:
+        pass
+
+    return issues
+
+
+# ── Step 5 – attempt repair ───────────────────────────────────────────────────
+
+def attempt_repair(path: Path, ext: str, all_issues: list):
+    banner("5. Repair attempts")
+
+    if not all_issues:
+        ok("No issues found – no repair needed.")
+        return None
+
+    repaired = path.with_stem(path.stem + "_repaired")
+
+    # ── 5a. Re-pack the ZIP (fixes minor CRC / compression issues) ────────────
+    info("Attempting re-pack (copy valid entries into a fresh ZIP)…")
+    repacked = path.with_stem(path.stem + "_repacked")
+    success_count = 0
+    fail_count = 0
+
+    try:
+        with zipfile.ZipFile(path, "r") as src, \
+             zipfile.ZipFile(repacked, "w", zipfile.ZIP_DEFLATED) as dst:
+            for item in src.infolist():
+                try:
+                    data = src.read(item.filename)
+                    dst.writestr(item, data)
+                    success_count += 1
+                except Exception as e:
+                    warn(f"  Skipped corrupt entry: {item.filename} ({e})")
+                    fail_count += 1
+        ok(f"Re-packed: {success_count} entries OK, {fail_count} skipped.")
+        shutil.move(repacked, repaired)
+    except Exception as e:
+        err(f"Re-pack failed: {e}")
+        if repacked.exists():
+            repacked.unlink()
+        return None
+
+    # ── 5b. Re-inject missing skeleton parts ─────────────────────────────────
+    missing_parts = [i.split(":", 1)[1] for i in all_issues if i.startswith("missing_part:")]
+    if missing_parts:
+        info("Injecting minimal skeleton for missing parts…")
+        _inject_skeleton(repaired, ext, missing_parts)
+
+    return repaired
+
+
+SKELETON = {
+    "[Content_Types].xml": {
+        ".docx": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+            '</Types>'
+        ),
+        ".xlsx": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+            '</Types>'
+        ),
+        ".pptx": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>'
+            '</Types>'
+        ),
+    },
+    "_rels/.rels": {
+        ".docx": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+            '</Relationships>'
+        ),
+        ".xlsx": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+            '</Relationships>'
+        ),
+        ".pptx": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/>'
+            '</Relationships>'
+        ),
+    },
+}
+
+def _inject_skeleton(path: Path, ext: str, missing: list):
+    tmp = path.with_stem(path.stem + "_tmp")
+    try:
+        with zipfile.ZipFile(path, "r") as src, \
+             zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as dst:
+            existing = {i.filename for i in src.infolist()}
+            for item in src.infolist():
+                dst.writestr(item, src.read(item.filename))
+            for part in missing:
+                skel = SKELETON.get(part, {}).get(ext)
+                if skel and part not in existing:
+                    dst.writestr(part, skel.encode())
+                    ok(f"  Injected skeleton: {part}")
+                else:
+                    warn(f"  No skeleton available for {part} – skipped.")
+        shutil.move(tmp, path)
+    except Exception as e:
+        err(f"Skeleton injection failed: {e}")
+        if tmp.exists():
+            tmp.unlink()
+
+
+# ── Step 6 – verify repaired file ─────────────────────────────────────────────
+
+def verify_repaired(repaired: Path, ext: str):
+    banner("6. Verifying repaired file")
+    zip_issues  = check_zip_integrity(repaired)
+    part_issues = check_required_parts(repaired, ext)
+    xml_issues  = check_xml_parts(repaired, ext)
+    total = len(zip_issues) + len(part_issues) + len(xml_issues)
+    if total == 0:
+        ok(f"Repaired file looks healthy: {repaired.name}")
+    else:
+        warn(f"{total} issue(s) remain after repair (file may be partially recoverable).")
+    return total
+
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+
+def print_summary(path, repaired, remaining_issues):
+    banner("Summary")
+    print(f"  Original : {path}")
+    if repaired:
+        print(f"  Repaired : {repaired}")
+    if remaining_issues == 0 and repaired:
+        print("\n  ✅  Repair successful. Try opening the repaired file.")
+        print("      If it still won't open, the content XML may be too corrupt")
+        print("      and recovery may require a professional tool or manual editing.")
+    elif repaired:
+        print("\n  ⚠️   Repair partial. Some structure was restored but issues remain.")
+        print("      Tips:")
+        print("       • Try opening in LibreOffice (often more tolerant than MS Office)")
+        print("       • Use 'Open and Repair' in Microsoft Word/Excel/PowerPoint")
+        print("       • Check if you have a cloud backup (OneDrive / SharePoint autosave)")
+    else:
+        print("\n  ❌  Could not repair. Possible next steps:")
+        print("       • Restore from backup or cloud autosave")
+        print("       • Try the file on another machine / Office version")
+        print("       • Use a dedicated recovery service (e.g. OfficeRecovery, Recovery Toolbox)")
+
+    print()
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def main():
+    if len(sys.argv) < 2:
+        print(__doc__)
+        sys.exit(0)
+
+    path = Path(sys.argv[1]).resolve()
+    ext  = path.suffix.lower()
+
+    banner(f"Office File Corruption Checker  –  {path.name}")
+
+    if ext not in (".docx", ".xlsx", ".pptx", ".doc", ".xls", ".ppt"):
+        warn(f"Extension '{ext}' is not a recognised Office format.")
+        warn("Supported: .docx  .xlsx  .pptx  (legacy: .doc  .xls  .ppt)")
+        info("Attempting analysis anyway…")
+
+    if ext in (".doc", ".xls", ".ppt"):
+        warn(f"Legacy binary format '{ext}' detected.")
+        warn("These files cannot be repaired by this script directly.")
+        info("Convert to .docx/.xlsx/.pptx first using LibreOffice:")
+        info("  libreoffice --headless --convert-to docx yourfile.doc")
+        info("  libreoffice --headless --convert-to xlsx yourfile.xls")
+        info("  libreoffice --headless --convert-to pptx yourfile.ppt")
+        sys.exit(0)
+
+    check_file_exists(path)
+    zip_issues  = check_zip_integrity(path)
+    part_issues = check_required_parts(path, ext)
+    xml_issues  = check_xml_parts(path, ext)
+
+    all_issues = zip_issues + part_issues + xml_issues
+    info(f"Total issues found: {len(all_issues)}")
+
+    repaired = None
+    remaining = 0
+
+    if all_issues:
+        repaired = attempt_repair(path, ext, all_issues)
+        if repaired:
+            remaining = verify_repaired(repaired, ext)
+    else:
+        ok("File appears healthy – no corruption detected.")
+
+    print_summary(path, repaired, remaining)
+
+
+if __name__ == "__main__":
+    main()
