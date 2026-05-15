@@ -1,365 +1,401 @@
-#!/usr/bin/env python3
-"""
-recover_docx.py
----------------
-Recovers EVERYTHING from a corrupted .docx into a clean new document.
-
-Preserves:
-  Paragraphs  → Title, Heading 1-9, Normal, List Bullet/Number, Caption, Quote
-  Runs        → bold, italic, underline, strike, font name/size/color, highlight
-  Para format → alignment, spacing, indents, page break
-  Tables      → rotated/vertical text, cell shading, cell borders, cell width,
-                vertical alignment, merged cells, bold/font in cells, images in cells
-  Images      → embedded inline pictures
-
-Usage:
-    python3 recover_docx.py corrupt.docx
-    python3 recover_docx.py corrupt.docx --out recovered.docx
-"""
-
-import argparse
-import copy
 import os
-import shutil
-import sys
-import tempfile
-from pathlib import Path
+import posixpath
+import zipfile
+from html import escape
 
-from docx import Document
-from docx.oxml.ns import qn
-from docx.oxml import OxmlElement
-from docx.shared import Inches, Pt, RGBColor
-from docx.text.paragraph import Paragraph
-from docx.table import Table
+from lxml import etree
 
 
-KNOWN_STYLES = {
-    "Normal", "Title", "Subtitle",
-    "Heading 1", "Heading 2", "Heading 3", "Heading 4",
-    "Heading 5", "Heading 6", "Heading 7", "Heading 8", "Heading 9",
-    "List Bullet", "List Bullet 2", "List Bullet 3",
-    "List Number", "List Number 2", "List Number 3",
-    "List Paragraph", "Caption", "Quote", "Intense Quote",
-    "No Spacing", "Body Text", "Body Text 2",
-}
+# ---------------------------------------------------------------------------
+# Helpers expected to exist elsewhere in the codebase
+# ---------------------------------------------------------------------------
+# get_text(element, nsmap) -> str
+# copy_file(src, dst)       -> None  (creates parent dirs as needed)
+# Document1                 -> base class that sets self._path, self._doc,
+#                              self._cursor
+# ---------------------------------------------------------------------------
 
-# Cell properties to deep-copy directly from source XML
-CELL_PR_TAGS = [
-    "w:tcW",           # cell width
-    "w:textDirection", # rotated / vertical text  ← KEY for your screenshot
-    "w:shd",           # shading / background color
-    "w:vAlign",        # vertical alignment
-    "w:tcBorders",     # individual cell borders
-    "w:noWrap",        # no wrap
-    "w:tcMar",         # cell margins
-    "w:gridSpan",      # horizontal merge
-    "w:vMerge",        # vertical merge
-]
+RELS_NS = 'http://schemas.openxmlformats.org/package/2006/relationships'
+
+# Shared keyword args for every etree write – Word requires the declaration.
+_XML_WRITE_KWARGS = dict(
+    pretty_print=True,
+    xml_declaration=True,
+    encoding='UTF-8',
+    standalone=True,
+)
 
 
-def safe(fn, default=None):
-    try:
-        return fn()
-    except Exception:
-        return default
+class ValReport(Document1):
+    def __init__(self, filepath, report='main') -> None:
+        super().__init__(filepath)
+        self._type = report
 
+    # ------------------------------------------------------------------
+    # Cursor helpers
+    # ------------------------------------------------------------------
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Run (character) formatting
-# ─────────────────────────────────────────────────────────────────────────────
-def copy_run_format(src, dst):
-    safe(lambda: setattr(dst, "bold",      src.bold))
-    safe(lambda: setattr(dst, "italic",    src.italic))
-    safe(lambda: setattr(dst, "underline", src.underline))
-    safe(lambda: setattr(dst.font, "strike",    src.font.strike))
-    safe(lambda: setattr(dst.font, "all_caps",  src.font.all_caps))
-    safe(lambda: setattr(dst.font, "shadow",    src.font.shadow))
+    def move_cursor(self, to='question?'):
+        """
+        Advance self._cursor to the paragraph that contains *to*, then
+        continue forward until we find a paragraph whose text contains
+        'team response'.  Stops before any paragraph containing 'mrmg'.
+        """
+        self._cursor = None
 
-    size = safe(lambda: src.font.size)
-    if size:
-        dst.font.size = size
+        to = to.lower().strip()
+        for xx in self._doc.xpath('.//w:body/w:p', namespaces=self._doc.nsmap):
+            text = get_text(xx, self._doc.nsmap).lower().strip()
+            if to in text and len(text) - len(to) < 10:
+                self._cursor = xx
+                break
 
-    name = safe(lambda: src.font.name)
-    if name:
-        dst.font.name = name
+        if self._cursor is None:
+            return
 
-    try:
-        rgb = src.font.color.rgb
-        if rgb:
-            dst.font.color.rgb = rgb
-    except Exception:
-        pass
+        xx = self._cursor.getnext()
+        while xx is not None:
+            text = get_text(xx, self._doc.nsmap).lower().strip()
+            if 'mrmg' in text:
+                # Stop – do not advance past this boundary
+                break
+            if 'team response' in text:
+                self._cursor = xx
+                break
+            xx = xx.getnext()
 
-    hl = safe(lambda: src.font.highlight_color)
-    if hl:
-        safe(lambda: setattr(dst.font, "highlight_color", hl))
+    # ------------------------------------------------------------------
+    # [Content_Types].xml
+    # ------------------------------------------------------------------
 
+    def update_index(self, content, index):
+        """
+        Merge content-type entries from *content['index']* into the
+        package [Content_Types].xml, renaming Override parts with the
+        copy{index}_ prefix.
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Paragraph formatting
-# ─────────────────────────────────────────────────────────────────────────────
-def copy_para_format(src, dst):
-    align = safe(lambda: src.alignment)
-    if align is not None:
-        dst.alignment = align
+        Uses posixpath throughout so PartName values always use forward
+        slashes regardless of the host OS.
+        """
+        ct_path = os.path.join(self._path, '[Content_Types].xml')
+        idxdoc = etree.parse(ct_path).getroot()
 
-    sf = src.paragraph_format
-    df = dst.paragraph_format
+        for k, xx in content['index'].items():
+            local = etree.QName(xx).localname
 
-    for attr in ("space_before", "space_after", "line_spacing",
-                 "left_indent", "right_indent", "first_line_indent"):
-        val = safe(lambda a=attr: getattr(sf, a))
-        if val is not None:
-            safe(lambda a=attr, v=val: setattr(df, a, v))
+            if local == 'Default':
+                # k is the file extension
+                if idxdoc.find(f'./*[@Extension="{k}"]') is None:
+                    idxdoc.insert(0, xx)
 
-    for attr in ("keep_together", "keep_with_next", "page_break_before"):
-        val = safe(lambda a=attr: getattr(sf, a))
-        if val:
-            safe(lambda a=attr, v=val: setattr(df, a, v))
+            elif local == 'Override':
+                # k is a posix PartName like /word/charts/chart1.xml
+                k = (posixpath.dirname(k)
+                     + f'/copy{index}_'
+                     + posixpath.basename(k))
+                if idxdoc.find(f'./*[@PartName="{k}"]') is None:
+                    xx.set('PartName', k)
+                    idxdoc.append(xx)
 
+        etree.ElementTree(idxdoc).write(ct_path, **_XML_WRITE_KWARGS)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Images
-# ─────────────────────────────────────────────────────────────────────────────
-def get_image_rels(doc):
-    images = {}
-    try:
-        for rel in doc.part.rels.values():
-            if "image" in rel.reltype:
-                try:
-                    images[rel.rId] = rel.target_part.blob
-                except Exception:
-                    pass
-    except Exception:
-        pass
-    return images
+    # ------------------------------------------------------------------
+    # word/_rels/document.xml.rels  +  chart .rels files
+    # ------------------------------------------------------------------
 
+    def put_relationships(self, content, index):
+        """
+        Insert relationship entries (images, charts, …) into
+        document.xml.rels and write per-chart .rels files.
 
-def embed_image(para, blob):
-    ext = "png"
-    if blob[:3] == b"\xff\xd8\xff":
-        ext = "jpg"
-    elif blob[:4] == b"GIF8":
-        ext = "gif"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as f:
-        f.write(blob)
-        tmp = f.name
-    try:
-        run = para.add_run()
-        run.add_picture(tmp, width=Inches(4))
-    except Exception as e:
-        para.add_run(f"[Image error: {e}]")
-    finally:
-        os.unlink(tmp)
+        Key fixes vs. original:
+        - All path manipulation on XML-side targets uses posixpath.
+        - Filesystem paths are built with os.path after the XML target
+          is resolved.
+        - Chart rels are written with a proper <Relationships> root
+          element and the required XML declaration.
+        """
+        rels_path = os.path.join(
+            self._path, 'word', '_rels', 'document.xml.rels')
+        reldoc = etree.parse(rels_path).getroot()
 
+        for relation in content['rels']:
+            val = relation['id'] + 'c' + index
+            relation['elem'].set(relation['key'], val)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Fill runs into a paragraph (shared by body paras and table cells)
-# ─────────────────────────────────────────────────────────────────────────────
-def fill_runs(src_para, dst_para, image_rels):
-    for run in src_para.runs:
-        drawing = run._r.find(qn("w:drawing"))
-        pict    = run._r.find(qn("w:pict"))
+            # Already present – skip
+            if reldoc.find(f'./*[@Id="{val}"]') is not None:
+                continue
 
-        if drawing is not None:
-            blip = drawing.find(".//" + qn("a:blip"))
-            if blip is not None:
-                rId = blip.get(qn("r:embed"))
-                if rId and rId in image_rels:
-                    embed_image(dst_para, image_rels[rId])
-                    continue
-            dst_para.add_run("[image]")
-            continue
+            relation['ref'].set('Id', val)
+            reldoc.append(relation['ref'])
 
-        if pict is not None:
-            dst_para.add_run("[embedded object]")
-            continue
+            if relation['ref'].get('TargetMode') != 'External':
+                # XML-side target: always posix
+                orig_target = relation['ref'].get('Target')
+                new_target = (
+                    posixpath.dirname(orig_target)
+                    + f'/copy{index}_'
+                    + posixpath.basename(orig_target)
+                )
+                relation['ref'].set('Target', new_target)
 
-        text = safe(lambda: run.text, "") or ""
-        new_run = dst_para.add_run(text)
-        copy_run_format(run, new_run)
+                # Filesystem destination
+                target_fs = os.path.join(
+                    self._path, 'word',
+                    *new_target.lstrip('/').split('/')
+                )
+                copy_file(relation['source'], target_fs)
 
+            if relation['type'] == 'chart':
+                self._write_chart_rels(relation, index)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Paragraph recovery (body level)
-# ─────────────────────────────────────────────────────────────────────────────
-def recover_paragraph(src_para, new_doc, image_rels):
-    style_name = safe(lambda: src_para.style.name, "Normal") or "Normal"
-    use_style  = style_name if style_name in KNOWN_STYLES else "Normal"
+        etree.ElementTree(reldoc).write(rels_path, **_XML_WRITE_KWARGS)
 
-    new_para = new_doc.add_paragraph(style=use_style)
-    copy_para_format(src_para, new_para)
-    fill_runs(src_para, new_para, image_rels)
-    return new_para
+    def _write_chart_rels(self, relation, index):
+        """
+        Copy chart source files and write the chart's .rels file with a
+        proper <Relationships> root element.
+        """
+        chart_info = relation['chart']
+        name    = chart_info['name']     # e.g. 'charts/chart1.xml'
+        crel    = chart_info['rels']     # list of <Relationship> elements
+        sources = chart_info['sources']  # list of (target, source) tuples
 
+        charts_rels_dir = os.path.join(
+            self._path, 'word', 'charts', '_rels')
+        os.makedirs(charts_rels_dir, exist_ok=True)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Cell property copy  ← this is the KEY part for your table
-# ─────────────────────────────────────────────────────────────────────────────
-def copy_cell_properties(src_cell, dst_cell):
-    """
-    Deep-copy every property from source cell's <w:tcPr> to destination cell.
-    This preserves: rotation, shading, borders, width, vAlign, merges, etc.
-    """
-    src_tcPr = src_cell._tc.find(qn("w:tcPr"))
-    if src_tcPr is None:
-        return
+        # Rewrite Target attributes on the chart's own relationships
+        for rel in crel:
+            if rel.get('TargetMode') != 'External':
+                orig = rel.get('Target')
+                new = (posixpath.dirname(orig)
+                       + f'/copy{index}_'
+                       + posixpath.basename(orig))
+                rel.set('Target', new)
 
-    # Get or create tcPr on destination
-    dst_tc   = dst_cell._tc
-    dst_tcPr = dst_tc.find(qn("w:tcPr"))
-    if dst_tcPr is None:
-        dst_tcPr = OxmlElement("w:tcPr")
-        dst_tc.insert(0, dst_tcPr)
-    else:
-        # Clear existing so we don't double-up
-        for child in list(dst_tcPr):
-            dst_tcPr.remove(child)
+        # Copy spreadsheet / data source files
+        for target, source in sources:
+            new_target = (posixpath.dirname(target)
+                          + f'/copy{index}_'
+                          + posixpath.basename(target))
+            target_fs = os.path.join(
+                self._path, 'word', 'charts',
+                *new_target.lstrip('/').split('/')
+            )
+            copy_file(source, target_fs)
 
-    # Deep-copy every child element from source tcPr
-    for child in src_tcPr:
-        dst_tcPr.append(copy.deepcopy(child))
+        # Build a proper <Relationships> root – crel is a plain list
+        rels_root = etree.Element('Relationships', nsmap={None: RELS_NS})
+        for rel in crel:
+            rels_root.append(rel)
 
+        rels_filename = f'copy{index}_{posixpath.basename(name)}.rels'
+        etree.ElementTree(rels_root).write(
+            os.path.join(charts_rels_dir, rels_filename),
+            **_XML_WRITE_KWARGS,
+        )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Table recovery
-# ─────────────────────────────────────────────────────────────────────────────
-def recover_table(src_table, new_doc, image_rels):
-    rows = safe(lambda: len(src_table.rows), 0)
-    cols = safe(lambda: len(src_table.columns), 0)
-    if rows == 0 or cols == 0:
-        return
+    # ------------------------------------------------------------------
+    # word/numbering.xml
+    # ------------------------------------------------------------------
 
-    new_table = new_doc.add_table(rows=rows, cols=cols)
+    def update_numbering(self, content, index):
+        """
+        Merge numbering definitions, disambiguating IDs with a
+        '999{index}' suffix to avoid collisions with existing IDs.
+        """
+        num_path = os.path.join(self._path, 'word', 'numbering.xml')
+        numdoc = etree.parse(num_path).getroot()
+        w = numdoc.nsmap['w']
+        suffix = '999' + index
 
-    # Copy table-level style
-    tbl_style = safe(lambda: src_table.style.name)
-    if tbl_style:
-        try:
-            new_table.style = tbl_style
-        except Exception:
-            try:
-                new_table.style = "Table Grid"
-            except Exception:
-                pass
-    else:
-        try:
-            new_table.style = "Table Grid"
-        except Exception:
-            pass
+        num_ids  = numdoc.xpath('./w:num/@w:numId',
+                                namespaces=numdoc.nsmap)
+        anum_ids = numdoc.xpath('./w:abstractNum/@w:abstractNumId',
+                                namespaces=numdoc.nsmap)
+        curr_num_ids, curr_anum_ids = [], []
 
-    # Copy table-level properties (column widths, borders, layout)
-    src_tblPr = src_table._tbl.find(qn("w:tblPr"))
-    if src_tblPr is not None:
-        dst_tblPr = new_table._tbl.find(qn("w:tblPr"))
-        if dst_tblPr is None:
-            dst_tblPr = OxmlElement("w:tblPr")
-            new_table._tbl.insert(0, dst_tblPr)
-        for child in list(dst_tblPr):
-            dst_tblPr.remove(child)
-        for child in src_tblPr:
-            dst_tblPr.append(copy.deepcopy(child))
+        for num in content['nums']:
+            nid = num['id'] + suffix
+            num['elem'].set(num['key'], nid)
 
-    # Copy tblGrid (column definitions)
-    src_tblGrid = src_table._tbl.find(qn("w:tblGrid"))
-    if src_tblGrid is not None:
-        dst_tblGrid = new_table._tbl.find(qn("w:tblGrid"))
-        if dst_tblGrid is not None:
-            new_table._tbl.remove(dst_tblGrid)
-        new_table._tbl.insert(1, copy.deepcopy(src_tblGrid))
+            if ('num' not in num['ref']
+                    or nid in num_ids
+                    or nid in curr_num_ids):
+                continue
 
-    # Copy each cell
-    for i, src_row in enumerate(src_table.rows):
-        for j, src_cell in enumerate(src_row.cells):
-            dst_cell = new_table.rows[i].cells[j]
+            curr_num_ids.append(nid)
+            num['ref']['num'].set(f'{{{w}}}numId', nid)
+            numdoc.append(num['ref']['num'])
 
-            # 1. Copy ALL cell properties (rotation, shading, borders, width, vAlign…)
-            copy_cell_properties(src_cell, dst_cell)
+            anum = num['ref']['num'].find('./w:abstractNumId', numdoc.nsmap)
+            aid  = anum.get(f'{{{w}}}val') + suffix
+            anum.set(f'{{{w}}}val', aid)
 
-            # 2. Clear auto-added paragraph
-            for old_p in dst_cell.paragraphs:
-                old_p._element.getparent().remove(old_p._element)
+            if aid not in anum_ids and aid not in curr_anum_ids:
+                curr_anum_ids.append(aid)
+                num['ref']['anum'].set(f'{{{w}}}abstractNumId', aid)
+                numdoc.insert(0, num['ref']['anum'])
 
-            # 3. Copy each paragraph inside the cell
-            for src_para in src_cell.paragraphs:
-                style_name = safe(lambda: src_para.style.name, "Normal") or "Normal"
-                use_style  = style_name if style_name in KNOWN_STYLES else "Normal"
+        etree.ElementTree(numdoc).write(num_path, **_XML_WRITE_KWARGS)
 
-                dst_para = dst_cell.add_paragraph(style=use_style)
-                copy_para_format(src_para, dst_para)
-                fill_runs(src_para, dst_para, image_rels)
+    # ------------------------------------------------------------------
+    # word/styles.xml
+    # ------------------------------------------------------------------
 
+    def update_styles(self, content):
+        """
+        Merge style definitions, appending a 'New' suffix to every
+        style ID to avoid clashing with existing styles.
+        """
+        styles_path = os.path.join(self._path, 'word', 'styles.xml')
+        stdoc  = etree.parse(styles_path).getroot()
+        suffix = 'New'
+        w      = stdoc.nsmap['w']
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main recovery
-# ─────────────────────────────────────────────────────────────────────────────
-def recover(src_path: Path, dst_path: Path):
-    print(f"\n🔧 Opening: {src_path.name}")
+        for style in content['styles']:
+            style['id'] = style['id'] + suffix
+            style['elem'].set(style['key'], style['id'])
 
-    try:
-        doc = Document(str(src_path))
-    except Exception as e:
-        print(f"  ⚠️  Warning: {e} — attempting anyway...")
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                cp = Path(tmp) / src_path.name
-                shutil.copy(src_path, cp)
-                doc = Document(str(cp))
-        except Exception as e2:
-            print(f"  ❌ Cannot open: {e2}")
-            sys.exit(1)
+            if stdoc.find(
+                    f'./w:style[@w:styleId="{style["id"]}"]',
+                    stdoc.nsmap) is not None:
+                continue  # already present
 
-    print("  ✓ Opened successfully")
+            style['ref']['elem'].set(f'{{{w}}}styleId', style['id'])
 
-    image_rels = get_image_rels(doc)
-    print(f"  ✓ {len(image_rels)} embedded image(s) found")
+            if 'basedon' in style['ref']:
+                basedon = (style['ref']['basedon'].get(f'{{{w}}}styleId')
+                           + suffix)
+                (style['ref']['elem']
+                 .find('./w:basedOn', stdoc.nsmap)
+                 .set(f'{{{w}}}val', basedon))
 
-    new_doc = Document()
-    for p in new_doc.paragraphs:
-        p._element.getparent().remove(p._element)
+                if stdoc.find(
+                        f'./w:style[@w:styleId="{basedon}"]',
+                        stdoc.nsmap) is None:
+                    style['ref']['basedon'].set(
+                        f'{{{w}}}styleId', basedon)
+                    first_style = stdoc.find('./w:style', stdoc.nsmap)
+                    stdoc.insert(
+                        stdoc.index(first_style),
+                        style['ref']['basedon'],
+                    )
 
-    para_count  = 0
-    table_count = 0
-    body = doc.element.body
+            stdoc.append(style['ref']['elem'])
 
-    print("\n📋 Recovering everything in order...")
+        etree.ElementTree(stdoc).write(styles_path, **_XML_WRITE_KWARGS)
 
-    for child in body:
-        tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+    # ------------------------------------------------------------------
+    # Paste a block of content after a named anchor paragraph
+    # ------------------------------------------------------------------
 
-        if tag == "p":
-            src_para = Paragraph(child, doc)
-            recover_paragraph(src_para, new_doc, image_rels)
-            para_count += 1
+    def paste_content(self, content, after, index):
+        """
+        Insert *content['data']* paragraphs after the anchor paragraph
+        identified by *after*, then update all supporting package parts.
 
-        elif tag == "tbl":
-            src_table = Table(child, doc)
-            recover_table(src_table, new_doc, image_rels)
-            table_count += 1
+        document.xml is written last so it reflects the fully merged state
+        of all other parts.
+        """
+        self.move_cursor(to=after)
 
-    new_doc.save(str(dst_path))
+        for c in content['data']:
+            self._cursor.addnext(c)
+            self._cursor = self._cursor.getnext()
 
-    print(f"\n  ✅ {para_count} paragraphs  |  {table_count} tables  |  {len(image_rels)} images")
-    print(f"  💾 Saved → {dst_path.resolve()}\n")
+        # Update supporting parts first, document.xml last
+        self.put_relationships(content, index)
+        self.update_styles(content)
+        self.update_numbering(content, index)
+        self.update_index(content, index)
 
+        etree.ElementTree(self._doc).write(
+            os.path.join(self._path, 'word', 'document.xml'),
+            **_XML_WRITE_KWARGS,
+        )
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Copy EVERYTHING from a corrupted .docx into a clean new file.\n"
-                    "Preserves rotated headers, shading, borders, merges, images, and all formatting."
-    )
-    parser.add_argument("docx", help="Path to corrupted .docx file")
-    parser.add_argument("--out", default=None, help="Output file path (optional)")
-    args = parser.parse_args()
+    # ------------------------------------------------------------------
+    # Insert a plain-text paragraph after a named anchor
+    # ------------------------------------------------------------------
 
-    src = Path(args.docx)
-    if not src.exists():
-        print(f"❌ File not found: {src}")
-        sys.exit(1)
+    def put_text(self, after, text, color):
+        """
+        Insert a single Body-styled paragraph containing *text* after the
+        anchor identified by *after*.  If *color* is non-empty the run is
+        highlighted in that colour.
+        """
+        self.move_cursor(to=after)
+        if self._cursor is None:
+            return
 
-    dst = Path(args.out) if args.out else src.with_name(src.stem + "_recovered.docx")
-    recover(src, dst)
+        safe_text = escape(str(text or ''))
+        w = self._doc.nsmap['w']
 
+        color_xml = (
+            f'<w:rPr><w:highlight w:val="{color}"/></w:rPr>'
+            if color else ''
+        )
 
-if __name__ == "__main__":
-    main()
+        elem_xml = (
+            f'<w:p xmlns:w="{w}">'
+            f'<w:pPr><w:pStyle w:val="Body"/></w:pPr>'
+            f'<w:r>'
+            f'{color_xml}'
+            f'<w:t xml:space="preserve">{safe_text}</w:t>'
+            f'</w:r>'
+            f'</w:p>'
+        )
+
+        new_para = etree.fromstring(elem_xml)
+        self._cursor.addnext(new_para)
+
+        etree.ElementTree(self._doc).write(
+            os.path.join(self._path, 'word', 'document.xml'),
+            **_XML_WRITE_KWARGS,
+        )
+
+    # ------------------------------------------------------------------
+    # Save / repack
+    # ------------------------------------------------------------------
+
+    def save(self, filepath=''):
+        """
+        Repack the extracted directory back into a .docx ZIP archive.
+
+        [Content_Types].xml is written first (some Word versions require
+        it to be the first entry in the archive).
+        """
+        filepath = (
+            self._path + '.docx' if filepath == '' else filepath
+        )
+
+        if os.path.exists(filepath):
+            os.remove(filepath)
+
+        with zipfile.ZipFile(
+                filepath, 'w',
+                zipfile.ZIP_DEFLATED,
+                allowZip64=True) as docx:
+
+            # --- [Content_Types].xml must come first ---
+            ct_path = os.path.join(self._path, '[Content_Types].xml')
+            docx.write(ct_path, '[Content_Types].xml')
+
+            # --- everything else ---
+            for foldername, _subfolders, filenames in os.walk(self._path):
+                for filename in filenames:
+                    file_path = os.path.join(foldername, filename)
+                    arcname   = os.path.relpath(file_path, self._path)
+
+                    # Normalise to forward slashes inside the archive
+                    arcname = arcname.replace(os.sep, '/')
+
+                    if arcname == '[Content_Types].xml':
+                        continue  # already written above
+
+                    docx.write(file_path, arcname)
+
+        return filepath
