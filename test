@@ -1,104 +1,54 @@
-Dealing with OpenXML image and chart relationships is a notorious source of corrupted .docx files. When merging documents, if a relationship ID (rId) gets out of sync, Word will fail to open the document.
-To safely skip images and charts without causing corruption, you must do **two things**:
- 1. Stop the image/chart files from being copied and added to the .rels file.
- 2. **Crucial Step:** Strip the actual drawing tags (<w:drawing> and <w:pict>) from the paragraph XML *before* pasting it. If you skip the relationships but leave the XML tags pointing to a missing rId, Word will instantly declare the file corrupt.
-Here are the updated methods. Replace your existing put_relationships and paste_content methods with these, and you can safely delete the _write_chart_rels method entirely.
-### 1. Update paste_content
-We will use etree.strip_elements to scrub the paragraphs of any charts or images before they are injected into your target document.
-```python
     # ------------------------------------------------------------------
     # Paste a block of content after a named anchor paragraph
     # ------------------------------------------------------------------
 
     def paste_content(self, content, after, index):
         """
-        Insert *content['data']* paragraphs after the anchor paragraph
-        identified by *after*, then update all supporting package parts.
-        
-        Images and charts are strictly stripped out to prevent corruption.
+        Insert *content['data']* paragraphs after the anchor paragraph.
+        Aggressively sanitizes the XML to prevent corruption when skipping
+        styles, lists, and relationship updates.
         """
         self.move_cursor(to=after)
+        if self._cursor is None:
+            return
 
-        # Get the WordprocessingML namespace
         w = self._doc.nsmap.get('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main')
 
         for c in content['data']:
-            # STRIP image and chart XML nodes before insertion.
-            # Leaving these in without matching relationships causes document corruption.
+            # 1. STRIP IMAGES & CHARTS (Deletes the tag and its contents)
             etree.strip_elements(c, f'{{{w}}}drawing', with_tail=False)
             etree.strip_elements(c, f'{{{w}}}pict', with_tail=False)
+
+            # 2. STRIP STYLES (Forces text to inherit the destination's default style)
+            etree.strip_elements(c, f'{{{w}}}pStyle', with_tail=False)
+            etree.strip_elements(c, f'{{{w}}}rStyle', with_tail=False)
+
+            # 3. STRIP LISTS & NUMBERING (Prevents missing numId crashes)
+            etree.strip_elements(c, f'{{{w}}}numPr', with_tail=False)
+
+            # 4. STRIP BOOKMARKS (Duplicate bookmark IDs across documents cause instant corruption)
+            etree.strip_elements(c, f'{{{w}}}bookmarkStart', with_tail=False)
+            etree.strip_elements(c, f'{{{w}}}bookmarkEnd', with_tail=False)
+
+            # 5. STRIP HYPERLINKS BUT KEEP THE TEXT
+            # We use `strip_tags` here instead of `strip_elements`. This removes the 
+            # <w:hyperlink> wrapper (which contains the corrupting rId) but keeps the 
+            # <w:r> text inside so you don't lose words.
+            etree.strip_tags(c, f'{{{w}}}hyperlink')
 
             self._cursor.addnext(c)
             self._cursor = self._cursor.getnext()
 
-        # Update supporting parts first, document.xml last
-        self.put_relationships(content, index)
-        self.update_styles(content)
-        self.update_numbering(content, index)
+        # If you want a purely "simple" paste, you actually don't need to run 
+        # update_styles or update_numbering anymore because we stripped them above.
+        # You can comment these out if you are completely skipping them:
+        # self.update_styles(content)
+        # self.update_numbering(content, index)
+        
+        self.put_relationships(content, index) 
         self.update_index(content, index)
 
         etree.ElementTree(self._doc).write(
             os.path.join(self._path, 'word', 'document.xml'),
             **_XML_WRITE_KWARGS,
         )
-
-```
-### 2. Update put_relationships
-We will add a filter at the top of the loop to ignore any relationship categorized as an image or chart. Because you no longer need to write chart relationships, the call to _write_chart_rels has been removed.
-```python
-    # ------------------------------------------------------------------
-    # word/_rels/document.xml.rels
-    # ------------------------------------------------------------------
-
-    def put_relationships(self, content, index):
-        """
-        Insert relationship entries into document.xml.rels.
-        
-        Images and charts are explicitly skipped to prevent corruption.
-        """
-        rels_path = os.path.join(
-            self._path, 'word', '_rels', 'document.xml.rels')
-        reldoc = etree.parse(rels_path).getroot()
-
-        for relation in content['rels']:
-            rel_type_url = relation['ref'].get('Type', '').lower()
-            rel_category = relation.get('type', '').lower()
-
-            # SKIP images and charts entirely
-            if 'image' in rel_type_url or 'chart' in rel_type_url or rel_category in ['image', 'chart']:
-                continue
-
-            val = relation['id'] + 'c' + index
-            relation['elem'].set(relation['key'], val)
-
-            # Already present – skip
-            if reldoc.find(f'./*[@Id="{val}"]') is not None:
-                continue
-
-            relation['ref'].set('Id', val)
-            reldoc.append(relation['ref'])
-
-            if relation['ref'].get('TargetMode') != 'External':
-                # XML-side target: always posix
-                orig_target = relation['ref'].get('Target')
-                new_target = (
-                    posixpath.dirname(orig_target)
-                    + f'/copy{index}_'
-                    + posixpath.basename(orig_target)
-                )
-                relation['ref'].set('Target', new_target)
-
-                # Filesystem destination
-                target_fs = os.path.join(
-                    self._path, 'word',
-                    *new_target.lstrip('/').split('/')
-                )
-                copy_file(relation['source'], target_fs)
-
-        etree.ElementTree(reldoc).write(rels_path, **_XML_WRITE_KWARGS)
-
-```
-### Summary of Changes:
- * **_write_chart_rels**: You can now safely delete this function from your class.
- * **Missing rId Prevention**: By using etree.strip_elements(c, f'{{{w}}}drawing'), we surgically remove the inline charts/images from the XML paragraph nodes. Your text content will paste smoothly as if the images/charts never existed, and Word will load perfectly without complaining about missing files.
-
