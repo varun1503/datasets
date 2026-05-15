@@ -1,125 +1,73 @@
-import os
-import posixpath
-import zipfile
-from html import escape
-
-from lxml import etree
-
-
-# ---------------------------------------------------------------------------
-# Helpers expected to exist elsewhere in the codebase
-# ---------------------------------------------------------------------------
-# get_text(element, nsmap) -> str
-# copy_file(src, dst)       -> None  (creates parent dirs as needed)
-# Document1                 -> base class that sets self._path, self._doc,
-#                              self._cursor
-# ---------------------------------------------------------------------------
-
-RELS_NS = 'http://schemas.openxmlformats.org/package/2006/relationships'
-
-# Shared keyword args for every etree write – Word requires the declaration.
-_XML_WRITE_KWARGS = dict(
-    pretty_print=True,
-    xml_declaration=True,
-    encoding='UTF-8',
-    standalone=True,
-)
-
-
-class ValReport(Document1):
-    def __init__(self, filepath, report='main') -> None:
-        super().__init__(filepath)
-        self._type = report
-
+Dealing with OpenXML image and chart relationships is a notorious source of corrupted .docx files. When merging documents, if a relationship ID (rId) gets out of sync, Word will fail to open the document.
+To safely skip images and charts without causing corruption, you must do **two things**:
+ 1. Stop the image/chart files from being copied and added to the .rels file.
+ 2. **Crucial Step:** Strip the actual drawing tags (<w:drawing> and <w:pict>) from the paragraph XML *before* pasting it. If you skip the relationships but leave the XML tags pointing to a missing rId, Word will instantly declare the file corrupt.
+Here are the updated methods. Replace your existing put_relationships and paste_content methods with these, and you can safely delete the _write_chart_rels method entirely.
+### 1. Update paste_content
+We will use etree.strip_elements to scrub the paragraphs of any charts or images before they are injected into your target document.
+```python
     # ------------------------------------------------------------------
-    # Cursor helpers
+    # Paste a block of content after a named anchor paragraph
     # ------------------------------------------------------------------
 
-    def move_cursor(self, to='question?'):
+    def paste_content(self, content, after, index):
         """
-        Advance self._cursor to the paragraph that contains *to*, then
-        continue forward until we find a paragraph whose text contains
-        'team response'.  Stops before any paragraph containing 'mrmg'.
+        Insert *content['data']* paragraphs after the anchor paragraph
+        identified by *after*, then update all supporting package parts.
+        
+        Images and charts are strictly stripped out to prevent corruption.
         """
-        self._cursor = None
+        self.move_cursor(to=after)
 
-        to = to.lower().strip()
-        for xx in self._doc.xpath('.//w:body/w:p', namespaces=self._doc.nsmap):
-            text = get_text(xx, self._doc.nsmap).lower().strip()
-            if to in text and len(text) - len(to) < 10:
-                self._cursor = xx
-                break
+        # Get the WordprocessingML namespace
+        w = self._doc.nsmap.get('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main')
 
-        if self._cursor is None:
-            return
+        for c in content['data']:
+            # STRIP image and chart XML nodes before insertion.
+            # Leaving these in without matching relationships causes document corruption.
+            etree.strip_elements(c, f'{{{w}}}drawing', with_tail=False)
+            etree.strip_elements(c, f'{{{w}}}pict', with_tail=False)
 
-        xx = self._cursor.getnext()
-        while xx is not None:
-            text = get_text(xx, self._doc.nsmap).lower().strip()
-            if 'mrmg' in text:
-                # Stop – do not advance past this boundary
-                break
-            if 'team response' in text:
-                self._cursor = xx
-                break
-            xx = xx.getnext()
+            self._cursor.addnext(c)
+            self._cursor = self._cursor.getnext()
 
+        # Update supporting parts first, document.xml last
+        self.put_relationships(content, index)
+        self.update_styles(content)
+        self.update_numbering(content, index)
+        self.update_index(content, index)
+
+        etree.ElementTree(self._doc).write(
+            os.path.join(self._path, 'word', 'document.xml'),
+            **_XML_WRITE_KWARGS,
+        )
+
+```
+### 2. Update put_relationships
+We will add a filter at the top of the loop to ignore any relationship categorized as an image or chart. Because you no longer need to write chart relationships, the call to _write_chart_rels has been removed.
+```python
     # ------------------------------------------------------------------
-    # [Content_Types].xml
-    # ------------------------------------------------------------------
-
-    def update_index(self, content, index):
-        """
-        Merge content-type entries from *content['index']* into the
-        package [Content_Types].xml, renaming Override parts with the
-        copy{index}_ prefix.
-
-        Uses posixpath throughout so PartName values always use forward
-        slashes regardless of the host OS.
-        """
-        ct_path = os.path.join(self._path, '[Content_Types].xml')
-        idxdoc = etree.parse(ct_path).getroot()
-
-        for k, xx in content['index'].items():
-            local = etree.QName(xx).localname
-
-            if local == 'Default':
-                # k is the file extension
-                if idxdoc.find(f'./*[@Extension="{k}"]') is None:
-                    idxdoc.insert(0, xx)
-
-            elif local == 'Override':
-                # k is a posix PartName like /word/charts/chart1.xml
-                k = (posixpath.dirname(k)
-                     + f'/copy{index}_'
-                     + posixpath.basename(k))
-                if idxdoc.find(f'./*[@PartName="{k}"]') is None:
-                    xx.set('PartName', k)
-                    idxdoc.append(xx)
-
-        etree.ElementTree(idxdoc).write(ct_path, **_XML_WRITE_KWARGS)
-
-    # ------------------------------------------------------------------
-    # word/_rels/document.xml.rels  +  chart .rels files
+    # word/_rels/document.xml.rels
     # ------------------------------------------------------------------
 
     def put_relationships(self, content, index):
         """
-        Insert relationship entries (images, charts, …) into
-        document.xml.rels and write per-chart .rels files.
-
-        Key fixes vs. original:
-        - All path manipulation on XML-side targets uses posixpath.
-        - Filesystem paths are built with os.path after the XML target
-          is resolved.
-        - Chart rels are written with a proper <Relationships> root
-          element and the required XML declaration.
+        Insert relationship entries into document.xml.rels.
+        
+        Images and charts are explicitly skipped to prevent corruption.
         """
         rels_path = os.path.join(
             self._path, 'word', '_rels', 'document.xml.rels')
         reldoc = etree.parse(rels_path).getroot()
 
         for relation in content['rels']:
+            rel_type_url = relation['ref'].get('Type', '').lower()
+            rel_category = relation.get('type', '').lower()
+
+            # SKIP images and charts entirely
+            if 'image' in rel_type_url or 'chart' in rel_type_url or rel_category in ['image', 'chart']:
+                continue
+
             val = relation['id'] + 'c' + index
             relation['elem'].set(relation['key'], val)
 
@@ -147,255 +95,10 @@ class ValReport(Document1):
                 )
                 copy_file(relation['source'], target_fs)
 
-            if relation['type'] == 'chart':
-                self._write_chart_rels(relation, index)
-
         etree.ElementTree(reldoc).write(rels_path, **_XML_WRITE_KWARGS)
 
-    def _write_chart_rels(self, relation, index):
-        """
-        Copy chart source files and write the chart's .rels file with a
-        proper <Relationships> root element.
-        """
-        chart_info = relation['chart']
-        name    = chart_info['name']     # e.g. 'charts/chart1.xml'
-        crel    = chart_info['rels']     # list of <Relationship> elements
-        sources = chart_info['sources']  # list of (target, source) tuples
+```
+### Summary of Changes:
+ * **_write_chart_rels**: You can now safely delete this function from your class.
+ * **Missing rId Prevention**: By using etree.strip_elements(c, f'{{{w}}}drawing'), we surgically remove the inline charts/images from the XML paragraph nodes. Your text content will paste smoothly as if the images/charts never existed, and Word will load perfectly without complaining about missing files.
 
-        charts_rels_dir = os.path.join(
-            self._path, 'word', 'charts', '_rels')
-        os.makedirs(charts_rels_dir, exist_ok=True)
-
-        # Rewrite Target attributes on the chart's own relationships
-        for rel in crel:
-            if rel.get('TargetMode') != 'External':
-                orig = rel.get('Target')
-                new = (posixpath.dirname(orig)
-                       + f'/copy{index}_'
-                       + posixpath.basename(orig))
-                rel.set('Target', new)
-
-        # Copy spreadsheet / data source files
-        for target, source in sources:
-            new_target = (posixpath.dirname(target)
-                          + f'/copy{index}_'
-                          + posixpath.basename(target))
-            target_fs = os.path.join(
-                self._path, 'word', 'charts',
-                *new_target.lstrip('/').split('/')
-            )
-            copy_file(source, target_fs)
-
-        # Build a proper <Relationships> root – crel is a plain list
-        rels_root = etree.Element('Relationships', nsmap={None: RELS_NS})
-        for rel in crel:
-            rels_root.append(rel)
-
-        rels_filename = f'copy{index}_{posixpath.basename(name)}.rels'
-        etree.ElementTree(rels_root).write(
-            os.path.join(charts_rels_dir, rels_filename),
-            **_XML_WRITE_KWARGS,
-        )
-
-    # ------------------------------------------------------------------
-    # word/numbering.xml
-    # ------------------------------------------------------------------
-
-    def update_numbering(self, content, index):
-        """
-        Merge numbering definitions, disambiguating IDs with a
-        '999{index}' suffix to avoid collisions with existing IDs.
-        """
-        num_path = os.path.join(self._path, 'word', 'numbering.xml')
-        numdoc = etree.parse(num_path).getroot()
-        w = numdoc.nsmap['w']
-        suffix = '999' + index
-
-        num_ids  = numdoc.xpath('./w:num/@w:numId',
-                                namespaces=numdoc.nsmap)
-        anum_ids = numdoc.xpath('./w:abstractNum/@w:abstractNumId',
-                                namespaces=numdoc.nsmap)
-        curr_num_ids, curr_anum_ids = [], []
-
-        for num in content['nums']:
-            nid = num['id'] + suffix
-            num['elem'].set(num['key'], nid)
-
-            if ('num' not in num['ref']
-                    or nid in num_ids
-                    or nid in curr_num_ids):
-                continue
-
-            curr_num_ids.append(nid)
-            num['ref']['num'].set(f'{{{w}}}numId', nid)
-            numdoc.append(num['ref']['num'])
-
-            anum = num['ref']['num'].find('./w:abstractNumId', numdoc.nsmap)
-            aid  = anum.get(f'{{{w}}}val') + suffix
-            anum.set(f'{{{w}}}val', aid)
-
-            if aid not in anum_ids and aid not in curr_anum_ids:
-                curr_anum_ids.append(aid)
-                num['ref']['anum'].set(f'{{{w}}}abstractNumId', aid)
-                numdoc.insert(0, num['ref']['anum'])
-
-        etree.ElementTree(numdoc).write(num_path, **_XML_WRITE_KWARGS)
-
-    # ------------------------------------------------------------------
-    # word/styles.xml
-    # ------------------------------------------------------------------
-
-    def update_styles(self, content):
-        """
-        Merge style definitions, appending a 'New' suffix to every
-        style ID to avoid clashing with existing styles.
-        """
-        styles_path = os.path.join(self._path, 'word', 'styles.xml')
-        stdoc  = etree.parse(styles_path).getroot()
-        suffix = 'New'
-        w      = stdoc.nsmap['w']
-
-        for style in content['styles']:
-            style['id'] = style['id'] + suffix
-            style['elem'].set(style['key'], style['id'])
-
-            if stdoc.find(
-                    f'./w:style[@w:styleId="{style["id"]}"]',
-                    stdoc.nsmap) is not None:
-                continue  # already present
-
-            style['ref']['elem'].set(f'{{{w}}}styleId', style['id'])
-
-            if 'basedon' in style['ref']:
-                basedon = (style['ref']['basedon'].get(f'{{{w}}}styleId')
-                           + suffix)
-                (style['ref']['elem']
-                 .find('./w:basedOn', stdoc.nsmap)
-                 .set(f'{{{w}}}val', basedon))
-
-                if stdoc.find(
-                        f'./w:style[@w:styleId="{basedon}"]',
-                        stdoc.nsmap) is None:
-                    style['ref']['basedon'].set(
-                        f'{{{w}}}styleId', basedon)
-                    first_style = stdoc.find('./w:style', stdoc.nsmap)
-                    stdoc.insert(
-                        stdoc.index(first_style),
-                        style['ref']['basedon'],
-                    )
-
-            stdoc.append(style['ref']['elem'])
-
-        etree.ElementTree(stdoc).write(styles_path, **_XML_WRITE_KWARGS)
-
-    # ------------------------------------------------------------------
-    # Paste a block of content after a named anchor paragraph
-    # ------------------------------------------------------------------
-
-    def paste_content(self, content, after, index):
-        """
-        Insert *content['data']* paragraphs after the anchor paragraph
-        identified by *after*, then update all supporting package parts.
-
-        document.xml is written last so it reflects the fully merged state
-        of all other parts.
-        """
-        self.move_cursor(to=after)
-
-        for c in content['data']:
-            self._cursor.addnext(c)
-            self._cursor = self._cursor.getnext()
-
-        # Update supporting parts first, document.xml last
-        self.put_relationships(content, index)
-        self.update_styles(content)
-        self.update_numbering(content, index)
-        self.update_index(content, index)
-
-        etree.ElementTree(self._doc).write(
-            os.path.join(self._path, 'word', 'document.xml'),
-            **_XML_WRITE_KWARGS,
-        )
-
-    # ------------------------------------------------------------------
-    # Insert a plain-text paragraph after a named anchor
-    # ------------------------------------------------------------------
-
-    def put_text(self, after, text, color):
-        """
-        Insert a single Body-styled paragraph containing *text* after the
-        anchor identified by *after*.  If *color* is non-empty the run is
-        highlighted in that colour.
-        """
-        self.move_cursor(to=after)
-        if self._cursor is None:
-            return
-
-        safe_text = escape(str(text or ''))
-        w = self._doc.nsmap['w']
-
-        color_xml = (
-            f'<w:rPr><w:highlight w:val="{color}"/></w:rPr>'
-            if color else ''
-        )
-
-        elem_xml = (
-            f'<w:p xmlns:w="{w}">'
-            f'<w:pPr><w:pStyle w:val="Body"/></w:pPr>'
-            f'<w:r>'
-            f'{color_xml}'
-            f'<w:t xml:space="preserve">{safe_text}</w:t>'
-            f'</w:r>'
-            f'</w:p>'
-        )
-
-        new_para = etree.fromstring(elem_xml)
-        self._cursor.addnext(new_para)
-
-        etree.ElementTree(self._doc).write(
-            os.path.join(self._path, 'word', 'document.xml'),
-            **_XML_WRITE_KWARGS,
-        )
-
-    # ------------------------------------------------------------------
-    # Save / repack
-    # ------------------------------------------------------------------
-
-    def save(self, filepath=''):
-        """
-        Repack the extracted directory back into a .docx ZIP archive.
-
-        [Content_Types].xml is written first (some Word versions require
-        it to be the first entry in the archive).
-        """
-        filepath = (
-            self._path + '.docx' if filepath == '' else filepath
-        )
-
-        if os.path.exists(filepath):
-            os.remove(filepath)
-
-        with zipfile.ZipFile(
-                filepath, 'w',
-                zipfile.ZIP_DEFLATED,
-                allowZip64=True) as docx:
-
-            # --- [Content_Types].xml must come first ---
-            ct_path = os.path.join(self._path, '[Content_Types].xml')
-            docx.write(ct_path, '[Content_Types].xml')
-
-            # --- everything else ---
-            for foldername, _subfolders, filenames in os.walk(self._path):
-                for filename in filenames:
-                    file_path = os.path.join(foldername, filename)
-                    arcname   = os.path.relpath(file_path, self._path)
-
-                    # Normalise to forward slashes inside the archive
-                    arcname = arcname.replace(os.sep, '/')
-
-                    if arcname == '[Content_Types].xml':
-                        continue  # already written above
-
-                    docx.write(file_path, arcname)
-
-        return filepath
