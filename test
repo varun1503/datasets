@@ -115,26 +115,3 @@
             os.path.join(self._path, 'word', 'document.xml'),
             **_XML_WRITE_KWARGS,
         )
-                                    new_cell.append(etree.fromstring(f'<w:p xmlns:w="{w}"/>'))
-                                
-                        new_row.append(new_cell)
-                    new_tbl.append(new_row)
-                
-                self._cursor.addnext(new_tbl)
-                self._cursor = new_tbl
-
-            else:
-                # Regular Paragraphs
-                clean_p = build_safe_paragraph(c)
-                
-                # Skip empty paragraphs to avoid weird spacing
-                if len(clean_p.findall(f'.//{{{w}}}r')) == 0:
-                    continue
-
-                self._cursor.addnext(clean_p)
-                self._cursor = clean_p 
-
-        etree.ElementTree(self._doc).write(
-            os.path.join(self._path, 'word', 'document.xml'),
-            **_XML_WRITE_KWARGS,
-        )
