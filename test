@@ -1,13 +1,12 @@
     # ------------------------------------------------------------------
-    # Paste purely as plain text to inherit destination styling
+    # Paste purely as plain text, while safely rebuilding tables
     # ------------------------------------------------------------------
 
     def paste_content_text_only(self, content, after, index):
         """
-        The absolute safest pasting method: "Keep Text Only".
-        Extracts raw text strings from the source paragraphs and builds 
-        brand-new, clean XML elements. It will perfectly inherit the 
-        default style of wherever it is pasted. Zero risk of corruption.
+        Safely extracts raw text. If the element is a paragraph, it pastes 
+        as clean text. If the element is a table, it builds a brand-new table 
+        with basic borders to preserve the grid without risking corruption.
         """
         self.move_cursor(to=after)
         if self._cursor is None:
@@ -16,40 +15,82 @@
         w = self._doc.nsmap.get('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main')
 
         for c in content['data']:
-            # 1. EXTRACT PURE TEXT
-            # .itertext() loops through all <w:t> tags in the source paragraph 
-            # and grabs just the readable text strings, ignoring all formatting.
-            raw_text = "".join(c.itertext())
-
-            # Optional: Skip totally empty paragraphs if you don't want extra spacing
-            if not raw_text.strip():
-                continue
-
-            # 2. ESCAPE THE TEXT 
-            # Protect against XML characters like <, >, and & inside the text itself
-            safe_text = escape(raw_text)
-
-            # 3. BUILD A BRAND NEW, CLEAN PARAGRAPH
-            # By omitting <w:pStyle>, this paragraph will automatically act as "Normal" 
-            # or inherit the style of the paragraph immediately preceding it.
-            elem_xml = (
-                f'<w:p xmlns:w="{w}">'
-                f'<w:r>'
-                f'<w:t xml:space="preserve">{safe_text}</w:t>'
-                f'</w:r>'
-                f'</w:p>'
-            )
-            new_para = etree.fromstring(elem_xml)
-
-            # 4. INSERT INTO DOCUMENT
-            self._cursor.addnext(new_para)
             
-            # Advance the cursor so the next paragraph pastes after this new one
-            self._cursor = new_para 
+            # ==========================================
+            # SCENARIO 1: IT IS A TABLE
+            # ==========================================
+            if c.tag == f'{{{w}}}tbl':
+                # Create a clean, empty table
+                new_tbl = etree.Element(f'{{{w}}}tbl')
+                
+                # Add basic borders (a simple black outline/grid)
+                borders_xml = (
+                    f'<w:tblPr xmlns:w="{w}">'
+                    f'<w:tblBorders>'
+                    f'<w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+                    f'<w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+                    f'<w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+                    f'<w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+                    f'<w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+                    f'<w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+                    f'</w:tblBorders>'
+                    f'</w:tblPr>'
+                )
+                new_tbl.append(etree.fromstring(borders_xml))
 
-        # 5. SAVE
-        # Because we generated 100% clean XML, we do not need to update styles, 
-        # numbering, relationships, or index at all. Just write the document.xml.
+                # Loop through the old rows and cells to rebuild them
+                for row in c.findall(f'.//{{{w}}}tr'):
+                    new_row = etree.Element(f'{{{w}}}tr')
+                    
+                    for cell in row.findall(f'.//{{{w}}}tc'):
+                        new_cell = etree.Element(f'{{{w}}}tc')
+                        
+                        # Extract paragraphs inside this specific cell
+                        paras = cell.findall(f'.//{{{w}}}p')
+                        
+                        if not paras:
+                            # Word requires every cell to have at least one empty paragraph
+                            new_cell.append(etree.fromstring(f'<w:p xmlns:w="{w}"/>'))
+                        else:
+                            for p in paras:
+                                raw_text = "".join(p.itertext())
+                                safe_text = escape(raw_text)
+                                p_xml = (
+                                    f'<w:p xmlns:w="{w}">'
+                                    f'<w:r><w:t xml:space="preserve">{safe_text}</w:t></w:r>'
+                                    f'</w:p>'
+                                )
+                                new_cell.append(etree.fromstring(p_xml))
+                                
+                        new_row.append(new_cell)
+                
+                    new_tbl.append(new_row)
+                
+                self._cursor.addnext(new_tbl)
+                self._cursor = new_tbl
+
+            # ==========================================
+            # SCENARIO 2: IT IS A REGULAR PARAGRAPH
+            # ==========================================
+            else:
+                raw_text = "".join(c.itertext())
+                
+                # Skip completely empty paragraph blocks to prevent awkward spacing
+                if not raw_text.strip():
+                    continue
+
+                safe_text = escape(raw_text)
+                elem_xml = (
+                    f'<w:p xmlns:w="{w}">'
+                    f'<w:r><w:t xml:space="preserve">{safe_text}</w:t></w:r>'
+                    f'</w:p>'
+                )
+                new_para = etree.fromstring(elem_xml)
+
+                self._cursor.addnext(new_para)
+                self._cursor = new_para 
+
+        # Save the finalized document.xml
         etree.ElementTree(self._doc).write(
             os.path.join(self._path, 'word', 'document.xml'),
             **_XML_WRITE_KWARGS,
