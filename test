@@ -1,1 +1,56 @@
-AI/ML Engineer specializing in Generative AI, LLMs, RAG pipelines, NLP, and MLOps. Experienced in building scalable Al systems using LangChain, LangGraph, FastAPI, PyTorch, and Transformer models. Skilled in enterprise document intelligence, knowledge graph retrieval, distributed training, and production-grade Al application development.
+    # ------------------------------------------------------------------
+    # Paste purely as plain text to inherit destination styling
+    # ------------------------------------------------------------------
+
+    def paste_content_text_only(self, content, after, index):
+        """
+        The absolute safest pasting method: "Keep Text Only".
+        Extracts raw text strings from the source paragraphs and builds 
+        brand-new, clean XML elements. It will perfectly inherit the 
+        default style of wherever it is pasted. Zero risk of corruption.
+        """
+        self.move_cursor(to=after)
+        if self._cursor is None:
+            return
+
+        w = self._doc.nsmap.get('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main')
+
+        for c in content['data']:
+            # 1. EXTRACT PURE TEXT
+            # .itertext() loops through all <w:t> tags in the source paragraph 
+            # and grabs just the readable text strings, ignoring all formatting.
+            raw_text = "".join(c.itertext())
+
+            # Optional: Skip totally empty paragraphs if you don't want extra spacing
+            if not raw_text.strip():
+                continue
+
+            # 2. ESCAPE THE TEXT 
+            # Protect against XML characters like <, >, and & inside the text itself
+            safe_text = escape(raw_text)
+
+            # 3. BUILD A BRAND NEW, CLEAN PARAGRAPH
+            # By omitting <w:pStyle>, this paragraph will automatically act as "Normal" 
+            # or inherit the style of the paragraph immediately preceding it.
+            elem_xml = (
+                f'<w:p xmlns:w="{w}">'
+                f'<w:r>'
+                f'<w:t xml:space="preserve">{safe_text}</w:t>'
+                f'</w:r>'
+                f'</w:p>'
+            )
+            new_para = etree.fromstring(elem_xml)
+
+            # 4. INSERT INTO DOCUMENT
+            self._cursor.addnext(new_para)
+            
+            # Advance the cursor so the next paragraph pastes after this new one
+            self._cursor = new_para 
+
+        # 5. SAVE
+        # Because we generated 100% clean XML, we do not need to update styles, 
+        # numbering, relationships, or index at all. Just write the document.xml.
+        etree.ElementTree(self._doc).write(
+            os.path.join(self._path, 'word', 'document.xml'),
+            **_XML_WRITE_KWARGS,
+        )
