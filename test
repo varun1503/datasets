@@ -1,12 +1,12 @@
     # ------------------------------------------------------------------
-    # Paste purely as plain text, safely rebuild tables, and bold headings
+    # Paste purely as plain text, while safely rebuilding tables
     # ------------------------------------------------------------------
 
     def paste_content_text_only(self, content, after, index):
         """
-        Safely extracts raw text. Rebuilds tables to preserve layout.
-        Detects if a source paragraph was a heading/subheading and 
-        applies standard bold formatting to the new clean text.
+        Safely extracts raw text. If the element is a paragraph, it pastes 
+        as clean text. If the element is a table, it builds a brand-new table 
+        with basic borders to preserve the grid without risking corruption.
         """
         self.move_cursor(to=after)
         if self._cursor is None:
@@ -20,8 +20,10 @@
             # SCENARIO 1: IT IS A TABLE
             # ==========================================
             if c.tag == f'{{{w}}}tbl':
+                # Create a clean, empty table
                 new_tbl = etree.Element(f'{{{w}}}tbl')
                 
+                # Add basic borders (a simple black outline/grid)
                 borders_xml = (
                     f'<w:tblPr xmlns:w="{w}">'
                     f'<w:tblBorders>'
@@ -36,37 +38,26 @@
                 )
                 new_tbl.append(etree.fromstring(borders_xml))
 
+                # Loop through the old rows and cells to rebuild them
                 for row in c.findall(f'.//{{{w}}}tr'):
                     new_row = etree.Element(f'{{{w}}}tr')
                     
                     for cell in row.findall(f'.//{{{w}}}tc'):
                         new_cell = etree.Element(f'{{{w}}}tc')
+                        
+                        # Extract paragraphs inside this specific cell
                         paras = cell.findall(f'.//{{{w}}}p')
                         
                         if not paras:
+                            # Word requires every cell to have at least one empty paragraph
                             new_cell.append(etree.fromstring(f'<w:p xmlns:w="{w}"/>'))
                         else:
                             for p in paras:
                                 raw_text = "".join(p.itertext())
-                                if not raw_text.strip():
-                                    continue
-                                
                                 safe_text = escape(raw_text)
-                                
-                                # Check if it's a heading inside the table
-                                is_heading = False
-                                p_style = p.find(f'.//{{{w}}}pStyle')
-                                if p_style is not None and 'heading' in p_style.get(f'{{{w}}}val', '').lower():
-                                    is_heading = True
-                                
-                                bold_tag = '<w:rPr><w:b/></w:rPr>' if is_heading else ''
-                                
                                 p_xml = (
                                     f'<w:p xmlns:w="{w}">'
-                                    f'<w:r>'
-                                    f'{bold_tag}'
-                                    f'<w:t xml:space="preserve">{safe_text}</w:t>'
-                                    f'</w:r>'
+                                    f'<w:r><w:t xml:space="preserve">{safe_text}</w:t></w:r>'
                                     f'</w:p>'
                                 )
                                 new_cell.append(etree.fromstring(p_xml))
@@ -83,26 +74,15 @@
             # ==========================================
             else:
                 raw_text = "".join(c.itertext())
+                
+                # Skip completely empty paragraph blocks to prevent awkward spacing
                 if not raw_text.strip():
                     continue
 
                 safe_text = escape(raw_text)
-                
-                # Check if the original paragraph was a heading
-                is_heading = False
-                p_style = c.find(f'.//{{{w}}}pStyle')
-                if p_style is not None and 'heading' in p_style.get(f'{{{w}}}val', '').lower():
-                    is_heading = True
-                
-                # If it's a heading, inject the bold run property (<w:b/>)
-                bold_tag = '<w:rPr><w:b/></w:rPr>' if is_heading else ''
-                
                 elem_xml = (
                     f'<w:p xmlns:w="{w}">'
-                    f'<w:r>'
-                    f'{bold_tag}'
-                    f'<w:t xml:space="preserve">{safe_text}</w:t>'
-                    f'</w:r>'
+                    f'<w:r><w:t xml:space="preserve">{safe_text}</w:t></w:r>'
                     f'</w:p>'
                 )
                 new_para = etree.fromstring(elem_xml)
