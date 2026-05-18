@@ -1,12 +1,8 @@
-    # ------------------------------------------------------------------
-    # Paste purely as plain text, while safely rebuilding tables
-    # ------------------------------------------------------------------
-
     def paste_content_text_only(self, content, after, index):
         """
-        Safely extracts raw text. If the element is a paragraph, it pastes 
-        as clean text. If the element is a table, it builds a brand-new table 
-        with basic borders to preserve the grid without risking corruption.
+        Safely extracts text, rebuilds tables, and safely preserves 
+        basic formatting (Bold, Italic, Underline, and Alignment) 
+        without copying dangerous IDs or styles.
         """
         self.move_cursor(to=after)
         if self._cursor is None:
@@ -14,16 +10,73 @@
 
         w = self._doc.nsmap.get('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main')
 
-        for c in content['data']:
+        def build_safe_paragraph(old_p):
+            """Helper function to build a 100% clean paragraph with safe formatting"""
+            new_p = etree.Element(f'{{{w}}}p')
             
-            # ==========================================
-            # SCENARIO 1: IT IS A TABLE
-            # ==========================================
+            # 1. SAFELY COPY ALIGNMENT (Centered, Right, Justified)
+            jc = old_p.find(f'.//{{{w}}}pPr/{{{w}}}jc')
+            if jc is not None:
+                pPr = etree.Element(f'{{{w}}}pPr')
+                new_jc = etree.Element(f'{{{w}}}jc')
+                new_jc.set(f'{{{w}}}val', jc.get(f'{{{w}}}val'))
+                pPr.append(new_jc)
+                new_p.append(pPr)
+
+            # 2. SAFELY COPY INLINE FORMATTING (Bold, Italic, Underline)
+            # We loop through each 'run' of text to preserve specific formatted words
+            runs = old_p.findall(f'.//{{{w}}}r')
+            for r in runs:
+                text_elem = r.find(f'.//{{{w}}}t')
+                if text_elem is None or not text_elem.text:
+                    continue
+                
+                safe_text = escape(text_elem.text)
+                new_r = etree.Element(f'{{{w}}}r')
+                
+                # Check original run properties
+                rPr = r.find(f'.//{{{w}}}rPr')
+                if rPr is not None:
+                    new_rPr = etree.Element(f'{{{w}}}rPr')
+                    has_format = False
+                    
+                    # Check Bold
+                    if rPr.find(f'.//{{{w}}}b') is not None:
+                        new_rPr.append(etree.Element(f'{{{w}}}b'))
+                        has_format = True
+                        
+                    # Check Italic
+                    if rPr.find(f'.//{{{w}}}i') is not None:
+                        new_rPr.append(etree.Element(f'{{{w}}}i'))
+                        has_format = True
+                        
+                    # Check Underline
+                    u = rPr.find(f'.//{{{w}}}u')
+                    if u is not None:
+                        new_u = etree.Element(f'{{{w}}}u')
+                        new_u.set(f'{{{w}}}val', u.get(f'{{{w}}}val', 'single'))
+                        new_rPr.append(new_u)
+                        has_format = True
+
+                    if has_format:
+                        new_r.append(new_rPr)
+                
+                # Add text to the run
+                t = etree.Element(f'{{{w}}}t')
+                t.set('xml:space', 'preserve')
+                t.text = text_elem.text # etree handles escaping automatically when assigning to .text
+                new_r.append(t)
+                
+                new_p.append(new_r)
+                
+            return new_p
+
+        # --- Main Loop ---
+        for c in content['data']:
             if c.tag == f'{{{w}}}tbl':
-                # Create a clean, empty table
                 new_tbl = etree.Element(f'{{{w}}}tbl')
                 
-                # Add basic borders (a simple black outline/grid)
+                # Table Borders
                 borders_xml = (
                     f'<w:tblPr xmlns:w="{w}">'
                     f'<w:tblBorders>'
@@ -33,64 +86,47 @@
                     f'<w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
                     f'<w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
                     f'<w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
-                    f'</w:tblBorders>'
-                    f'</w:tblPr>'
+                    </w:tblBorders>'
+                    </w:tblPr>'
                 )
                 new_tbl.append(etree.fromstring(borders_xml))
 
-                # Loop through the old rows and cells to rebuild them
+                # Rebuild Table Cells
                 for row in c.findall(f'.//{{{w}}}tr'):
                     new_row = etree.Element(f'{{{w}}}tr')
-                    
                     for cell in row.findall(f'.//{{{w}}}tc'):
                         new_cell = etree.Element(f'{{{w}}}tc')
-                        
-                        # Extract paragraphs inside this specific cell
                         paras = cell.findall(f'.//{{{w}}}p')
                         
                         if not paras:
-                            # Word requires every cell to have at least one empty paragraph
                             new_cell.append(etree.fromstring(f'<w:p xmlns:w="{w}"/>'))
                         else:
                             for p in paras:
-                                raw_text = "".join(p.itertext())
-                                safe_text = escape(raw_text)
-                                p_xml = (
-                                    f'<w:p xmlns:w="{w}">'
-                                    f'<w:r><w:t xml:space="preserve">{safe_text}</w:t></w:r>'
-                                    f'</w:p>'
-                                )
-                                new_cell.append(etree.fromstring(p_xml))
+                                clean_p = build_safe_paragraph(p)
+                                # Only add if it actually has text runs inside it
+                                if len(clean_p.findall(f'.//{{{w}}}r')) > 0:
+                                    new_cell.append(clean_p)
+                                else:
+                                    # Provide an empty paragraph if it was blank
+                                    new_cell.append(etree.fromstring(f'<w:p xmlns:w="{w}"/>'))
                                 
                         new_row.append(new_cell)
-                
                     new_tbl.append(new_row)
                 
                 self._cursor.addnext(new_tbl)
                 self._cursor = new_tbl
 
-            # ==========================================
-            # SCENARIO 2: IT IS A REGULAR PARAGRAPH
-            # ==========================================
             else:
-                raw_text = "".join(c.itertext())
+                # Regular Paragraphs
+                clean_p = build_safe_paragraph(c)
                 
-                # Skip completely empty paragraph blocks to prevent awkward spacing
-                if not raw_text.strip():
+                # Skip empty paragraphs to avoid weird spacing
+                if len(clean_p.findall(f'.//{{{w}}}r')) == 0:
                     continue
 
-                safe_text = escape(raw_text)
-                elem_xml = (
-                    f'<w:p xmlns:w="{w}">'
-                    f'<w:r><w:t xml:space="preserve">{safe_text}</w:t></w:r>'
-                    f'</w:p>'
-                )
-                new_para = etree.fromstring(elem_xml)
+                self._cursor.addnext(clean_p)
+                self._cursor = clean_p 
 
-                self._cursor.addnext(new_para)
-                self._cursor = new_para 
-
-        # Save the finalized document.xml
         etree.ElementTree(self._doc).write(
             os.path.join(self._path, 'word', 'document.xml'),
             **_XML_WRITE_KWARGS,
