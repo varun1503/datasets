@@ -1,43 +1,133 @@
-    # ------------------------------------------------------------------
-    # Auto-Router: Chooses between Full Paste and Text-Only Paste
-    # ------------------------------------------------------------------
+    def paste_content_text_only(self, content, after, index):
+        """
+        Safely extracts text, rebuilds tables, and safely preserves 
+        basic formatting (Bold, Italic, Underline, and Alignment) 
+        without copying dangerous IDs or styles.
+        """
+        self.move_cursor(to=after)
+        if self._cursor is None:
+            return
 
-    def paste_content_auto(self, content, after, index):
-        """
-        Pre-scans the section's XML. If it detects tags that are notorious 
-        for causing Word corruption (images, charts, hyperlinks, objects), 
-        it safely falls back to paste_content_text_only. 
-        Otherwise, it runs the standard paste_content.
-        """
         w = self._doc.nsmap.get('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main')
-        
-        # 1. Define the "Red Flags" that cause Word to corrupt
-        dangerous_tags = [
-            f'{{{w}}}drawing',          # Charts and modern images
-            f'{{{w}}}pict',             # Older shapes and VML images
-            f'{{{w}}}object',           # Embedded files (like Excel or PDF)
-            f'{{{w}}}hyperlink',        # Web links that require a .rels ID
-            f'{{{w}}}commentReference'  # Comments linked to other users
-        ]
-        
-        might_corrupt = False
-        
-        # 2. Pre-scan all paragraphs in this section
-        for c in content['data']:
-            for tag in dangerous_tags:
-                if c.find(f'.//{tag}') is not None:
-                    might_corrupt = True
-                    break  # Stop checking this paragraph
-            
-            if might_corrupt:
-                break  # Stop checking the rest of the section, we know it's dangerous
 
-        # 3. Route to the appropriate function based on the scan
-        if might_corrupt:
-            # Danger detected: Fall back to the safe text-only/table rebuild method
-            print(f"⚠️ Risk detected near '{after}'. Falling back to Text-Only paste.")
-            self.paste_content_text_only(content, after, index)
-        else:
-            # Safe section: Proceed with the standard full-format paste
-            print(f"✅ Safe section near '{after}'. Using Standard paste.")
-            self.paste_content(content, after, index)
+        def build_safe_paragraph(old_p):
+            """Helper function to build a 100% clean paragraph with safe formatting"""
+            new_p = etree.Element(f'{{{w}}}p')
+            
+            # 1. SAFELY COPY ALIGNMENT (Centered, Right, Justified)
+            jc = old_p.find(f'.//{{{w}}}pPr/{{{w}}}jc')
+            if jc is not None:
+                pPr = etree.Element(f'{{{w}}}pPr')
+                new_jc = etree.Element(f'{{{w}}}jc')
+                new_jc.set(f'{{{w}}}val', jc.get(f'{{{w}}}val'))
+                pPr.append(new_jc)
+                new_p.append(pPr)
+
+            # 2. SAFELY COPY INLINE FORMATTING (Bold, Italic, Underline)
+            # We loop through each 'run' of text to preserve specific formatted words
+            runs = old_p.findall(f'.//{{{w}}}r')
+            for r in runs:
+                text_elem = r.find(f'.//{{{w}}}t')
+                if text_elem is None or not text_elem.text:
+                    continue
+                
+                safe_text = escape(text_elem.text)
+                new_r = etree.Element(f'{{{w}}}r')
+                
+                # Check original run properties
+                rPr = r.find(f'.//{{{w}}}rPr')
+                if rPr is not None:
+                    new_rPr = etree.Element(f'{{{w}}}rPr')
+                    has_format = False
+                    
+                    # Check Bold
+                    if rPr.find(f'.//{{{w}}}b') is not None:
+                        new_rPr.append(etree.Element(f'{{{w}}}b'))
+                        has_format = True
+                        
+                    # Check Italic
+                    if rPr.find(f'.//{{{w}}}i') is not None:
+                        new_rPr.append(etree.Element(f'{{{w}}}i'))
+                        has_format = True
+                        
+                    # Check Underline
+                    u = rPr.find(f'.//{{{w}}}u')
+                    if u is not None:
+                        new_u = etree.Element(f'{{{w}}}u')
+                        new_u.set(f'{{{w}}}val', u.get(f'{{{w}}}val', 'single'))
+                        new_rPr.append(new_u)
+                        has_format = True
+
+                    if has_format:
+                        new_r.append(new_rPr)
+                
+                # Add text to the run
+                t = etree.Element(f'{{{w}}}t')
+                t.set('xml:space', 'preserve')
+                t.text = text_elem.text # etree handles escaping automatically when assigning to .text
+                new_r.append(t)
+                
+                new_p.append(new_r)
+                
+            return new_p
+
+        # --- Main Loop ---
+        for c in content['data']:
+            if c.tag == f'{{{w}}}tbl':
+                new_tbl = etree.Element(f'{{{w}}}tbl')
+                
+                # Table Borders
+                borders_xml = (
+                    f'<w:tblPr xmlns:w="{w}">'
+                    f'<w:tblBorders>'
+                    f'<w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+                    f'<w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+                    f'<w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+                    f'<w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+                    f'<w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+                    f'<w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+                    </w:tblBorders>'
+                    </w:tblPr>'
+                )
+                new_tbl.append(etree.fromstring(borders_xml))
+
+                # Rebuild Table Cells
+                for row in c.findall(f'.//{{{w}}}tr'):
+                    new_row = etree.Element(f'{{{w}}}tr')
+                    for cell in row.findall(f'.//{{{w}}}tc'):
+                        new_cell = etree.Element(f'{{{w}}}tc')
+                        paras = cell.findall(f'.//{{{w}}}p')
+                        
+                        if not paras:
+                            new_cell.append(etree.fromstring(f'<w:p xmlns:w="{w}"/>'))
+                        else:
+                            for p in paras:
+                                clean_p = build_safe_paragraph(p)
+                                # Only add if it actually has text runs inside it
+                                if len(clean_p.findall(f'.//{{{w}}}r')) > 0:
+                                    new_cell.append(clean_p)
+                                else:
+                                    # Provide an empty paragraph if it was blank
+                                    new_cell.append(etree.fromstring(f'<w:p xmlns:w="{w}"/>'))
+                                
+                        new_row.append(new_cell)
+                    new_tbl.append(new_row)
+                
+                self._cursor.addnext(new_tbl)
+                self._cursor = new_tbl
+
+            else:
+                # Regular Paragraphs
+                clean_p = build_safe_paragraph(c)
+                
+                # Skip empty paragraphs to avoid weird spacing
+                if len(clean_p.findall(f'.//{{{w}}}r')) == 0:
+                    continue
+
+                self._cursor.addnext(clean_p)
+                self._cursor = clean_p 
+
+        etree.ElementTree(self._doc).write(
+            os.path.join(self._path, 'word', 'document.xml'),
+            **_XML_WRITE_KWARGS,
+        )
