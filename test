@@ -1,163 +1,43 @@
     # ------------------------------------------------------------------
-    # Hybrid Paste: Exact source copy for safe text, Text-Only for dangerous elements
+    # Auto-Router: Chooses between Full Paste and Text-Only Paste
     # ------------------------------------------------------------------
-# To this:
-t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
 
-    def paste_content_hybrid(self, content, after, index):
+    def paste_content_auto(self, content, after, index):
         """
-        Scans incoming elements. If it detects a Table, Chart, Image, or 
-        Embedded Object, it uses the safe 'Text Only' rebuild. 
-        Otherwise, it pastes the original XML exactly as it was.
+        Pre-scans the section's XML. If it detects tags that are notorious 
+        for causing Word corruption (images, charts, hyperlinks, objects), 
+        it safely falls back to paste_content_text_only. 
+        Otherwise, it runs the standard paste_content.
         """
-        self.move_cursor(to=after)
-        if self._cursor is None:
-            return
-
         w = self._doc.nsmap.get('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main')
-
-        def build_safe_paragraph(old_p):
-            """Helper to rebuild dangerous paragraphs safely"""
-            new_p = etree.Element(f'{{{w}}}p')
-            
-            # Copy alignment
-            jc = old_p.find(f'.//{{{w}}}pPr/{{{w}}}jc')
-            if jc is not None:
-                pPr = etree.Element(f'{{{w}}}pPr')
-                new_jc = etree.Element(f'{{{w}}}jc')
-                new_jc.set(f'{{{w}}}val', jc.get(f'{{{w}}}val'))
-                pPr.append(new_jc)
-                new_p.append(pPr)
-
-            # Rebuild runs to keep bold/italic/underline
-            runs = old_p.findall(f'.//{{{w}}}r')
-            for r in runs:
-                text_elem = r.find(f'.//{{{w}}}t')
-                if text_elem is None or not text_elem.text:
-                    continue
-                
-                new_r = etree.Element(f'{{{w}}}r')
-                rPr = r.find(f'.//{{{w}}}rPr')
-                if rPr is not None:
-                    new_rPr = etree.Element(f'{{{w}}}rPr')
-                    has_format = False
-                    
-                    for fmt in ['b', 'i']:
-                        if rPr.find(f'.//{{{w}}}{fmt}') is not None:
-                            new_rPr.append(etree.Element(f'{{{w}}}{fmt}'))
-                            has_format = True
-                            
-                    u = rPr.find(f'.//{{{w}}}u')
-                    if u is not None:
-                        new_u = etree.Element(f'{{{w}}}u')
-                        new_u.set(f'{{{w}}}val', u.get(f'{{{w}}}val', 'single'))
-                        new_rPr.append(new_u)
-                        has_format = True
-
-                    if has_format:
-                        new_r.append(new_rPr)
-                
-                t = etree.Element(f'{{{w}}}t')
-                t.set('xml:space', 'preserve')
-                t.text = text_elem.text 
-                new_r.append(t)
-                new_p.append(new_r)
-                
-            return new_p
-
-        # --- Main Logic ---
         
-        # Tags that require us to use the safe text-only fallback
+        # 1. Define the "Red Flags" that cause Word to corrupt
         dangerous_tags = [
-            f'{{{w}}}drawing',    # Charts and modern images
-            f'{{{w}}}pict',       # VML images/shapes
-            f'{{{w}}}object',     # Embedded Excel/PDF files
-            f'{{{w}}}hyperlink'   # Links requiring external rId
+            f'{{{w}}}drawing',          # Charts and modern images
+            f'{{{w}}}pict',             # Older shapes and VML images
+            f'{{{w}}}object',           # Embedded files (like Excel or PDF)
+            f'{{{w}}}hyperlink',        # Web links that require a .rels ID
+            f'{{{w}}}commentReference'  # Comments linked to other users
         ]
-
+        
+        might_corrupt = False
+        
+        # 2. Pre-scan all paragraphs in this section
         for c in content['data']:
-            is_dangerous = False
+            for tag in dangerous_tags:
+                if c.find(f'.//{tag}') is not None:
+                    might_corrupt = True
+                    break  # Stop checking this paragraph
+            
+            if might_corrupt:
+                break  # Stop checking the rest of the section, we know it's dangerous
 
-            # Check 1: Is the whole block a table?
-            if c.tag == f'{{{w}}}tbl':
-                is_dangerous = True
-            else:
-                # Check 2: Does the paragraph contain any dangerous tags?
-                for tag in dangerous_tags:
-                    if c.find(f'.//{tag}') is not None:
-                        is_dangerous = True
-                        break
-
-            # ==========================================
-            # PATH A: DANGEROUS ELEMENT DETECTED -> SAFE REBUILD
-            # ==========================================
-            if is_dangerous:
-                if c.tag == f'{{{w}}}tbl':
-                    # Safely rebuild the table layout
-                    new_tbl = etree.Element(f'{{{w}}}tbl')
-                    borders_xml = (
-                        f'<w:tblPr xmlns:w="{w}"><w:tblBorders>'
-                        f'<w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
-                        f'<w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
-                        f'<w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
-                        f'<w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
-                        f'<w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
-                        f'<w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
-                        f'</w:tblBorders></w:tblPr>'
-                    )
-                    new_tbl.append(etree.fromstring(borders_xml))
-
-                    for row in c.findall(f'.//{{{w}}}tr'):
-                        new_row = etree.Element(f'{{{w}}}tr')
-                        for cell in row.findall(f'.//{{{w}}}tc'):
-                            new_cell = etree.Element(f'{{{w}}}tc')
-                            paras = cell.findall(f'.//{{{w}}}p')
-                            
-                            if not paras:
-                                new_cell.append(etree.fromstring(f'<w:p xmlns:w="{w}"/>'))
-                            else:
-                                for p in paras:
-                                    clean_p = build_safe_paragraph(p)
-                                    if len(clean_p.findall(f'.//{{{w}}}r')) > 0:
-                                        new_cell.append(clean_p)
-                                    else:
-                                        new_cell.append(etree.fromstring(f'<w:p xmlns:w="{w}"/>'))
-                            new_row.append(new_cell)
-                        new_tbl.append(new_row)
-                    
-                    self._cursor.addnext(new_tbl)
-                    self._cursor = new_tbl
-
-                else:
-                    # Safely rebuild the paragraph
-                    clean_p = build_safe_paragraph(c)
-                    if len(clean_p.findall(f'.//{{{w}}}r')) > 0:
-                        self._cursor.addnext(clean_p)
-                        self._cursor = clean_p 
-
-            # ==========================================
-            # PATH B: SAFE ELEMENT -> EXACT SOURCE COPY
-            # ==========================================
-            else:
-                # We do one tiny safety check: Strip bookmarks. 
-                # Bookmarks are invisible, but exact ID collisions crash the file.
-                etree.strip_elements(c, f'{{{w}}}bookmarkStart', with_tail=False)
-                etree.strip_elements(c, f'{{{w}}}bookmarkEnd', with_tail=False)
-                
-                self._cursor.addnext(c)
-                self._cursor = c
-
-        # ------------------------------------------------------------------
-        # Post-Paste Updates
-        # Because we allowed "Exact Source Copies" through for normal text,
-        # we must update the styles and numbering so those paragraphs render correctly.
-        # ------------------------------------------------------------------
-        self.update_styles(content)
-        self.update_numbering(content, index)
-        self.update_index(content, index)
-
-        # Write to file
-        etree.ElementTree(self._doc).write(
-            os.path.join(self._path, 'word', 'document.xml'),
-            **_XML_WRITE_KWARGS,
-        )
+        # 3. Route to the appropriate function based on the scan
+        if might_corrupt:
+            # Danger detected: Fall back to the safe text-only/table rebuild method
+            print(f"⚠️ Risk detected near '{after}'. Falling back to Text-Only paste.")
+            self.paste_content_text_only(content, after, index)
+        else:
+            # Safe section: Proceed with the standard full-format paste
+            print(f"✅ Safe section near '{after}'. Using Standard paste.")
+            self.paste_content(content, after, index)
