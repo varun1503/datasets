@@ -1,29 +1,29 @@
-from lxml import etree
-import difflib
-
-def find_xml_bug(broken_xml_path, repaired_xml_path):
-    print("🔍 Scanning for corrupted tags...\n")
-    
-    # 1. Load and automatically format both XML files
-    parser = etree.XMLParser(remove_blank_text=True)
-    broken_tree = etree.parse(broken_xml_path, parser)
-    repaired_tree = etree.parse(repaired_xml_path, parser)
-
-    broken_lines = etree.tostring(broken_tree, pretty_print=True, encoding='unicode').splitlines()
-    repaired_lines = etree.tostring(repaired_tree, pretty_print=True, encoding='unicode').splitlines()
-
-    # 2. Compare them and print only what Word deleted
-    found_bug = False
-    for line in difflib.unified_diff(broken_lines, repaired_lines, n=0):
-        if line.startswith('- ') and not line.startswith('---'):
-            print(f"❌ Word Deleted this tag: {line.strip()}")
-            found_bug = True
+    def move_cursor(self, to):
+        """
+        Moves the cursor to the paragraph containing the specific text.
+        Crucially, it ensures we NEVER place the cursor inside or after 
+        a master <w:sectPr> tag, which protects the headers and footers.
+        """
+        w = self._doc.nsmap.get('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main')
+        
+        # Find the paragraph that contains our target text
+        for p in self._doc.findall(f'.//{{{w}}}p'):
+            texts = p.findall(f'.//{{{w}}}t')
+            p_text = "".join([t.text for t in texts if t.text])
             
-    if not found_bug:
-        print("✅ No differences found in this file.")
-
-# --- PUT YOUR FILE PATHS HERE ---
-broken_path = r"C:\path\to\your\broken_folder\word\document.xml"
-repaired_path = r"C:\path\to\your\repaired_folder\word\document.xml"
-
-find_xml_bug(broken_path, repaired_path)
+            if to in p_text:
+                self._cursor = p
+                
+                # THE SHIELD: If this paragraph contains a section break, 
+                # or is the very last paragraph of the document containing the master sectPr,
+                # we must insert our new content BEFORE it, not after it.
+                if p.find(f'.//{{{w}}}sectPr') is not None:
+                    # We create a safe empty paragraph before the section break
+                    # and move our cursor there.
+                    safe_p = etree.Element(f'{{{w}}}p')
+                    p.addprevious(safe_p)
+                    self._cursor = safe_p
+                    
+                return
+                
+        self._cursor = None
