@@ -1,44 +1,44 @@
-    # ------------------------------------------------------------------
-    # MAIN 2: Paste with Media (Now with Bookmark/Hyperlink safety)
-    # ------------------------------------------------------------------
-    def paste_content_with_media(self, content, after, index):
+    def put_relationships(self, content, index):
         """
-        Pastes exact XML but strictly remaps media IDs to prevent corruption.
-        Safely removes Bookmarks and Hyperlinks which are silent corruptors.
+        Inserts relationship entries into document.xml.rels.
+        Strictly filters out hyperlinks to prevent applewebdata corruption.
         """
-        self.move_cursor(to=after)
-        if self._cursor is None:
-            return
+        rels_path = os.path.join(self._path, 'word', '_rels', 'document.xml.rels')
+        reldoc = etree.parse(rels_path).getroot()
 
-        # Get the WordprocessingML namespace
-        w = self._doc.nsmap.get('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main')
+        for relation in content['rels']:
+            # --- THE NEW FIX: BLOCK HYPERLINKS ---
+            rel_type = relation['ref'].get('Type', '').lower()
+            if 'hyperlink' in rel_type:
+                continue  # Skip this completely!
+            # -------------------------------------
 
-        for c in content['data']:
-            # --- THE NEW SAFETY CHECKS ---
-            
-            # 1. Strip Bookmarks (Prevents integer ID collisions across documents)
-            etree.strip_elements(c, f'{{{w}}}bookmarkStart', with_tail=False)
-            etree.strip_elements(c, f'{{{w}}}bookmarkEnd', with_tail=False)
-            
-            # 2. Strip Hyperlinks (Removes the broken rId requirement, but keeps the text)
-            etree.strip_tags(c, f'{{{w}}}hyperlink')
+            val = relation['id'] + 'c' + index
+            relation['elem'].set(relation['key'], val)
 
-            # -----------------------------
+            # Already present – skip
+            if reldoc.find(f'./*[@Id="{val}"]') is not None:
+                continue
 
-            # Remap the image/chart IDs before pasting
-            safe_c = self._remap_media_ids(c, index)
-            
-            self._cursor.addnext(safe_c)
-            self._cursor = safe_c
+            relation['ref'].set('Id', val)
+            reldoc.append(relation['ref'])
 
-        # IMPORTANT: Make sure your put_relationships function is still in your 
-        # class! We need it for the images and charts to actually load!
-        self.put_relationships(content, index)  
-        self.update_styles(content)
-        self.update_numbering(content, index)
-        self.update_index(content, index)
+            if relation['ref'].get('TargetMode') != 'External':
+                orig_target = relation['ref'].get('Target')
+                new_target = (
+                    posixpath.dirname(orig_target)
+                    + f'/copy{index}_'
+                    + posixpath.basename(orig_target)
+                )
+                relation['ref'].set('Target', new_target)
 
-        etree.ElementTree(self._doc).write(
-            os.path.join(self._path, 'word', 'document.xml'),
-            **_XML_WRITE_KWARGS,
-        )
+                target_fs = os.path.join(
+                    self._path, 'word',
+                    *new_target.lstrip('/').split('/')
+                )
+                
+                # Only copy the file if the source actually exists
+                if os.path.exists(relation['source']):
+                    copy_file(relation['source'], target_fs)
+
+        etree.ElementTree(reldoc).write(rels_path, **_XML_WRITE_KWARGS)
