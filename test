@@ -1,402 +1,53 @@
-import os
-import posixpath
-import zipfile
-import copy
-import shutil
-from html import escape
-from lxml import etree
-
-# Standard kwargs for writing XML without breaking Word's formatting
-_XML_WRITE_KWARGS = {
-    'encoding': 'UTF-8',
-    'xml_declaration': True,
-    'standalone': 'yes'
-}
-
-def copy_file(src, dst):
-    """Helper function to copy media files and create directories if needed."""
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
-    shutil.copyfile(src, dst)
-
-# Assuming Document1 is imported from your base module
-# from your_module import Document1
-
-class ValReport(Document1):
-    def __init__(self, filepath, report='main') -> None:
-        super().__init__(filepath)
-        self._type = report
-
     # ==================================================================
-    # 1. THE SMART ROUTER
+    # 6. TEXT INSERTION UTILITY
     # ==================================================================
-    
-    def paste_content_auto(self, content, after, index):
+
+    def put_text(self, text, after, color=None):
         """
-        Scans the section for unrecoverable OLE objects. If safe, it pastes 
-        full formatting and media. If dangerous, it falls back to strict Text-Only.
+        Inserts a new paragraph of text into the document after a specific anchor.
+        Can optionally color the text (e.g., 'FF00FF' for magenta).
         """
-        w = self._doc.nsmap.get('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main')
-        unrecoverable_tags = [f'{{{w}}}object'] 
-        
-        needs_strict_safety = False
-        for c in content['data']:
-            for tag in unrecoverable_tags:
-                if c.find(f'.//{tag}') is not None:
-                    needs_strict_safety = True
-                    break
-            if needs_strict_safety:
-                break
-
-        if needs_strict_safety:
-            print(f"⚠️ Embedded object near '{after}'. Using STRICT TEXT-ONLY paste.")
-            self.paste_safe_text_and_tables(content, after, index)
-        else:
-            print(f"✅ Safe for media near '{after}'. Pasting full formatting.")
-            self.paste_content_with_media(content, after, index)
-
-    # ==================================================================
-    # 2. FULL FORMATTING & MEDIA PASTE (With Aggressive Sanitization)
-    # ==================================================================
-    
-    def paste_content_with_media(self, content, after, index):
-        """Pastes XML while ruthlessly stripping silent corruptors."""
         self.move_cursor(to=after)
         if self._cursor is None:
             return
 
         w = self._doc.nsmap.get('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main')
-
-        for c in content['data']:
-            # --- ERADICATE CORRUPTORS ---
-            # 1. Strip Bookmarks
-            etree.strip_elements(c, f'{{{w}}}bookmarkStart', with_tail=False)
-            etree.strip_elements(c, f'{{{w}}}bookmarkEnd', with_tail=False)
-            # 2. Strip Hyperlinks (Keeps text, drops broken links)
-            etree.strip_tags(c, f'{{{w}}}hyperlink')
-            # 3. Strip Comments & Track Changes
-            etree.strip_elements(c, f'{{{w}}}commentReference', with_tail=False)
-            etree.strip_elements(c, f'{{{w}}}commentRangeStart', with_tail=False)
-            etree.strip_elements(c, f'{{{w}}}commentRangeEnd', with_tail=False)
-            etree.strip_tags(c, f'{{{w}}}ins')
-            etree.strip_tags(c, f'{{{w}}}del')
-            # 4. Strip Section Breaks & Headers/Footers
-            for pPr in c.findall(f'.//{{{w}}}pPr'):
-                etree.strip_elements(pPr, f'{{{w}}}sectPr', with_tail=False)
-            etree.strip_elements(c, f'{{{w}}}sectPr', with_tail=False)
-            etree.strip_elements(c, f'{{{w}}}headerReference', with_tail=False)
-            etree.strip_elements(c, f'{{{w}}}footerReference', with_tail=False)
-            # 5. Strip Content Controls / Form Fields
-            etree.strip_tags(c, f'{{{w}}}sdt')
-            etree.strip_tags(c, f'{{{w}}}sdtPr')
-            etree.strip_tags(c, f'{{{w}}}sdtContent')
-
-            # Remap Image/Chart IDs before pasting
-            safe_c = self._remap_media_ids(c, index)
-            self._cursor.addnext(safe_c)
-            self._cursor = safe_c
-
-        # Update databases
-        self.put_relationships(content, index)  
-        self.update_styles(content)
-        self.update_numbering(content, index)
-        self.update_index(content, index)
-
-        etree.ElementTree(self._doc).write(
-            os.path.join(self._path, 'word', 'document.xml'), **_XML_WRITE_KWARGS
-        )
-
-    def _remap_media_ids(self, element, index):
-        """Safely remaps internal rId pointers for charts and images."""
-        r_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-        safe_namespaces = {
-            'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
-            'c': 'http://schemas.openxmlformats.org/drawingml/2006/chart',
-            'v': 'urn:schemas-microsoft-com:vml'
-        }
-
-        for blip in element.xpath('.//a:blip', namespaces=safe_namespaces):
-            old_id = blip.get(f'{{{r_ns}}}embed')
-            if old_id: blip.set(f'{{{r_ns}}}embed', f"{old_id}c{index}")
-                
-        for chart in element.xpath('.//c:chart', namespaces=safe_namespaces):
-            old_id = chart.get(f'{{{r_ns}}}id')
-            if old_id: chart.set(f'{{{r_ns}}}id', f"{old_id}c{index}")
-
-        for img in element.xpath('.//v:imagedata', namespaces=safe_namespaces):
-            old_id = img.get(f'{{{r_ns}}}id')
-            if old_id: img.set(f'{{{r_ns}}}id', f"{old_id}c{index}")
-                
-        return element
-
-    # ==================================================================
-    # 3. STRICT TEXT-ONLY FALLBACK (For dangerously corrupted sections)
-    # ==================================================================
-    
-    def paste_safe_text_and_tables(self, content, after, index):
-        """The ultimate fallback: rebuilds safe tables and text from scratch."""
-        self.move_cursor(to=after)
-        if self._cursor is None: return
-
-        w = self._doc.nsmap.get('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main')
-
-        for c in content['data']:
-            if c.tag == f'{{{w}}}tbl':
-                safe_tbl = self._build_safe_table(c, w)
-                self._cursor.addnext(safe_tbl)
-                self._cursor = safe_tbl
-            elif c.tag == f'{{{w}}}p':
-                safe_p = self._build_safe_paragraph(c, w)
-                if len(safe_p.findall(f'.//{{{w}}}r')) > 0:
-                    self._cursor.addnext(safe_p)
-                    self._cursor = safe_p 
-
-        etree.ElementTree(self._doc).write(
-            os.path.join(self._path, 'word', 'document.xml'), **_XML_WRITE_KWARGS
-        )
-
-    def _build_safe_paragraph(self, old_p, w):
-        """Rebuilds a safe paragraph preserving bold, italic, underline, and alignment."""
+        
+        # Create a clean new paragraph and text run
         new_p = etree.Element(f'{{{w}}}p')
-        jc = old_p.find(f'.//{{{w}}}pPr/{{{w}}}jc')
-        if jc is not None:
-            pPr = etree.Element(f'{{{w}}}pPr')
-            new_jc = etree.Element(f'{{{w}}}jc')
-            new_jc.set(f'{{{w}}}val', jc.get(f'{{{w}}}val'))
-            pPr.append(new_jc)
-            new_p.append(pPr)
-
-        for r in old_p.findall(f'.//{{{w}}}r'):
-            text_elem = r.find(f'.//{{{w}}}t')
-            if text_elem is None or not text_elem.text: continue
+        new_r = etree.Element(f'{{{w}}}r')
+        
+        # Apply color if specified
+        if color:
+            rPr = etree.Element(f'{{{w}}}rPr')
+            color_elem = etree.Element(f'{{{w}}}color')
             
-            new_r = etree.Element(f'{{{w}}}r')
-            rPr = r.find(f'.//{{{w}}}rPr')
-            if rPr is not None:
-                new_rPr = etree.Element(f'{{{w}}}rPr')
-                has_format = False
-                for fmt in ['b', 'i']:
-                    if rPr.find(f'.//{{{w}}}{fmt}') is not None:
-                        new_rPr.append(etree.Element(f'{{{w}}}{fmt}'))
-                        has_format = True
-                u = rPr.find(f'.//{{{w}}}u')
-                if u is not None:
-                    new_u = etree.Element(f'{{{w}}}u')
-                    new_u.set(f'{{{w}}}val', u.get(f'{{{w}}}val', 'single'))
-                    new_rPr.append(new_u)
-                    has_format = True
-                if has_format: new_r.append(new_rPr)
+            # Convert standard names to hex if needed, Word prefers hex codes like 'FF00FF'
+            if color.lower() == 'magenta':
+                color_hex = 'FF00FF'
+            elif color.lower() == 'red':
+                color_hex = 'FF0000'
+            else:
+                color_hex = color
+                
+            color_elem.set(f'{{{w}}}val', color_hex)
+            rPr.append(color_elem)
+            new_r.append(rPr)
             
-            t = etree.Element(f'{{{w}}}t')
-            t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
-            t.text = text_elem.text 
-            new_r.append(t)
-            new_p.append(new_r)
-        return new_p
-
-    def _build_safe_table(self, old_tbl, w):
-        """Safely extracts content from table cells while rebuilding grid structure."""
-        new_tbl = etree.Element(f'{{{w}}}tbl')
-        borders_xml = (
-            f'<w:tblPr xmlns:w="{w}"><w:tblBorders>'
-            f'<w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
-            f'<w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
-            f'<w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
-            f'<w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
-            f'<w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
-            f'<w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
-            f'</w:tblBorders></w:tblPr>'
+        # Add the text safely using the W3C namespace to prevent lxml crashes
+        t = etree.Element(f'{{{w}}}t')
+        t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+        t.text = escape(text) if text else ""
+        
+        new_r.append(t)
+        new_p.append(new_r)
+        
+        # Insert it into the document
+        self._cursor.addnext(new_p)
+        self._cursor = new_p
+        
+        # Save the changes to the XML
+        etree.ElementTree(self._doc).write(
+            os.path.join(self._path, 'word', 'document.xml'),
+            **_XML_WRITE_KWARGS
         )
-        new_tbl.append(etree.fromstring(borders_xml))
-
-        for row in old_tbl.findall(f'.//{{{w}}}tr'):
-            new_row = etree.Element(f'{{{w}}}tr')
-            for cell in row.findall(f'.//{{{w}}}tc'):
-                new_cell = etree.Element(f'{{{w}}}tc')
-                paras = cell.findall(f'.//{{{w}}}p')
-                if not paras:
-                    new_cell.append(etree.fromstring(f'<w:p xmlns:w="{w}"/>'))
-                else:
-                    for p in paras:
-                        clean_p = self._build_safe_paragraph(p, w)
-                        if len(clean_p.findall(f'.//{{{w}}}r')) > 0:
-                            new_cell.append(clean_p)
-                        else:
-                            new_cell.append(etree.fromstring(f'<w:p xmlns:w="{w}"/>'))
-                new_row.append(new_cell)
-            new_tbl.append(new_row)
-        return new_tbl
-
-    # ==================================================================
-    # 4. SECURE RELATIONSHIPS & FINAL CLEANUP
-    # ==================================================================
-    
-    def put_relationships(self, content, index):
-        """Copies media files and updates .rels, strictly blocking Hyperlinks."""
-        rels_path = os.path.join(self._path, 'word', '_rels', 'document.xml.rels')
-        reldoc = etree.parse(rels_path).getroot()
-
-        for relation in content['rels']:
-            rel_type = relation['ref'].get('Type', '').lower()
-            
-            # THE SHIELD: Block all web links and applewebdata at the door
-            if 'hyperlink' in rel_type:
-                continue 
-
-            val = relation['id'] + 'c' + index
-            relation['elem'].set(relation['key'], val)
-
-            if reldoc.find(f'./*[@Id="{val}"]') is not None: continue
-
-            relation['ref'].set('Id', val)
-            reldoc.append(relation['ref'])
-
-            if relation['ref'].get('TargetMode') != 'External':
-                orig_target = relation['ref'].get('Target')
-                new_target = posixpath.dirname(orig_target) + f'/copy{index}_' + posixpath.basename(orig_target)
-                relation['ref'].set('Target', new_target)
-
-                target_fs = os.path.join(self._path, 'word', *new_target.lstrip('/').split('/'))
-                if os.path.exists(relation['source']):
-                    copy_file(relation['source'], target_fs)
-
-        etree.ElementTree(reldoc).write(rels_path, **_XML_WRITE_KWARGS)
-
-    def sanitize_final_document(self):
-        """The Final Sweep: Destroys hidden template corruptions right before save."""
-        rels_path = os.path.join(self._path, 'word', '_rels', 'document.xml.rels')
-        if not os.path.exists(rels_path): return
-
-        reldoc = etree.parse(rels_path).getroot()
-        rels_to_remove = []
-
-        for rel in reldoc:
-            target = rel.get('Target', '').lower()
-            if 'applewebdata' in target or target.startswith('file:///'):
-                rels_to_remove.append(rel)
-            elif target.startswith('http') and rel.get('TargetMode') != 'External':
-                rel.set('TargetMode', 'External')
-
-        for bad_rel in rels_to_remove:
-            reldoc.remove(bad_rel)
-
-        etree.ElementTree(reldoc).write(rels_path, **_XML_WRITE_KWARGS)
-
-    def save(self, filepath=''):
-        """Zips the folder into a .docx file safely."""
-        self.sanitize_final_document()  # Clean up before packing
-
-        filepath = self._path + '.docx' if filepath == '' else filepath
-        if os.path.exists(filepath): os.remove(filepath)
-
-        with zipfile.ZipFile(filepath, 'w', zipfile.ZIP_DEFLATED, allowZip64=True) as docx:
-            ct_path = os.path.join(self._path, '[Content_Types].xml')
-            docx.write(ct_path, '[Content_Types].xml')
-
-            for foldername, _subfolders, filenames in os.walk(self._path):
-                for filename in filenames:
-                    file_path = os.path.join(foldername, filename)
-                    arcname   = os.path.relpath(file_path, self._path).replace(os.sep, '/')
-                    if arcname == '[Content_Types].xml': continue
-                    docx.write(file_path, arcname)
-
-        return filepath
-
-    # ==================================================================
-    # 5. DATABASE UPDATERS (Styles, Lists, and Content Types)
-    # ==================================================================
-
-    def update_index(self, content, index):
-        """Merges content-type entries into [Content_Types].xml."""
-        ct_path = os.path.join(self._path, '[Content_Types].xml')
-        idxdoc = etree.parse(ct_path).getroot()
-
-        for k, xx in content['index'].items():
-            local = etree.QName(xx).localname
-
-            if local == 'Default':
-                if idxdoc.find(f'./*[@Extension="{k}"]') is None:
-                    idxdoc.insert(0, xx)
-
-            elif local == 'Override':
-                k = (posixpath.dirname(k)
-                     + f'/copy{index}_'
-                     + posixpath.basename(k))
-                if idxdoc.find(f'./*[@PartName="{k}"]') is None:
-                    xx.set('PartName', k)
-                    idxdoc.append(xx)
-
-        etree.ElementTree(idxdoc).write(ct_path, **_XML_WRITE_KWARGS)
-
-    def update_numbering(self, content, index):
-        """Merges list/numbering definitions with a suffix to avoid ID collisions."""
-        num_path = os.path.join(self._path, 'word', 'numbering.xml')
-        if not os.path.exists(num_path):
-            return  
-
-        numdoc = etree.parse(num_path).getroot()
-        w = numdoc.nsmap.get('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main')
-        suffix = '999' + index
-
-        num_ids  = numdoc.xpath('./w:num/@w:numId', namespaces=numdoc.nsmap)
-        anum_ids = numdoc.xpath('./w:abstractNum/@w:abstractNumId', namespaces=numdoc.nsmap)
-        curr_num_ids, curr_anum_ids = [], []
-
-        for num in content['nums']:
-            nid = num['id'] + suffix
-            num['elem'].set(num['key'], nid)
-
-            if 'num' not in num['ref'] or nid in num_ids or nid in curr_num_ids:
-                continue
-
-            curr_num_ids.append(nid)
-            num['ref']['num'].set(f'{{{w}}}numId', nid)
-            numdoc.append(num['ref']['num'])
-
-            anum = num['ref']['num'].find('./w:abstractNumId', numdoc.nsmap)
-            if anum is not None:
-                aid  = anum.get(f'{{{w}}}val') + suffix
-                anum.set(f'{{{w}}}val', aid)
-
-                if aid not in anum_ids and aid not in curr_anum_ids:
-                    curr_anum_ids.append(aid)
-                    num['ref']['anum'].set(f'{{{w}}}abstractNumId', aid)
-                    numdoc.insert(0, num['ref']['anum'])
-
-        etree.ElementTree(numdoc).write(num_path, **_XML_WRITE_KWARGS)
-
-    def update_styles(self, content):
-        """Merges custom styles with a suffix to prevent overwriting base template styles."""
-        styles_path = os.path.join(self._path, 'word', 'styles.xml')
-        if not os.path.exists(styles_path):
-            return
-
-        stdoc  = etree.parse(styles_path).getroot()
-        suffix = 'New'
-        w = stdoc.nsmap.get('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main')
-
-        for style in content['styles']:
-            style['id'] = style['id'] + suffix
-            style['elem'].set(style['key'], style['id'])
-
-            if stdoc.find(f'./w:style[@w:styleId="{style["id"]}"]', stdoc.nsmap) is not None:
-                continue
-
-            style['ref']['elem'].set(f'{{{w}}}styleId', style['id'])
-
-            if 'basedon' in style['ref']:
-                basedon = style['ref']['basedon'].get(f'{{{w}}}styleId') + suffix
-                basedOn_elem = style['ref']['elem'].find('./w:basedOn', stdoc.nsmap)
-                if basedOn_elem is not None:
-                    basedOn_elem.set(f'{{{w}}}val', basedon)
-
-                if stdoc.find(f'./w:style[@w:styleId="{basedon}"]', stdoc.nsmap) is None:
-                    style['ref']['basedon'].set(f'{{{w}}}styleId', basedon)
-                    first_style = stdoc.find('./w:style', stdoc.nsmap)
-                    if first_style is not None:
-                        stdoc.insert(stdoc.index(first_style), style['ref']['basedon'])
-                    else:
-                        stdoc.append(style['ref']['basedon'])
-
-            stdoc.append(style['ref']['elem'])
-
-        etree.ElementTree(stdoc).write(styles_path, **_XML_WRITE_KWARGS)
