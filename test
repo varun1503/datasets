@@ -1,95 +1,215 @@
-I can see Cell 10 has `#preprocessing` placeholder. Here's what to put in each cell:
+    # ------------------------------------------------------------------
+    # HELPER 1: Build Safe Paragraphs
+    # ------------------------------------------------------------------
+    def _build_safe_paragraph(self, old_p):
+        """Creates a clean paragraph, preserving only alignment, bold, italics, and underlines."""
+        w = self._doc.nsmap.get('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main')
+        new_p = etree.Element(f'{{{w}}}p')
+        
+        # 1. Copy Alignment
+        jc = old_p.find(f'.//{{{w}}}pPr/{{{w}}}jc')
+        if jc is not None:
+            pPr = etree.Element(f'{{{w}}}pPr')
+            new_jc = etree.Element(f'{{{w}}}jc')
+            new_jc.set(f'{{{w}}}val', jc.get(f'{{{w}}}val'))
+            pPr.append(new_jc)
+            new_p.append(pPr)
 
----
+        # 2. Rebuild text runs
+        for r in old_p.findall(f'.//{{{w}}}r'):
+            text_elem = r.find(f'.//{{{w}}}t')
+            if text_elem is None or not text_elem.text:
+                continue
+            
+            new_r = etree.Element(f'{{{w}}}r')
+            
+            # Format handling
+            rPr = r.find(f'.//{{{w}}}rPr')
+            if rPr is not None:
+                new_rPr = etree.Element(f'{{{w}}}rPr')
+                has_format = False
+                
+                for fmt in ['b', 'i']:
+                    if rPr.find(f'.//{{{w}}}{fmt}') is not None:
+                        new_rPr.append(etree.Element(f'{{{w}}}{fmt}'))
+                        has_format = True
+                        
+                u = rPr.find(f'.//{{{w}}}u')
+                if u is not None:
+                    new_u = etree.Element(f'{{{w}}}u')
+                    new_u.set(f'{{{w}}}val', u.get(f'{{{w}}}val', 'single'))
+                    new_rPr.append(new_u)
+                    has_format = True
 
-**Cell 10 — Preprocessing**
-```python
-# preprocessing
-from tensorflow.keras.preprocessing.text import Tokenizer
-from tensorflow.keras.preprocessing.sequence import pad_sequences
+                if has_format:
+                    new_r.append(new_rPr)
+            
+            # Add text with the correct namespace fix
+            t = etree.Element(f'{{{w}}}t')
+            t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+            t.text = text_elem.text 
+            new_r.append(t)
+            new_p.append(new_r)
+            
+        return new_p
 
-MAX_WORDS = 20000
-MAX_LEN = 200
+    # ------------------------------------------------------------------
+    # HELPER 2: Build Safe Tables
+    # ------------------------------------------------------------------
+    def _build_safe_table(self, old_tbl):
+        """Rebuilds a table structure and fills it with safe paragraphs."""
+        w = self._doc.nsmap.get('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main')
+        new_tbl = etree.Element(f'{{{w}}}tbl')
+        
+        # Fixed XML string formatting here
+        borders_xml = (
+            f'<w:tblPr xmlns:w="{w}">'
+            f'<w:tblBorders>'
+            f'<w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+            f'<w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+            f'<w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+            f'<w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+            f'<w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+            f'<w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
+            f'</w:tblBorders>'
+            f'</w:tblPr>'
+        )
+        new_tbl.append(etree.fromstring(borders_xml))
 
-tokenizer = Tokenizer(num_words=MAX_WORDS, oov_token="<OOV>")
-tokenizer.fit_on_texts(train['desc'].astype(str))
+        for row in old_tbl.findall(f'.//{{{w}}}tr'):
+            new_row = etree.Element(f'{{{w}}}tr')
+            for cell in row.findall(f'.//{{{w}}}tc'):
+                new_cell = etree.Element(f'{{{w}}}tc')
+                paras = cell.findall(f'.//{{{w}}}p')
+                
+                if not paras:
+                    new_cell.append(etree.fromstring(f'<w:p xmlns:w="{w}"/>'))
+                else:
+                    for p in paras:
+                        clean_p = self._build_safe_paragraph(p)
+                        if len(clean_p.findall(f'.//{{{w}}}r')) > 0:
+                            new_cell.append(clean_p)
+                        else:
+                            new_cell.append(etree.fromstring(f'<w:p xmlns:w="{w}"/>'))
+                new_row.append(new_cell)
+            new_tbl.append(new_row)
+            
+        return new_tbl
 
-X_train = pad_sequences(
-    tokenizer.texts_to_sequences(train['desc'].astype(str)),
-    maxlen=MAX_LEN, padding='post', truncating='post'
-)
-X_test = pad_sequences(
-    tokenizer.texts_to_sequences(test_data['desc'].astype(str)),
-    maxlen=MAX_LEN, padding='post', truncating='post'
-)
+    # ------------------------------------------------------------------
+    # MAIN 1: Safe Router
+    # ------------------------------------------------------------------
+    def paste_safe_text_and_tables(self, content, after, index):
+        """The main router that cleanly pastes safe text and tables."""
+        self.move_cursor(to=after)
+        if self._cursor is None:
+            return
 
-y_train = train['label'].values
-print("X_train shape:", X_train.shape)
-print("X_test shape:", X_test.shape)
-```
+        w = self._doc.nsmap.get('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main')
 
----
+        for c in content['data']:
+            if c.tag == f'{{{w}}}tbl':
+                safe_tbl = self._build_safe_table(c)
+                self._cursor.addnext(safe_tbl)
+                self._cursor = safe_tbl
+            elif c.tag == f'{{{w}}}p':
+                safe_p = self._build_safe_paragraph(c)
+                if len(safe_p.findall(f'.//{{{w}}}r')) > 0:
+                    self._cursor.addnext(safe_p)
+                    self._cursor = safe_p 
 
-**Cell 11 — Build & Train**
-```python
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers
+        etree.ElementTree(self._doc).write(
+            os.path.join(self._path, 'word', 'document.xml'),
+            **_XML_WRITE_KWARGS,
+        )
+    # ------------------------------------------------------------------
+    # HELPER 3: Remap Media Relationship IDs
+    # ------------------------------------------------------------------
+    def _remap_media_ids(self, element, index):
+        """
+        Prevents corruption by updating the internal relationship IDs of 
+        images and charts to match the new unique IDs generated for this document.
+        """
+        # The relationships namespace Word uses for external/embedded links
+        r_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        
+        # 1. Update modern images (<a:blip r:embed="rIdX">)
+        for blip in element.xpath('.//a:blip', namespaces=element.nsmap):
+            old_id = blip.get(f'{{{r_ns}}}embed')
+            if old_id:
+                blip.set(f'{{{r_ns}}}embed', f"{old_id}c{index}")
+                
+        # 2. Update Charts (<c:chart r:id="rIdX">)
+        for chart in element.xpath('.//c:chart', namespaces=element.nsmap):
+            old_id = chart.get(f'{{{r_ns}}}id')
+            if old_id:
+                chart.set(f'{{{r_ns}}}id', f"{old_id}c{index}")
 
-model = keras.Sequential([
-    layers.Embedding(MAX_WORDS, 64, input_length=MAX_LEN),
-    layers.GlobalAveragePooling1D(),
-    layers.Dense(128, activation='relu'),
-    layers.Dropout(0.4),
-    layers.Dense(64, activation='relu'),
-    layers.Dropout(0.3),
-    layers.Dense(3, activation='softmax')
-])
+        # 3. Update VML shapes/older images (<v:imagedata r:id="rIdX">)
+        for img in element.xpath('.//v:imagedata', namespaces=element.nsmap):
+            old_id = img.get(f'{{{r_ns}}}id')
+            if old_id:
+                img.set(f'{{{r_ns}}}id', f"{old_id}c{index}")
+                
+        return element
 
-model.compile(
-    optimizer='adam',
-    loss='sparse_categorical_crossentropy',
-    metrics=['accuracy']
-)
+    # ------------------------------------------------------------------
+    # MAIN 2: Paste with Media
+    # ------------------------------------------------------------------
+    def paste_content_with_media(self, content, after, index):
+        """
+        Pastes exact XML but strictly remaps media IDs to prevent corruption.
+        Requires your original `put_relationships` function to be active!
+        """
+        self.move_cursor(to=after)
+        if self._cursor is None:
+            return
 
-early_stop = keras.callbacks.EarlyStopping(
-    monitor='val_accuracy', patience=3, restore_best_weights=True
-)
+        for c in content['data']:
+            # Remap the IDs inside the XML before pasting!
+            safe_c = self._remap_media_ids(c, index)
+            
+            self._cursor.addnext(safe_c)
+            self._cursor = safe_c
 
-history = model.fit(
-    X_train, y_train,
-    epochs=20,
-    batch_size=32,
-    validation_split=0.15,
-    callbacks=[early_stop]
-)
-```
+        # You MUST run these so the document database matches the new IDs
+        self.put_relationships(content, index)  
+        self.update_styles(content)
+        self.update_numbering(content, index)
+        self.update_index(content, index)
 
----
+        etree.ElementTree(self._doc).write(
+            os.path.join(self._path, 'word', 'document.xml'),
+            **_XML_WRITE_KWARGS,
+        )
+    # ------------------------------------------------------------------
+    # MAIN 3: The Smart Auto-Router
+    # ------------------------------------------------------------------
+    def paste_content_auto(self, content, after, index):
+        """
+        Scans the section. If it contains highly corruptible embedded files 
+        (like weird Excel OLE objects), it uses the strict Text-Only paste.
+        Otherwise, it pastes the full formatting, charts, and images safely.
+        """
+        w = self._doc.nsmap.get('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main')
+        
+        # OLE Objects (embedded PDFs/Excel files) are incredibly hard to remap 
+        # safely across documents. If we see these, we force Text-Only.
+        unrecoverable_tags = [f'{{{w}}}object'] 
+        
+        needs_strict_safety = False
+        
+        for c in content['data']:
+            for tag in unrecoverable_tags:
+                if c.find(f'.//{tag}') is not None:
+                    needs_strict_safety = True
+                    break
+            if needs_strict_safety:
+                break
 
-**Cell 12 — Check Accuracy**
-```python
-loss, acc = model.evaluate(X_train, y_train, verbose=0)
-print(f"Train accuracy: {acc:.4f}")
-```
-
----
-
-**Cell 13 — Predict & Submit**
-```python
-import numpy as np
-
-preds = np.argmax(model.predict(X_test), axis=1)
-
-submission_df = pd.DataFrame({
-    'desc': test_data['desc'],
-    'label': preds
-})
-
-submission_df.to_csv("submissions.csv", index=False)
-print("Saved!", submission_df['label'].value_counts())
-```
-
----
-
-Note I used `test_data` to match your Cell 8 variable name. With 2250 rows you should easily hit **95%+ accuracy**.
+        if needs_strict_safety:
+            print(f"⚠️ Embedded object detected near '{after}'. Using STRICT TEXT-ONLY paste.")
+            self.paste_safe_text_and_tables(content, after, index)
+        else:
+            print(f"✅ Safe for media near '{after}'. Pasting full formatting & charts.")
+            self.paste_content_with_media(content, after, index)
