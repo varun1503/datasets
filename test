@@ -1,53 +1,57 @@
-    # ==================================================================
-    # 6. TEXT INSERTION UTILITY
-    # ==================================================================
-
-    def put_text(self, text, after, color=None):
-        """
-        Inserts a new paragraph of text into the document after a specific anchor.
-        Can optionally color the text (e.g., 'FF00FF' for magenta).
-        """
+    def paste_content_with_media(self, content, after, index):
+        """Pastes XML, remaps media, and forces text to match the template style."""
         self.move_cursor(to=after)
         if self._cursor is None:
             return
 
         w = self._doc.nsmap.get('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main')
-        
-        # Create a clean new paragraph and text run
-        new_p = etree.Element(f'{{{w}}}p')
-        new_r = etree.Element(f'{{{w}}}r')
-        
-        # Apply color if specified
-        if color:
-            rPr = etree.Element(f'{{{w}}}rPr')
-            color_elem = etree.Element(f'{{{w}}}color')
+
+        for c in content['data']:
+            # --- ERADICATE CORRUPTORS ---
+            # 1. Strip Bookmarks
+            etree.strip_elements(c, f'{{{w}}}bookmarkStart', with_tail=False)
+            etree.strip_elements(c, f'{{{w}}}bookmarkEnd', with_tail=False)
+            # 2. Strip Hyperlinks (Keeps text, drops broken links)
+            etree.strip_tags(c, f'{{{w}}}hyperlink')
+            # 3. Strip Comments & Track Changes
+            etree.strip_elements(c, f'{{{w}}}commentReference', with_tail=False)
+            etree.strip_elements(c, f'{{{w}}}commentRangeStart', with_tail=False)
+            etree.strip_elements(c, f'{{{w}}}commentRangeEnd', with_tail=False)
+            etree.strip_tags(c, f'{{{w}}}ins')
+            etree.strip_tags(c, f'{{{w}}}del')
+            # 4. Strip Section Breaks & Headers/Footers
+            for pPr in c.findall(f'.//{{{w}}}pPr'):
+                etree.strip_elements(pPr, f'{{{w}}}sectPr', with_tail=False)
+            etree.strip_elements(c, f'{{{w}}}sectPr', with_tail=False)
+            etree.strip_elements(c, f'{{{w}}}headerReference', with_tail=False)
+            etree.strip_elements(c, f'{{{w}}}footerReference', with_tail=False)
+            # 5. Strip Content Controls / Form Fields
+            etree.strip_tags(c, f'{{{w}}}sdt')
+            etree.strip_tags(c, f'{{{w}}}sdtPr')
+            etree.strip_tags(c, f'{{{w}}}sdtContent')
             
-            # Convert standard names to hex if needed, Word prefers hex codes like 'FF00FF'
-            if color.lower() == 'magenta':
-                color_hex = 'FF00FF'
-            elif color.lower() == 'red':
-                color_hex = 'FF0000'
-            else:
-                color_hex = color
-                
-            color_elem.set(f'{{{w}}}val', color_hex)
-            rPr.append(color_elem)
-            new_r.append(rPr)
+            # ---------------------------------------------------------
+            # 6. NEW: STRIP TEXT STYLES (Force Template Formatting)
+            # ---------------------------------------------------------
+            # This deletes all source fonts, sizes, colors, bold, and italics
+            etree.strip_elements(c, f'{{{w}}}rPr', with_tail=False)
             
-        # Add the text safely using the W3C namespace to prevent lxml crashes
-        t = etree.Element(f'{{{w}}}t')
-        t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
-        t.text = escape(text) if text else ""
-        
-        new_r.append(t)
-        new_p.append(new_r)
-        
-        # Insert it into the document
-        self._cursor.addnext(new_p)
-        self._cursor = new_p
-        
-        # Save the changes to the XML
+            # This deletes the specific paragraph style names, forcing standard text
+            for pStyle in c.findall(f'.//{{{w}}}pPr/{{{w}}}pStyle'):
+                pStyle.getparent().remove(pStyle)
+            # ---------------------------------------------------------
+
+            # Remap Image/Chart IDs before pasting
+            safe_c = self._remap_media_ids(c, index)
+            self._cursor.addnext(safe_c)
+            self._cursor = safe_c
+
+        # Update databases
+        self.put_relationships(content, index)  
+        self.update_styles(content)
+        self.update_numbering(content, index)
+        self.update_index(content, index)
+
         etree.ElementTree(self._doc).write(
-            os.path.join(self._path, 'word', 'document.xml'),
-            **_XML_WRITE_KWARGS
+            os.path.join(self._path, 'word', 'document.xml'), **_XML_WRITE_KWARGS
         )
