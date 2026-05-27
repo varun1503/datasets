@@ -1,37 +1,44 @@
     # ------------------------------------------------------------------
-    # HELPER 3: Remap Media Relationship IDs
+    # MAIN 2: Paste with Media (Now with Bookmark/Hyperlink safety)
     # ------------------------------------------------------------------
-    def _remap_media_ids(self, element, index):
+    def paste_content_with_media(self, content, after, index):
         """
-        Prevents corruption by updating the internal relationship IDs of 
-        images and charts to match the new unique IDs generated for this document.
-        Uses a hardcoded safe_namespaces dictionary to prevent XPathEvalError.
+        Pastes exact XML but strictly remaps media IDs to prevent corruption.
+        Safely removes Bookmarks and Hyperlinks which are silent corruptors.
         """
-        r_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-        
-        # Explicitly define the namespaces so lxml never gets confused
-        safe_namespaces = {
-            'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
-            'c': 'http://schemas.openxmlformats.org/drawingml/2006/chart',
-            'v': 'urn:schemas-microsoft-com:vml'
-        }
+        self.move_cursor(to=after)
+        if self._cursor is None:
+            return
 
-        # 1. Update modern images (<a:blip r:embed="rIdX">)
-        for blip in element.xpath('.//a:blip', namespaces=safe_namespaces):
-            old_id = blip.get(f'{{{r_ns}}}embed')
-            if old_id:
-                blip.set(f'{{{r_ns}}}embed', f"{old_id}c{index}")
-                
-        # 2. Update Charts (<c:chart r:id="rIdX">)
-        for chart in element.xpath('.//c:chart', namespaces=safe_namespaces):
-            old_id = chart.get(f'{{{r_ns}}}id')
-            if old_id:
-                chart.set(f'{{{r_ns}}}id', f"{old_id}c{index}")
+        # Get the WordprocessingML namespace
+        w = self._doc.nsmap.get('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main')
 
-        # 3. Update VML shapes/older images (<v:imagedata r:id="rIdX">)
-        for img in element.xpath('.//v:imagedata', namespaces=safe_namespaces):
-            old_id = img.get(f'{{{r_ns}}}id')
-            if old_id:
-                img.set(f'{{{r_ns}}}id', f"{old_id}c{index}")
-                
-        return element
+        for c in content['data']:
+            # --- THE NEW SAFETY CHECKS ---
+            
+            # 1. Strip Bookmarks (Prevents integer ID collisions across documents)
+            etree.strip_elements(c, f'{{{w}}}bookmarkStart', with_tail=False)
+            etree.strip_elements(c, f'{{{w}}}bookmarkEnd', with_tail=False)
+            
+            # 2. Strip Hyperlinks (Removes the broken rId requirement, but keeps the text)
+            etree.strip_tags(c, f'{{{w}}}hyperlink')
+
+            # -----------------------------
+
+            # Remap the image/chart IDs before pasting
+            safe_c = self._remap_media_ids(c, index)
+            
+            self._cursor.addnext(safe_c)
+            self._cursor = safe_c
+
+        # IMPORTANT: Make sure your put_relationships function is still in your 
+        # class! We need it for the images and charts to actually load!
+        self.put_relationships(content, index)  
+        self.update_styles(content)
+        self.update_numbering(content, index)
+        self.update_index(content, index)
+
+        etree.ElementTree(self._doc).write(
+            os.path.join(self._path, 'word', 'document.xml'),
+            **_XML_WRITE_KWARGS,
+        )
