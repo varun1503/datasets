@@ -1,29 +1,20 @@
-    def move_cursor(self, to):
-        """
-        Moves the cursor to the paragraph containing the specific text.
-        Crucially, it ensures we NEVER place the cursor inside or after 
-        a master <w:sectPr> tag, which protects the headers and footers.
-        """
-        w = self._doc.nsmap.get('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main')
-        
-        # Find the paragraph that contains our target text
-        for p in self._doc.findall(f'.//{{{w}}}p'):
-            texts = p.findall(f'.//{{{w}}}t')
-            p_text = "".join([t.text for t in texts if t.text])
+        for c in content['data']:
             
-            if to in p_text:
-                self._cursor = p
-                
-                # THE SHIELD: If this paragraph contains a section break, 
-                # or is the very last paragraph of the document containing the master sectPr,
-                # we must insert our new content BEFORE it, not after it.
-                if p.find(f'.//{{{w}}}sectPr') is not None:
-                    # We create a safe empty paragraph before the section break
-                    # and move our cursor there.
-                    safe_p = etree.Element(f'{{{w}}}p')
-                    p.addprevious(safe_p)
-                    self._cursor = safe_p
-                    
-                return
-                
-        self._cursor = None
+            # --- THE ULTIMATE SHIELD ---
+            # If the block of code itself is a master section break, 
+            # drop it immediately. Do not paste it!
+            if c.tag == f'{{{w}}}sectPr':
+                continue
+            # ---------------------------
+
+            # 1. Strip Bookmarks
+            etree.strip_elements(c, f'{{{w}}}bookmarkStart', with_tail=False)
+            etree.strip_elements(c, f'{{{w}}}bookmarkEnd', with_tail=False)
+            
+            # 2. Strip Hyperlinks
+            etree.strip_tags(c, f'{{{w}}}hyperlink')
+            
+            # 3. Strip Spellcheck (Removes the 10,000 proofErr tags!)
+            etree.strip_tags(c, f'{{{w}}}proofErr')
+
+            # ... (keep the rest of your stripping logic here) ...
