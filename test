@@ -1,114 +1,85 @@
-Looking at your images, I can see your `content` column has tuples like `('text', 'some text')`, `('table', dataframe)`, `('image', base64data)`.
-
-The issue is your `to_list` and merge isn't handling these tuples properly.
-
-Here's the fix:
+You're already almost there! Just need to wrap your chunks properly and push to a vector store.
 
 ```python
-import pandas as pd
-import numpy as np
+from langchain_core.documents import Document
+from langchain_openai import OpenAIEmbeddings  # or your embedding model
+from langchain_community.vectorstores import FAISS  # or Chroma
 
-def merge_sections(
-    df,
-    section_col="section_name",
-    text_col="paragraph_content",
-    content_col="content",
-    max_nan_words=1000
-):
-    def to_list(x):
-        if x is None:
-            return []
-        if pd.isna(x) if not isinstance(x, (list, tuple, dict)) else False:
-            return []
-        if isinstance(x, list):
-            return x
-        if isinstance(x, tuple):
-            return [x]  # ← wrap single tuple as list item
-        return [x]
+# ── Step 1: Build LangChain Documents from your merged df ──
+documents = []
 
-    def safe_text(x):
-        if x is None or (not isinstance(x, (list, tuple)) and pd.isna(x)):
-            return ""
-        return str(x)
-
-    merged_rows = []
-    current_row = None
-    current_nan_words = 0
-
-    for _, row in df.iterrows():
-        section = row[section_col]
-        text = safe_text(row.get(text_col, ""))
-        row_words = len(text.split())
-
-        if current_row is None:
-            current_row = row.copy()
-            current_row[content_col] = to_list(current_row[content_col])
-            current_nan_words = row_words if pd.isna(section) else 0
-            continue
-
-        current_section = current_row[section_col]
-
-        same_section = (
-            (pd.isna(section) and pd.isna(current_section))
-            or (
-                pd.notna(section)
-                and pd.notna(current_section)
-                and section == current_section
-            )
-        )
-
-        if same_section:
-            if pd.isna(section):
-                if current_nan_words + row_words <= max_nan_words:
-                    current_row[text_col] = (safe_text(current_row[text_col]) + " " + text).strip()
-                    current_row[content_col].extend(to_list(row[content_col]))
-                    current_nan_words += row_words
-                else:
-                    merged_rows.append(current_row)
-                    current_row = row.copy()
-                    current_row[content_col] = to_list(current_row[content_col])
-                    current_nan_words = row_words
-            else:
-                current_row[text_col] = (safe_text(current_row[text_col]) + " " + text).strip()
-                current_row[content_col].extend(to_list(row[content_col]))
-        else:
-            merged_rows.append(current_row)
-            current_row = row.copy()
-            current_row[content_col] = to_list(current_row[content_col])
-            current_nan_words = row_words if pd.isna(section) else 0
-
-    if current_row is not None:
-        merged_rows.append(current_row)
-
-    return pd.DataFrame(merged_rows)
-
-
-doc_df = merge_sections(df)
-
-# ── Debug print to verify content is merging correctly ──
-for i, row in doc_df.head(5).iterrows():
-    print(f"\n{'='*60}")
-    print(f"Section : {row['section_name']}")
-    print(f"Text    : {str(row['paragraph_content'])[:200]}")
-    print(f"Content items: {len(row['content'])}")
-    for item in row['content']:
+for i, row in doc_df.iterrows():
+    
+    # Build readable content string from tuples
+    content_parts = []
+    for item in row["content"]:
         if isinstance(item, tuple):
-            kind = item[0]
-            val  = item[1]
-            if kind == 'text':
-                print(f"  [TEXT]  {str(val)[:100]}")
-            elif kind == 'table':
-                print(f"  [TABLE] shape={val.shape if hasattr(val, 'shape') else 'N/A'}")
-            elif kind == 'image':
-                print(f"  [IMAGE] base64 len={len(str(val))}")
-            else:
-                print(f"  [{kind.upper()}] {str(val)[:80]}")
+            kind, val = item[0], item[1]
+            if kind == "text":
+                content_parts.append(str(val))
+            elif kind == "table":
+                # Convert table df to markdown string
+                content_parts.append(val.to_markdown() if hasattr(val, "to_markdown") else str(val))
+            elif kind == "image":
+                content_parts.append("[IMAGE]")  # skip or add caption
         else:
-            print(f"  [RAW] {str(item)[:100]}")
+            content_parts.append(str(item))
+    
+    full_content = "\n".join(content_parts).strip()
+    
+    if not full_content:
+        continue
+
+    doc = Document(
+        page_content=full_content,
+        metadata={
+            "chunk_id": i,
+            "section": row["section_name"] if pd.notna(row["section_name"]) else "Unknown",
+            "word_count": len(full_content.split()),
+            "has_table": any(isinstance(x, tuple) and x[0] == "table" for x in row["content"]),
+            "has_image": any(isinstance(x, tuple) and x[0] == "image" for x in row["content"]),
+        }
+    )
+    documents.append(doc)
+
+print(f"Total LangChain documents: {len(documents)}")
+
+# ── Step 2: Embed and store ──
+embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
+
+vectorstore = FAISS.from_documents(documents, embeddings)
+vectorstore.save_local("mrmg_index")  # save to disk
+
+print("Vector store saved!")
+
+# ── Step 3: Test retrieval with evidence ──
+retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+
+query = "What is the GMS exposure limit for small merchants?"
+results = retriever.invoke(query)
+
+for r in results:
+    print(f"\n{'='*50}")
+    print(f"Section  : {r.metadata['section']}")
+    print(f"Chunk ID : {r.metadata['chunk_id']}")
+    print(f"Has Table: {r.metadata['has_table']}")
+    print(f"Content  : {r.page_content[:300]}")
 ```
 
-**Key fixes:**
-- `to_list()` now correctly wraps a single `('text', ...)` tuple as `[tuple]` instead of iterating its characters
+---
+
+**What this gives you:**
+
+| Metadata field | Purpose |
+|---|---|
+| `section` | Your evidence — *"Answer from Section 3.2"* |
+| `chunk_id` | Traceability |
+| `has_table` | Know when to render a table in UI |
+| `has_image` | Know when to show image |
+
+---
+
+**What embedding model are you using?** OpenAI, HuggingFace, or something else? I'll adjust the embeddings line accordingly.- `to_list()` now correctly wraps a single `('text', ...)` tuple as `[tuple]` instead of iterating its characters
 - `safe_text()` handles tuples/lists without crashing on `pd.isna()`
 - Debug printer shows each content item by type — text, table, image
 
