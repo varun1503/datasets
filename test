@@ -1,86 +1,146 @@
-You're already almost there! Just need to wrap your chunks properly and push to a vector store.
+Great question. Here's how to think about it systematically:
 
-```python
-from langchain_core.documents import Document
-from langchain_openai import OpenAIEmbeddings  # or your embedding model
-from langchain_community.vectorstores import FAISS  # or Chroma
+## The Core Problem
 
-# ── Step 1: Build LangChain Documents from your merged df ──
-documents = []
+Your chunks have **mixed content** (text + table + image) and you can't embed everything the same way. You need a strategy per content type.
 
-for i, row in doc_df.iterrows():
-    
-    # Build readable content string from tuples
-    content_parts = []
-    for item in row["content"]:
-        if isinstance(item, tuple):
-            kind, val = item[0], item[1]
-            if kind == "text":
-                content_parts.append(str(val))
-            elif kind == "table":
-                # Convert table df to markdown string
-                content_parts.append(val.to_markdown() if hasattr(val, "to_markdown") else str(val))
-            elif kind == "image":
-                content_parts.append("[IMAGE]")  # skip or add caption
-        else:
-            content_parts.append(str(item))
-    
-    full_content = "\n".join(content_parts).strip()
-    
-    if not full_content:
-        continue
+---
 
-    doc = Document(
-        page_content=full_content,
-        metadata={
-            "chunk_id": i,
-            "section": row["section_name"] if pd.notna(row["section_name"]) else "Unknown",
-            "word_count": len(full_content.split()),
-            "has_table": any(isinstance(x, tuple) and x[0] == "table" for x in row["content"]),
-            "has_image": any(isinstance(x, tuple) and x[0] == "image" for x in row["content"]),
-        }
-    )
-    documents.append(doc)
+## Strategy: Multi-Modal RAG Architecture
 
-print(f"Total LangChain documents: {len(documents)}")
-
-# ── Step 2: Embed and store ──
-embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
-
-vectorstore = FAISS.from_documents(documents, embeddings)
-vectorstore.save_local("mrmg_index")  # save to disk
-
-print("Vector store saved!")
-
-# ── Step 3: Test retrieval with evidence ──
-retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-
-query = "What is the GMS exposure limit for small merchants?"
-results = retriever.invoke(query)
-
-for r in results:
-    print(f"\n{'='*50}")
-    print(f"Section  : {r.metadata['section']}")
-    print(f"Chunk ID : {r.metadata['chunk_id']}")
-    print(f"Has Table: {r.metadata['has_table']}")
-    print(f"Content  : {r.page_content[:300]}")
+```
+                    ┌─────────────────────────────────┐
+                    │         Your doc_df chunk        │
+                    │  content: [text, table, image]   │
+                    └────────────┬────────────────────┘
+                                 │
+              ┌──────────────────┼──────────────────┐
+              ▼                  ▼                   ▼
+         TEXT nodes         TABLE nodes         IMAGE nodes
+         embed as-is      embed summary       embed caption
+                          + store raw df      + store path
 ```
 
 ---
 
-**What this gives you:**
+## Implementation
 
-| Metadata field | Purpose |
-|---|---|
-| `section` | Your evidence — *"Answer from Section 3.2"* |
-| `chunk_id` | Traceability |
-| `has_table` | Know when to render a table in UI |
-| `has_image` | Know when to show image |
+```python
+import asyncio
+import pandas as pd
+from langchain_core.documents import Document
+
+# ── Step 1: Explode each chunk into typed sub-documents ──
+
+text_docs   = []
+table_docs  = []
+image_docs  = []
+
+for i, row in doc_df.iterrows():
+    section = row["section_name"] if pd.notna(row["section_name"]) else "Unknown"
+    base_meta = {"chunk_id": i, "section": section}
+
+    for j, item in enumerate(row["content"]):
+        if not isinstance(item, tuple):
+            continue
+
+        kind, val = item[0], item[1]
+
+        # ── TEXT ──
+        if kind == "text" and str(val).strip():
+            text_docs.append(Document(
+                page_content=str(val).strip(),
+                metadata={**base_meta, "type": "text", "sub_id": j}
+            ))
+
+        # ── TABLE ──
+        elif kind == "table" and hasattr(val, "to_markdown"):
+            markdown  = val.to_markdown()
+            # What you embed: a human-readable summary so semantic search works
+            summary   = f"Table from section '{section}':\n{markdown[:500]}"
+            table_docs.append(Document(
+                page_content=summary,
+                metadata={
+                    **base_meta,
+                    "type":        "table",
+                    "sub_id":      j,
+                    "raw_table":   markdown,       # full table stored in metadata
+                    "col_names":   list(val.columns) if hasattr(val, "columns") else [],
+                }
+            ))
+
+        # ── IMAGE ──
+        elif kind == "image":
+            # val could be a path, base64, or PIL image
+            caption = val.get("caption", "") if isinstance(val, dict) else "[IMAGE]"
+            image_docs.append(Document(
+                page_content=f"Image from section '{section}': {caption}",
+                metadata={
+                    **base_meta,
+                    "type":       "image",
+                    "sub_id":     j,
+                    "image_ref":  val.get("path", "") if isinstance(val, dict) else str(val),
+                }
+            ))
+
+all_docs = text_docs + table_docs + image_docs
+print(f"Text: {len(text_docs)} | Table: {len(table_docs)} | Image: {len(image_docs)}")
+```
 
 ---
 
-**What embedding model are you using?** OpenAI, HuggingFace, or something else? I'll adjust the embeddings line accordingly.- `to_list()` now correctly wraps a single `('text', ...)` tuple as `[tuple]` instead of iterating its characters
-- `safe_text()` handles tuples/lists without crashing on `pd.isna()`
-- Debug printer shows each content item by type — text, table, image
+## Step 2: Embed + Store (same `CustomEmbeddings` as before)
 
-Run the debug block and share what prints — that'll confirm the merge is working correctly.
+```python
+embeddings   = CustomEmbeddings(embedding_model="your-model-name")
+vectorstore  = FAISS.from_documents(all_docs, embeddings)
+vectorstore.save_local("mrmg_index")
+```
+
+---
+
+## Step 3: Retrieval — Return the Right Thing Per Type
+
+```python
+retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+
+def retrieve_and_render(query: str):
+    results = retriever.invoke(query)
+
+    for r in results:
+        t = r.metadata["type"]
+        print(f"\n[{t.upper()}] Section: {r.metadata['section']}")
+
+        if t == "text":
+            print(r.page_content)
+
+        elif t == "table":
+            # Send raw_table to UI for proper rendering
+            print(r.metadata["raw_table"])
+
+        elif t == "image":
+            # Send image_ref to UI to load image
+            print(f"Image path: {r.metadata['image_ref']}")
+
+retrieve_and_render("What is the GMS exposure limit for small merchants?")
+```
+
+---
+
+## What Each Type Gives You in RAG
+
+| Content Type | What Gets Embedded | What Gets Returned to LLM |
+|---|---|---|
+| `text` | Raw text | Raw text |
+| `table` | Short summary + headers | Full markdown table |
+| `image` | Caption / alt text | Image path/base64 for UI |
+
+---
+
+## Key Design Decisions
+
+**Tables** — never embed the full raw table. Embed a summary; store the full markdown in metadata. When retrieved, pass `raw_table` to the LLM as context.
+
+**Images** — embed the caption. If you have no captions, generate them first using a vision model (`gpt-4o`, `Claude`) as a preprocessing step before indexing.
+
+**Separate retrievers (optional)** — if tables are rarely retrieved correctly, create a dedicated `table_vectorstore` and merge results at query time with a custom retriever.
