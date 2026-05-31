@@ -125,7 +125,164 @@ def retrieve_and_render(query: str):
 retrieve_and_render("What is the GMS exposure limit for small merchants?")
 ```
 
+--
+Looking at your `merge_sections` output, each row's `content` is a list of typed tuples. Here's how to wire that directly into the RAG pipeline:
+
+## What Your Data Looks Like After Merge
+
+```
+Section: "3.2 Merchant Limits"
+content: [
+    ('text', 'GMS exposure limit for small merchants...'),
+    ('table', <DataFrame>),
+    ('text', 'See table above for tier breakdown...'),
+    ('image', '<base64string>')
+]
+```
+
 ---
+
+## Full Pipeline — From `doc_df` to Retrieval
+
+```python
+import asyncio
+import pandas as pd
+from langchain_core.documents import Document
+from langchain_community.vectorstores import FAISS
+
+
+# ── Step 1: Extract typed sub-documents directly from content tuples ──
+
+def build_documents(doc_df: pd.DataFrame) -> list[Document]:
+    text_docs  = []
+    table_docs = []
+    image_docs = []
+
+    for i, row in doc_df.iterrows():
+        section  = row["section_name"] if pd.notna(row["section_name"]) else "Unknown"
+        base_meta = {"chunk_id": i, "section": section}
+
+        for j, item in enumerate(row["content"]):
+            if not isinstance(item, tuple) or len(item) < 2:
+                continue
+
+            kind, val = item[0], item[1]
+
+            # ── TEXT: embed as-is ──
+            if kind == "text":
+                clean = str(val).strip()
+                if not clean:
+                    continue
+                text_docs.append(Document(
+                    page_content=clean,
+                    metadata={**base_meta, "type": "text", "sub_id": j}
+                ))
+
+            # ── TABLE: embed summary, store full markdown ──
+            elif kind == "table" and hasattr(val, "to_markdown"):
+                cols     = list(val.columns) if hasattr(val, "columns") else []
+                markdown = val.to_markdown()
+                # Embed a semantic summary — not the raw table
+                summary  = (
+                    f"Table in section '{section}' "
+                    f"with columns: {', '.join(cols)}.\n"
+                    f"{markdown[:400]}"
+                )
+                table_docs.append(Document(
+                    page_content=summary,
+                    metadata={
+                        **base_meta,
+                        "type":      "table",
+                        "sub_id":    j,
+                        "raw_table": markdown,   # ← full table for LLM context
+                        "col_names": cols,
+                    }
+                ))
+
+            # ── IMAGE: embed caption, store base64 ──
+            elif kind == "image":
+                caption = f"Image in section '{section}'"
+                image_docs.append(Document(
+                    page_content=caption,
+                    metadata={
+                        **base_meta,
+                        "type":      "image",
+                        "sub_id":    j,
+                        "image_b64": str(val),   # ← base64 for UI rendering
+                    }
+                ))
+
+    print(f"Text: {len(text_docs)} | Table: {len(table_docs)} | Image: {len(image_docs)}")
+    return text_docs + table_docs + image_docs
+
+
+documents = build_documents(doc_df)
+
+
+# ── Step 2: Embed + store ──
+
+embeddings  = CustomEmbeddings(embedding_model="your-model-name")
+vectorstore = FAISS.from_documents(documents, embeddings)
+vectorstore.save_local("mrmg_index")
+
+
+# ── Step 3: Retrieval — render each type correctly ──
+
+def retrieve(query: str, k: int = 5):
+    retriever = vectorstore.as_retriever(search_kwargs={"k": k})
+    results   = retriever.invoke(query)
+
+    context_for_llm = []
+
+    for r in results:
+        kind = r.metadata["type"]
+
+        if kind == "text":
+            context_for_llm.append({
+                "type":    "text",
+                "section": r.metadata["section"],
+                "content": r.page_content,
+            })
+
+        elif kind == "table":
+            # Pass raw_table to LLM — not the summary that was embedded
+            context_for_llm.append({
+                "type":    "table",
+                "section": r.metadata["section"],
+                "content": r.metadata["raw_table"],
+            })
+
+        elif kind == "image":
+            context_for_llm.append({
+                "type":      "image",
+                "section":   r.metadata["section"],
+                "image_b64": r.metadata["image_b64"],
+            })
+
+    return context_for_llm
+
+
+results = retrieve("What is the GMS exposure limit for small merchants?")
+
+for r in results:
+    print(f"\n[{r['type'].upper()}] {r['section']}")
+    if r["type"] != "image":
+        print(r["content"][:300])
+    else:
+        print(f"base64 length: {len(r['image_b64'])}")
+```
+
+---
+
+## The Key Design Per Type
+
+| Type | What Gets **Embedded** | What Gets Passed to **LLM** |
+|---|---|---|
+| `text` | Raw text | Raw text |
+| `table` | Column names + first 400 chars | Full `raw_table` markdown from metadata |
+| `image` | Section caption | `image_b64` for vision model or UI |
+
+The trick with tables is you **embed a summary** (so semantic search finds it) but **retrieve the full markdown** for the LLM to reason over — those two things live separately in `page_content` vs `metadata["raw_table"]`.
 
 ## What Each Type Gives You in RAG
 
