@@ -1,146 +1,40 @@
 Great question. Here's how to think about it systematically:
 
-## The Core Problem
+## The The error is on line 37 — `', '.join(cols)` is failing because `cols` contains **integers** (numeric column indices) instead of strings.
 
-Your chunks have **mixed content** (text + table + image) and you can't embed everything the same way. You need a strategy per content type.
-
----
-
-## Strategy: Multi-Modal RAG Architecture
-
-```
-                    ┌─────────────────────────────────┐
-                    │         Your doc_df chunk        │
-                    │  content: [text, table, image]   │
-                    └────────────┬────────────────────┘
-                                 │
-              ┌──────────────────┼──────────────────┐
-              ▼                  ▼                   ▼
-         TEXT nodes         TABLE nodes         IMAGE nodes
-         embed as-is      embed summary       embed caption
-                          + store raw df      + store path
-```
-
----
-
-## Implementation
+Fix is a one-liner, just cast each col to `str`:
 
 ```python
-import asyncio
-import pandas as pd
-from langchain_core.documents import Document
-
-# ── Step 1: Explode each chunk into typed sub-documents ──
-
-text_docs   = []
-table_docs  = []
-image_docs  = []
-
-for i, row in doc_df.iterrows():
-    section = row["section_name"] if pd.notna(row["section_name"]) else "Unknown"
-    base_meta = {"chunk_id": i, "section": section}
-
-    for j, item in enumerate(row["content"]):
-        if not isinstance(item, tuple):
-            continue
-
-        kind, val = item[0], item[1]
-
-        # ── TEXT ──
-        if kind == "text" and str(val).strip():
-            text_docs.append(Document(
-                page_content=str(val).strip(),
-                metadata={**base_meta, "type": "text", "sub_id": j}
-            ))
-
-        # ── TABLE ──
-        elif kind == "table" and hasattr(val, "to_markdown"):
-            markdown  = val.to_markdown()
-            # What you embed: a human-readable summary so semantic search works
-            summary   = f"Table from section '{section}':\n{markdown[:500]}"
-            table_docs.append(Document(
-                page_content=summary,
-                metadata={
-                    **base_meta,
-                    "type":        "table",
-                    "sub_id":      j,
-                    "raw_table":   markdown,       # full table stored in metadata
-                    "col_names":   list(val.columns) if hasattr(val, "columns") else [],
-                }
-            ))
-
-        # ── IMAGE ──
-        elif kind == "image":
-            # val could be a path, base64, or PIL image
-            caption = val.get("caption", "") if isinstance(val, dict) else "[IMAGE]"
-            image_docs.append(Document(
-                page_content=f"Image from section '{section}': {caption}",
-                metadata={
-                    **base_meta,
-                    "type":       "image",
-                    "sub_id":     j,
-                    "image_ref":  val.get("path", "") if isinstance(val, dict) else str(val),
-                }
-            ))
-
-all_docs = text_docs + table_docs + image_docs
-print(f"Text: {len(text_docs)} | Table: {len(table_docs)} | Image: {len(image_docs)}")
+# ── TABLE: embed summary, store full markdown ──
+elif kind == "table" and hasattr(val, "to_markdown"):
+    cols     = [str(c) for c in val.columns] if hasattr(val, "columns") else []  # ← fix here
+    markdown = val.to_markdown()
+    summary  = (
+        f"Table in section '{section}' "
+        f"with columns: {', '.join(cols)}.\n"
+        f"{markdown[:400]}"
+    )
+    table_docs.append(Document(
+        page_content=summary,
+        metadata={
+            **base_meta,
+            "type":      "table",
+            "sub_id":    j,
+            "raw_table": markdown,
+            "col_names": cols,
+        }
+    ))
 ```
 
----
-
-## Step 2: Embed + Store (same `CustomEmbeddings` as before)
+Your table's column headers are integers (0, 1, 2...) — common when pandas reads a table with no header row. If you want to also fix the root cause:
 
 ```python
-embeddings   = CustomEmbeddings(embedding_model="your-model-name")
-vectorstore  = FAISS.from_documents(all_docs, embeddings)
-vectorstore.save_local("mrmg_index")
+# Reset column names to strings when reading the table
+if all(isinstance(c, int) for c in val.columns):
+    val.columns = [f"col_{c}" for c in val.columns]
 ```
 
----
-
-## Step 3: Retrieval — Return the Right Thing Per Type
-
-```python
-retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
-
-def retrieve_and_render(query: str):
-    results = retriever.invoke(query)
-
-    for r in results:
-        t = r.metadata["type"]
-        print(f"\n[{t.upper()}] Section: {r.metadata['section']}")
-
-        if t == "text":
-            print(r.page_content)
-
-        elif t == "table":
-            # Send raw_table to UI for proper rendering
-            print(r.metadata["raw_table"])
-
-        elif t == "image":
-            # Send image_ref to UI to load image
-            print(f"Image path: {r.metadata['image_ref']}")
-
-retrieve_and_render("What is the GMS exposure limit for small merchants?")
-```
-
---
-Looking at your `merge_sections` output, each row's `content` is a list of typed tuples. Here's how to wire that directly into the RAG pipeline:
-
-## What Your Data Looks Like After Merge
-
-```
-Section: "3.2 Merchant Limits"
-content: [
-    ('text', 'GMS exposure limit for small merchants...'),
-    ('table', <DataFrame>),
-    ('text', 'See table above for tier breakdown...'),
-    ('image', '<base64string>')
-]
-```
-
----
+Add that line right after `kind, val = item[0], item[1]` in the table branch.
 
 ## Full Pipeline — From `doc_df` to Retrieval
 
