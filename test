@@ -136,7 +136,106 @@ retrieve_and_render("What is the GMS exposure limit for small merchants?")
 | `image` | Caption / alt text | Image path/base64 for UI |
 
 ---
+Looking at your code, the main things to adapt are:
 
+1. **Replace `OpenAIEmbeddings`** with your custom `Embed` class
+2. **Replace `FAISS.from_documents`** with manual embedding + upsert (since your `Embed` class operates on raw dicts, not LangChain Documents)
+
+Here's the updated version:
+
+```python
+import asyncio
+import pandas as pd
+from langchain_core.documents import Document
+from langchain_community.vectorstores import FAISS
+from langchain_core.embeddings import Embeddings
+
+from embed import Embed  # your Embed class
+
+
+# ── Adapter: wrap your Embed class as a LangChain-compatible Embeddings object ──
+class CustomEmbeddings(Embeddings):
+    def __init__(self, embedding_model: str):
+        self.embed = Embed(embedding_model)
+
+    def _run_batch(self, texts: list[str]) -> list[str]:
+        batch = [{"chunked_content": t} for t in texts]
+        result = asyncio.run(self.embed.embedding_call(batch))
+        return [r["chunked_content_clean_vector"] for r in result]
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        raw = self._run_batch(texts)
+        return [eval(v) for v in raw]  # your Embed stores vectors as str(list)
+
+    def embed_query(self, text: str) -> list[float]:
+        return self.embed_documents([text])[0]
+
+
+# ── Step 1: Build LangChain Documents from your merged df ──
+documents = []
+
+for i, row in doc_df.iterrows():
+    content_parts = []
+    for item in row["content"]:
+        if isinstance(item, tuple):
+            kind, val = item[0], item[1]
+            if kind == "text":
+                content_parts.append(str(val))
+            elif kind == "table":
+                content_parts.append(val.to_markdown() if hasattr(val, "to_markdown") else str(val))
+            elif kind == "image":
+                content_parts.append("[IMAGE]")
+        else:
+            content_parts.append(str(item))
+
+    full_content = "\n".join(content_parts).strip()
+    if not full_content:
+        continue
+
+    doc = Document(
+        page_content=full_content,
+        metadata={
+            "chunk_id": i,
+            "section": row["section_name"] if pd.notna(row["section_name"]) else "Unknown",
+            "word_count": len(full_content.split()),
+            "has_table": any(isinstance(x, tuple) and x[0] == "table" for x in row["content"]),
+            "has_image": any(isinstance(x, tuple) and x[0] == "image" for x in row["content"]),
+        }
+    )
+    documents.append(doc)
+
+print(f"Total LangChain documents: {len(documents)}")
+
+# ── Step 2: Embed and store using your custom model ──
+embeddings = CustomEmbeddings(embedding_model="your-model-name-here")
+
+vectorstore = FAISS.from_documents(documents, embeddings)
+vectorstore.save_local("mrmg_index")
+print("Vector store saved!")
+
+# ── Step 3: Test retrieval ──
+retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+
+query = "What is the GMS exposure limit for small merchants?"
+results = retriever.invoke(query)
+
+for r in results:
+    print(f"\n{'='*50}")
+    print(f"Section  : {r.metadata['section']}")
+    print(f"Chunk ID : {r.metadata['chunk_id']}")
+    print(f"Has Table: {r.metadata['has_table']}")
+    print(f"Content  : {r.page_content[:300]}")
+```
+
+**The key addition is `CustomEmbeddings`** — it bridges your `Embed` class to LangChain's interface:
+
+| What it does | Why |
+|---|---|
+| Wraps `Embed` as `Embeddings` subclass | `FAISS.from_documents` requires a LangChain-compatible embeddings object |
+| `eval(v)` converts `str(list)` back to `list[float]` | Your `Embed` stores the vector as a string — FAISS needs actual floats |
+| `asyncio.run(...)` in `_run_batch` | Your `embedding_call` is `async`; LangChain's interface is sync |
+
+One thing to watch: if you're already inside an async context (e.g. a Jupyter notebook or FastAPI), replace `asyncio.run(...)` with `await` and make `embed_documents` / `embed_query` async too.
 ## Key Design Decisions
 
 **Tables** — never embed the full raw table. Embed a summary; store the full markdown in metadata. When retrieved, pass `raw_table` to the LLM as context.
