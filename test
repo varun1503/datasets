@@ -1,20 +1,115 @@
-        for c in content['data']:
-            
-            # --- THE ULTIMATE SHIELD ---
-            # If the block of code itself is a master section break, 
-            # drop it immediately. Do not paste it!
-            if c.tag == f'{{{w}}}sectPr':
-                continue
-            # ---------------------------
+Looking at your images, I can see your `content` column has tuples like `('text', 'some text')`, `('table', dataframe)`, `('image', base64data)`.
 
-            # 1. Strip Bookmarks
-            etree.strip_elements(c, f'{{{w}}}bookmarkStart', with_tail=False)
-            etree.strip_elements(c, f'{{{w}}}bookmarkEnd', with_tail=False)
-            
-            # 2. Strip Hyperlinks
-            etree.strip_tags(c, f'{{{w}}}hyperlink')
-            
-            # 3. Strip Spellcheck (Removes the 10,000 proofErr tags!)
-            etree.strip_tags(c, f'{{{w}}}proofErr')
+The issue is your `to_list` and merge isn't handling these tuples properly.
 
-            # ... (keep the rest of your stripping logic here) ...
+Here's the fix:
+
+```python
+import pandas as pd
+import numpy as np
+
+def merge_sections(
+    df,
+    section_col="section_name",
+    text_col="paragraph_content",
+    content_col="content",
+    max_nan_words=1000
+):
+    def to_list(x):
+        if x is None:
+            return []
+        if pd.isna(x) if not isinstance(x, (list, tuple, dict)) else False:
+            return []
+        if isinstance(x, list):
+            return x
+        if isinstance(x, tuple):
+            return [x]  # ← wrap single tuple as list item
+        return [x]
+
+    def safe_text(x):
+        if x is None or (not isinstance(x, (list, tuple)) and pd.isna(x)):
+            return ""
+        return str(x)
+
+    merged_rows = []
+    current_row = None
+    current_nan_words = 0
+
+    for _, row in df.iterrows():
+        section = row[section_col]
+        text = safe_text(row.get(text_col, ""))
+        row_words = len(text.split())
+
+        if current_row is None:
+            current_row = row.copy()
+            current_row[content_col] = to_list(current_row[content_col])
+            current_nan_words = row_words if pd.isna(section) else 0
+            continue
+
+        current_section = current_row[section_col]
+
+        same_section = (
+            (pd.isna(section) and pd.isna(current_section))
+            or (
+                pd.notna(section)
+                and pd.notna(current_section)
+                and section == current_section
+            )
+        )
+
+        if same_section:
+            if pd.isna(section):
+                if current_nan_words + row_words <= max_nan_words:
+                    current_row[text_col] = (safe_text(current_row[text_col]) + " " + text).strip()
+                    current_row[content_col].extend(to_list(row[content_col]))
+                    current_nan_words += row_words
+                else:
+                    merged_rows.append(current_row)
+                    current_row = row.copy()
+                    current_row[content_col] = to_list(current_row[content_col])
+                    current_nan_words = row_words
+            else:
+                current_row[text_col] = (safe_text(current_row[text_col]) + " " + text).strip()
+                current_row[content_col].extend(to_list(row[content_col]))
+        else:
+            merged_rows.append(current_row)
+            current_row = row.copy()
+            current_row[content_col] = to_list(current_row[content_col])
+            current_nan_words = row_words if pd.isna(section) else 0
+
+    if current_row is not None:
+        merged_rows.append(current_row)
+
+    return pd.DataFrame(merged_rows)
+
+
+doc_df = merge_sections(df)
+
+# ── Debug print to verify content is merging correctly ──
+for i, row in doc_df.head(5).iterrows():
+    print(f"\n{'='*60}")
+    print(f"Section : {row['section_name']}")
+    print(f"Text    : {str(row['paragraph_content'])[:200]}")
+    print(f"Content items: {len(row['content'])}")
+    for item in row['content']:
+        if isinstance(item, tuple):
+            kind = item[0]
+            val  = item[1]
+            if kind == 'text':
+                print(f"  [TEXT]  {str(val)[:100]}")
+            elif kind == 'table':
+                print(f"  [TABLE] shape={val.shape if hasattr(val, 'shape') else 'N/A'}")
+            elif kind == 'image':
+                print(f"  [IMAGE] base64 len={len(str(val))}")
+            else:
+                print(f"  [{kind.upper()}] {str(val)[:80]}")
+        else:
+            print(f"  [RAW] {str(item)[:100]}")
+```
+
+**Key fixes:**
+- `to_list()` now correctly wraps a single `('text', ...)` tuple as `[tuple]` instead of iterating its characters
+- `safe_text()` handles tuples/lists without crashing on `pd.isna()`
+- Debug printer shows each content item by type — text, table, image
+
+Run the debug block and share what prints — that'll confirm the merge is working correctly.
