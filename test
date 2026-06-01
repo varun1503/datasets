@@ -1,245 +1,110 @@
-Great question. Here's how to think about it systematically:
+Your current code already merges rows by section, but the issue is it only merges **consecutive** rows with the same section. If the same section appears in non-consecutive rows, they won't be merged.
 
-## The Core Problem
-
-Your chunks have **mixed content** (text + table + image) and you can't embed everything the same way. You need a strategy per content type.
-
----
-
-## Strategy: Multi-Modal RAG Architecture
-
-```
-                    ┌─────────────────────────────────┐
-                    │         Your doc_df chunk        │
-                    │  content: [text, table, image]   │
-                    └────────────┬────────────────────┘
-                                 │
-              ┌──────────────────┼──────────────────┐
-              ▼                  ▼                   ▼
-         TEXT nodes         TABLE nodes         IMAGE nodes
-         embed as-is      embed summary       embed caption
-                          + store raw df      + store path
-```
-
----
-
-## Implementation
+Here's the fixed version that merges **all rows for the same section** regardless of position:
 
 ```python
-import asyncio
 import pandas as pd
-from langchain_core.documents import Document
+import numpy as np
 
-# ── Step 1: Explode each chunk into typed sub-documents ──
+def merge_sections(
+    df,
+    section_col="section_name",
+    text_col="paragraph_content",
+    content_col="content",
+    max_nan_words=1000
+):
+    def to_list(x):
+        if x is None:
+            return []
+        if pd.isna(x) if not isinstance(x, (list, tuple, dict)) else False:
+            return []
+        if isinstance(x, list):
+            return x
+        if isinstance(x, tuple):
+            return [x]
+        return [x]
 
-text_docs   = []
-table_docs  = []
-image_docs  = []
+    def safe_text(x):
+        if x is None or (not isinstance(x, (list, tuple)) and pd.isna(x)):
+            return ""
+        return str(x)
 
-for i, row in doc_df.iterrows():
-    section = row["section_name"] if pd.notna(row["section_name"]) else "Unknown"
-    base_meta = {"chunk_id": i, "section": section}
+    # ── Separate named sections vs NaN sections ────────────────────────────
+    nan_mask = df[section_col].isna()
+    named_df = df[~nan_mask].copy()
+    nan_df   = df[nan_mask].copy()
 
-    for j, item in enumerate(row["content"]):
-        if not isinstance(item, tuple):
+    merged_rows = []
+
+    # ── 1. Merge all rows with the same section name into one row ──────────
+    for section_name, group in named_df.groupby(section_col, sort=False):
+        first_row = group.iloc[0].copy()
+
+        # Combine all text
+        all_text = " ".join(
+            safe_text(t) for t in group[text_col] if safe_text(t)
+        ).strip()
+        first_row[text_col] = all_text
+
+        # Combine all content lists
+        combined_content = []
+        for c in group[content_col]:
+            combined_content.extend(to_list(c))
+        first_row[content_col] = combined_content
+
+        merged_rows.append(first_row)
+
+    named_merged = pd.DataFrame(merged_rows)
+
+    # ── 2. Handle NaN sections — chunk by max_nan_words ───────────────────
+    nan_rows = []
+    current_row = None
+    current_nan_words = 0
+
+    for _, row in nan_df.iterrows():
+        text = safe_text(row.get(text_col, ""))
+        row_words = len(text.split())
+
+        if current_row is None:
+            current_row = row.copy()
+            current_row[content_col] = to_list(current_row[content_col])
+            current_nan_words = row_words
             continue
 
-        kind, val = item[0], item[1]
-
-        # ── TEXT ──
-        if kind == "text" and str(val).strip():
-            text_docs.append(Document(
-                page_content=str(val).strip(),
-                metadata={**base_meta, "type": "text", "sub_id": j}
-            ))
-
-        # ── TABLE ──
-        elif kind == "table" and hasattr(val, "to_markdown"):
-            markdown  = val.to_markdown()
-            # What you embed: a human-readable summary so semantic search works
-            summary   = f"Table from section '{section}':\n{markdown[:500]}"
-            table_docs.append(Document(
-                page_content=summary,
-                metadata={
-                    **base_meta,
-                    "type":        "table",
-                    "sub_id":      j,
-                    "raw_table":   markdown,       # full table stored in metadata
-                    "col_names":   list(val.columns) if hasattr(val, "columns") else [],
-                }
-            ))
-
-        # ── IMAGE ──
-        elif kind == "image":
-            # val could be a path, base64, or PIL image
-            caption = val.get("caption", "") if isinstance(val, dict) else "[IMAGE]"
-            image_docs.append(Document(
-                page_content=f"Image from section '{section}': {caption}",
-                metadata={
-                    **base_meta,
-                    "type":       "image",
-                    "sub_id":     j,
-                    "image_ref":  val.get("path", "") if isinstance(val, dict) else str(val),
-                }
-            ))
-
-all_docs = text_docs + table_docs + image_docs
-print(f"Text: {len(text_docs)} | Table: {len(table_docs)} | Image: {len(image_docs)}")
-```
-
----
-
-## Step 2: Embed + Store (same `CustomEmbeddings` as before)
-
-```python
-embeddings   = CustomEmbeddings(embedding_model="your-model-name")
-vectorstore  = FAISS.from_documents(all_docs, embeddings)
-vectorstore.save_local("mrmg_index")
-```
-
----
-
-## Step 3: Retrieval — Return the Right Thing Per Type
-
-```python
-retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
-
-def retrieve_and_render(query: str):
-    results = retriever.invoke(query)
-
-    for r in results:
-        t = r.metadata["type"]
-        print(f"\n[{t.upper()}] Section: {r.metadata['section']}")
-
-        if t == "text":
-            print(r.page_content)
-
-        elif t == "table":
-            # Send raw_table to UI for proper rendering
-            print(r.metadata["raw_table"])
-
-        elif t == "image":
-            # Send image_ref to UI to load image
-            print(f"Image path: {r.metadata['image_ref']}")
-
-retrieve_and_render("What is the GMS exposure limit for small merchants?")
-```
-
----
-
-## What Each Type Gives You in RAG
-
-| Content Type | What Gets Embedded | What Gets Returned to LLM |
-|---|---|---|
-| `text` | Raw text | Raw text |
-| `table` | Short summary + headers | Full markdown table |
-| `image` | Caption / alt text | Image path/base64 for UI |
-
----
-Looking at your code, the main things to adapt are:
-
-1. **Replace `OpenAIEmbeddings`** with your custom `Embed` class
-2. **Replace `FAISS.from_documents`** with manual embedding + upsert (since your `Embed` class operates on raw dicts, not LangChain Documents)
-
-Here's the updated version:
-
-```python
-import asyncio
-import pandas as pd
-from langchain_core.documents import Document
-from langchain_community.vectorstores import FAISS
-from langchain_core.embeddings import Embeddings
-
-from embed import Embed  # your Embed class
-
-
-# ── Adapter: wrap your Embed class as a LangChain-compatible Embeddings object ──
-class CustomEmbeddings(Embeddings):
-    def __init__(self, embedding_model: str):
-        self.embed = Embed(embedding_model)
-
-    def _run_batch(self, texts: list[str]) -> list[str]:
-        batch = [{"chunked_content": t} for t in texts]
-        result = asyncio.run(self.embed.embedding_call(batch))
-        return [r["chunked_content_clean_vector"] for r in result]
-
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        raw = self._run_batch(texts)
-        return [eval(v) for v in raw]  # your Embed stores vectors as str(list)
-
-    def embed_query(self, text: str) -> list[float]:
-        return self.embed_documents([text])[0]
-
-
-# ── Step 1: Build LangChain Documents from your merged df ──
-documents = []
-
-for i, row in doc_df.iterrows():
-    content_parts = []
-    for item in row["content"]:
-        if isinstance(item, tuple):
-            kind, val = item[0], item[1]
-            if kind == "text":
-                content_parts.append(str(val))
-            elif kind == "table":
-                content_parts.append(val.to_markdown() if hasattr(val, "to_markdown") else str(val))
-            elif kind == "image":
-                content_parts.append("[IMAGE]")
+        if current_nan_words + row_words <= max_nan_words:
+            current_row[text_col] = (safe_text(current_row[text_col]) + " " + text).strip()
+            current_row[content_col].extend(to_list(row[content_col]))
+            current_nan_words += row_words
         else:
-            content_parts.append(str(item))
+            nan_rows.append(current_row)
+            current_row = row.copy()
+            current_row[content_col] = to_list(current_row[content_col])
+            current_nan_words = row_words
 
-    full_content = "\n".join(content_parts).strip()
-    if not full_content:
-        continue
+    if current_row is not None:
+        nan_rows.append(current_row)
 
-    doc = Document(
-        page_content=full_content,
-        metadata={
-            "chunk_id": i,
-            "section": row["section_name"] if pd.notna(row["section_name"]) else "Unknown",
-            "word_count": len(full_content.split()),
-            "has_table": any(isinstance(x, tuple) and x[0] == "table" for x in row["content"]),
-            "has_image": any(isinstance(x, tuple) and x[0] == "image" for x in row["content"]),
-        }
-    )
-    documents.append(doc)
+    nan_merged = pd.DataFrame(nan_rows) if nan_rows else pd.DataFrame(columns=df.columns)
 
-print(f"Total LangChain documents: {len(documents)}")
+    # ── 3. Combine and restore original section order ──────────────────────
+    doc_df = pd.concat([named_merged, nan_merged], ignore_index=True)
 
-# ── Step 2: Embed and store using your custom model ──
-embeddings = CustomEmbeddings(embedding_model="your-model-name-here")
+    return doc_df
 
-vectorstore = FAISS.from_documents(documents, embeddings)
-vectorstore.save_local("mrmg_index")
-print("Vector store saved!")
 
-# ── Step 3: Test retrieval ──
-retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-
-query = "What is the GMS exposure limit for small merchants?"
-results = retriever.invoke(query)
-
-for r in results:
-    print(f"\n{'='*50}")
-    print(f"Section  : {r.metadata['section']}")
-    print(f"Chunk ID : {r.metadata['chunk_id']}")
-    print(f"Has Table: {r.metadata['has_table']}")
-    print(f"Content  : {r.page_content[:300]}")
+doc_df = merge_sections(df)
+print(f"Original rows : {len(df)}")
+print(f"Merged rows   : {len(doc_df)}")
+print(doc_df[[" section_name", "paragraph_content"]].head(20))
 ```
 
-**The key addition is `CustomEmbeddings`** — it bridges your `Embed` class to LangChain's interface:
+Key changes vs your original:
 
-| What it does | Why |
-|---|---|
-| Wraps `Embed` as `Embeddings` subclass | `FAISS.from_documents` requires a LangChain-compatible embeddings object |
-| `eval(v)` converts `str(list)` back to `list[float]` | Your `Embed` stores the vector as a string — FAISS needs actual floats |
-| `asyncio.run(...)` in `_run_batch` | Your `embedding_call` is `async`; LangChain's interface is sync |
+| | Original | Fixed |
+|---|---|---|
+| Merge strategy | Consecutive rows only | All rows per section globally |
+| Named sections | `groupby` on consecutive | `groupby` across entire df |
+| NaN sections | Mixed in main loop | Handled separately with word limit |
+| Result order | Insertion order | Named sections first, then NaN chunks |
 
-One thing to watch: if you're already inside an async context (e.g. a Jupyter notebook or FastAPI), replace `asyncio.run(...)` with `await` and make `embed_documents` / `embed_query` async too.
-## Key Design Decisions
-
-**Tables** — never embed the full raw table. Embed a summary; store the full markdown in metadata. When retrieved, pass `raw_table` to the LLM as context.
-
-**Images** — embed the caption. If you have no captions, generate them first using a vision model (`gpt-4o`, `Claude`) as a preprocessing step before indexing.
-
-**Separate retrievers (optional)** — if tables are rarely retrieved correctly, create a dedicated `table_vectorstore` and merge results at query time with a custom retriever.
+If you need to **preserve the original row order** (NaN rows interleaved with named sections), let me know and I can adjust for that too.
