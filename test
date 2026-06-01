@@ -1,110 +1,147 @@
-Your current code already merges rows by section, but the issue is it only merges **consecutive** rows with the same section. If the same section appears in non-consecutive rows, they won't be merged.
-
-Here's the fixed version that merges **all rows for the same section** regardless of position:
+Here's a separate clean `build_documents` function that takes the merged `doc_df`:
 
 ```python
+from langchain_core.documents import Document
 import pandas as pd
-import numpy as np
 
-def merge_sections(
-    df,
+def build_documents(
+    doc_df,
     section_col="section_name",
     text_col="paragraph_content",
     content_col="content",
-    max_nan_words=1000
+    type_col="type",
+    image_col="image_base64",
+    table_col="table_data",
 ):
-    def to_list(x):
-        if x is None:
-            return []
-        if pd.isna(x) if not isinstance(x, (list, tuple, dict)) else False:
-            return []
-        if isinstance(x, list):
-            return x
-        if isinstance(x, tuple):
-            return [x]
-        return [x]
-
     def safe_text(x):
         if x is None or (not isinstance(x, (list, tuple)) and pd.isna(x)):
             return ""
         return str(x)
 
-    # ── Separate named sections vs NaN sections ────────────────────────────
-    nan_mask = df[section_col].isna()
-    named_df = df[~nan_mask].copy()
-    nan_df   = df[nan_mask].copy()
+    def safe_val(x):
+        if x is None:
+            return None
+        try:
+            if pd.isna(x):
+                return None
+        except Exception:
+            pass
+        return x
 
-    merged_rows = []
+    documents = []
+    text_count = 0
+    table_count = 0
+    image_count = 0
 
-    # ── 1. Merge all rows with the same section name into one row ──────────
-    for section_name, group in named_df.groupby(section_col, sort=False):
-        first_row = group.iloc[0].copy()
+    for chunk_id, row in doc_df.iterrows():
 
-        # Combine all text
-        all_text = " ".join(
-            safe_text(t) for t in group[text_col] if safe_text(t)
-        ).strip()
-        first_row[text_col] = all_text
+        section    = safe_val(row.get(section_col))
+        raw_text   = safe_text(row.get(text_col, ""))
+        content    = row.get(content_col, [])
+        row_type   = safe_val(row.get(type_col))
+        image_b64  = safe_val(row.get(image_col))
+        table_data = safe_val(row.get(table_col))
 
-        # Combine all content lists
-        combined_content = []
-        for c in group[content_col]:
-            combined_content.extend(to_list(c))
-        first_row[content_col] = combined_content
+        # ── Detect type if not explicitly set ─────────────────────────────
+        if row_type is None:
+            if image_b64:
+                row_type = "image"
+            elif table_data:
+                row_type = "table"
+            else:
+                row_type = "text"
 
-        merged_rows.append(first_row)
+        # ── Build page_content based on type ──────────────────────────────
+        if row_type == "image":
+            page_content = raw_text if raw_text else "[IMAGE]"
+            image_count += 1
 
-    named_merged = pd.DataFrame(merged_rows)
+        elif row_type == "table":
+            if isinstance(table_data, list):
+                # list of dicts → markdown table
+                table_df = pd.DataFrame(table_data)
+                page_content = table_df.to_markdown(index=False)
+            elif isinstance(table_data, dict):
+                table_df = pd.DataFrame([table_data])
+                page_content = table_df.to_markdown(index=False)
+            else:
+                page_content = safe_text(table_data)
+            # Append any caption/text below table
+            if raw_text:
+                page_content = f"{page_content}\n\n{raw_text}"
+            table_count += 1
 
-    # ── 2. Handle NaN sections — chunk by max_nan_words ───────────────────
-    nan_rows = []
-    current_row = None
-    current_nan_words = 0
+        else:  # text
+            page_content = raw_text
+            text_count += 1
 
-    for _, row in nan_df.iterrows():
-        text = safe_text(row.get(text_col, ""))
-        row_words = len(text.split())
-
-        if current_row is None:
-            current_row = row.copy()
-            current_row[content_col] = to_list(current_row[content_col])
-            current_nan_words = row_words
+        # ── Skip empty documents ──────────────────────────────────────────
+        if not page_content.strip():
             continue
 
-        if current_nan_words + row_words <= max_nan_words:
-            current_row[text_col] = (safe_text(current_row[text_col]) + " " + text).strip()
-            current_row[content_col].extend(to_list(row[content_col]))
-            current_nan_words += row_words
-        else:
-            nan_rows.append(current_row)
-            current_row = row.copy()
-            current_row[content_col] = to_list(current_row[content_col])
-            current_nan_words = row_words
+        # ── Build metadata ────────────────────────────────────────────────
+        metadata = {
+            "chunk_id"  : chunk_id,
+            "section"   : section if section else "unknown",
+            "type"      : row_type,
+            "has_image" : image_b64 is not None,
+            "has_table" : table_data is not None,
+        }
 
-    if current_row is not None:
-        nan_rows.append(current_row)
+        # Attach base64 image to metadata if present
+        if image_b64:
+            metadata["image_base64"] = image_b64
 
-    nan_merged = pd.DataFrame(nan_rows) if nan_rows else pd.DataFrame(columns=df.columns)
+        # Attach raw table to metadata if present
+        if table_data is not None:
+            metadata["table_data"] = table_data
 
-    # ── 3. Combine and restore original section order ──────────────────────
-    doc_df = pd.concat([named_merged, nan_merged], ignore_index=True)
+        # Attach content list to metadata if present
+        if isinstance(content, list) and len(content) > 0:
+            metadata["content"] = content
 
-    return doc_df
+        # ── Create Document ───────────────────────────────────────────────
+        doc = Document(
+            page_content=page_content,
+            metadata=metadata
+        )
+        documents.append(doc)
+
+    print(f"Text: {text_count} | Table: {table_count} | Image: {image_count}")
+    return documents
 
 
-doc_df = merge_sections(df)
-print(f"Original rows : {len(df)}")
-print(f"Merged rows   : {len(doc_df)}")
-print(doc_df[[" section_name", "paragraph_content"]].head(20))
+# ── Usage ─────────────────────────────────────────────────────────────────────
+
+doc_df   = merge_sections(df)
+documents = build_documents(doc_df)
+
+print(f"Total documents: {len(documents)}")
+
+# Preview first 3
+for doc in documents[:3]:
+    print("\n--- Document ---")
+    print(f"Section : {doc.metadata['section']}")
+    print(f"Type    : {doc.metadata['type']}")
+    print(f"Has Image: {doc.metadata['has_image']}")
+    print(f"Has Table: {doc.metadata['has_table']}")
+    print(f"Content : {doc.page_content[:200]}")
 ```
 
-Key changes vs your original:
+How each type is handled:
 
-| | Original | Fixed |
+| Type | `page_content` | Metadata extras |
 |---|---|---|
-| Merge strategy | Consecutive rows only | All rows per section globally |
-| Named sections | `groupby` on consecutive | `groupby` across entire df |
-| NaN sections | Mixed in main loop | Handled separately with word limit |
-| Result order | Insertion order | Named sections first, then NaN chunks |
+| `text` | Raw paragraph text | — |
+| `table` | Markdown table + caption | `table_data` (raw) |
+| `image` | Caption/alt text or `[IMAGE]` | `image_base64` |
 
-If you need to **preserve the original row order** (NaN rows interleaved with named sections), let me know and I can adjust for that too.
+If your columns have different names, just pass them in:
+```python
+documents = build_documents(
+    doc_df,
+    section_col="section_name",
+    image_col="img_b64",
+    table_col="tbl"
+)
+```
