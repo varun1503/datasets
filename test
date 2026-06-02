@@ -1,207 +1,368 @@
-Here's the modified `build_documents` where tables are converted to string and combined with text for richer retrieval context:
+"""
+RAG Evaluation Pipeline
+Supports both DeepEval and RAGAS frameworks side-by-side.
 
-```python
-from langchain_core.documents import Document
-import pandas as pd
+Install:
+    pip install deepeval ragas langchain langchain-openai langchain-community faiss-cpu openai pandas tabulate
+
+Usage:
+    export OPENAI_API_KEY=sk-...
+    python rag_evaluation_pipeline.py
+"""
+
+import os
 import json
+import pandas as pd
+from typing import List, Dict, Any
 
-def build_documents(
-    doc_df,
-    section_col="section_name",
-    text_col="paragraph_content",
-    content_col="content",
-    type_col="type",
-    image_col="image_base64",
-    table_col="table_data",
-):
-    def safe_text(x):
-        if x is None or (not isinstance(x, (list, tuple)) and pd.isna(x)):
-            return ""
-        return str(x)
+# ── LangChain ──────────────────────────────────────────────────────────────
+from langchain.schema import Document
+from langchain_community.vectorstores import FAISS
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.chains import RetrievalQA
 
-    def safe_val(x):
-        if x is None:
-            return None
-        try:
-            if pd.isna(x):
-                return None
-        except Exception:
-            pass
-        return x
+# ── DeepEval ───────────────────────────────────────────────────────────────
+from deepeval import evaluate
+from deepeval.test_case import LLMTestCase
+from deepeval.metrics import (
+    AnswerRelevancyMetric,
+    FaithfulnessMetric,
+    ContextualPrecisionMetric,
+    ContextualRecallMetric,
+    ContextualRelevancyMetric,
+)
 
-    def table_to_string(table_data):
-        """
-        Convert any table format into a rich readable string
-        for better retrieval context.
-        """
-        try:
-            # ── list of dicts → markdown + key:value sentences ────────────
-            if isinstance(table_data, list) and all(isinstance(r, dict) for r in table_data):
-                table_df = pd.DataFrame(table_data)
+# ── RAGAS ──────────────────────────────────────────────────────────────────
+from ragas import evaluate as ragas_evaluate
+from ragas.metrics import (
+    faithfulness,
+    answer_relevancy,
+    context_precision,
+    context_recall,
+    context_entity_recall,
+    answer_correctness,
+    answer_similarity,
+)
+from ragas.llms import LangchainLLMWrapper
+from ragas.embeddings import LangchainEmbeddingsWrapper
+from datasets import Dataset
 
-                # Markdown table
-                markdown = table_df.to_markdown(index=False)
 
-                # Key:value sentence per row for semantic retrieval
-                sentences = []
-                for i, r in enumerate(table_data):
-                    row_str = ", ".join(f"{k} is {v}" for k, v in r.items() if v not in (None, "", "nan"))
-                    if row_str:
-                        sentences.append(f"Row {i+1}: {row_str}.")
+# ══════════════════════════════════════════════════════════════════════════
+#  1.  SAMPLE DATA  — replace with your LangChain Documents + eval set
+# ══════════════════════════════════════════════════════════════════════════
+def get_documents() -> List[Document]:
+    """Replace with your real document loader."""
+    return [
+        Document(
+            page_content=(
+                "Albert Einstein developed the general theory of relativity in 1915. "
+                "He was born in Ulm, Germany in 1879 and won the Nobel Prize in Physics in 1921 "
+                "for the discovery of the law of the photoelectric effect."
+            ),
+            metadata={"source": "einstein_bio"},
+        ),
+        Document(
+            page_content=(
+                "Isaac Newton formulated the laws of motion and universal gravitation. "
+                "His work Principia Mathematica (1687) laid the foundations of classical mechanics. "
+                "Newton was born in Woolsthorpe, England in 1643."
+            ),
+            metadata={"source": "newton_bio"},
+        ),
+        Document(
+            page_content=(
+                "Quantum mechanics describes the behaviour of particles at atomic and subatomic scales. "
+                "Key contributors include Niels Bohr, Werner Heisenberg, and Erwin Schrödinger. "
+                "The Schrödinger equation is the central equation of non-relativistic quantum mechanics."
+            ),
+            metadata={"source": "quantum_mechanics"},
+        ),
+        Document(
+            page_content=(
+                "The FAISS library (Facebook AI Similarity Search) enables efficient similarity search "
+                "over dense vectors. It supports both exact and approximate nearest-neighbour search "
+                "and is widely used in RAG pipelines for fast document retrieval."
+            ),
+            metadata={"source": "faiss_overview"},
+        ),
+    ]
 
-                return markdown + "\n\n" + "\n".join(sentences)
 
-            # ── dict → single row ──────────────────────────────────────────
-            elif isinstance(table_data, dict):
-                row_str = ", ".join(f"{k} is {v}" for k, v in table_data.items() if v not in (None, "", "nan"))
-                table_df = pd.DataFrame([table_data])
-                markdown = table_df.to_markdown(index=False)
-                return markdown + "\n\n" + row_str
+# Evaluation dataset: list of (question, ground_truth_answer)
+EVAL_DATASET: List[Dict[str, str]] = [
+    {
+        "question": "What did Albert Einstein win the Nobel Prize for?",
+        "ground_truth": "Einstein won the Nobel Prize in Physics in 1921 for the discovery of the law of the photoelectric effect.",
+    },
+    {
+        "question": "What is Newton's major work and when was it published?",
+        "ground_truth": "Newton's major work is Principia Mathematica, published in 1687, which laid the foundations of classical mechanics.",
+    },
+    {
+        "question": "What is the Schrödinger equation used for?",
+        "ground_truth": "The Schrödinger equation is the central equation of non-relativistic quantum mechanics.",
+    },
+    {
+        "question": "What is FAISS and what is it used for?",
+        "ground_truth": "FAISS is Facebook AI Similarity Search, a library for efficient similarity search over dense vectors, widely used in RAG pipelines.",
+    },
+]
 
-            # ── nested list (rows of lists) ────────────────────────────────
-            elif isinstance(table_data, list) and all(isinstance(r, list) for r in table_data):
-                if len(table_data) >= 2:
-                    headers = table_data[0]
-                    rows    = table_data[1:]
-                    table_df = pd.DataFrame(rows, columns=headers)
-                    markdown = table_df.to_markdown(index=False)
 
-                    sentences = []
-                    for i, row in enumerate(rows):
-                        row_str = ", ".join(
-                            f"{headers[j]} is {row[j]}"
-                            for j in range(min(len(headers), len(row)))
-                            if row[j] not in (None, "", "nan")
-                        )
-                        if row_str:
-                            sentences.append(f"Row {i+1}: {row_str}.")
-                    return markdown + "\n\n" + "\n".join(sentences)
-                else:
-                    return str(table_data)
+# ══════════════════════════════════════════════════════════════════════════
+#  2.  BUILD RAG PIPELINE
+# ══════════════════════════════════════════════════════════════════════════
+def build_rag_pipeline(documents: List[Document]):
+    """Chunk docs → FAISS → RetrievalQA chain."""
+    splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=40)
+    chunks = splitter.split_documents(documents)
 
-            # ── JSON string ────────────────────────────────────────────────
-            elif isinstance(table_data, str):
-                try:
-                    parsed = json.loads(table_data)
-                    return table_to_string(parsed)   # recurse with parsed
-                except Exception:
-                    return table_data                # already a plain string
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+    vectorstore = FAISS.from_documents(chunks, embeddings)
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
 
-            else:
-                return str(table_data)
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    qa_chain = RetrievalQA.from_chain_type(
+        llm=llm,
+        chain_type="stuff",
+        retriever=retriever,
+        return_source_documents=True,
+    )
+    return qa_chain, retriever
 
-        except Exception as e:
-            return str(table_data)
 
-    documents  = []
-    text_count = 0
-    table_count = 0
-    image_count = 0
+# ══════════════════════════════════════════════════════════════════════════
+#  3.  RUN RAG  →  collect (question, answer, contexts, ground_truth)
+# ══════════════════════════════════════════════════════════════════════════
+def run_rag(qa_chain, eval_dataset: List[Dict]) -> List[Dict]:
+    """Run each question through the RAG chain and collect results."""
+    results = []
+    for item in eval_dataset:
+        question = item["question"]
+        ground_truth = item["ground_truth"]
 
-    for chunk_id, row in doc_df.iterrows():
+        response = qa_chain.invoke({"query": question})
+        answer = response["result"]
+        source_docs: List[Document] = response["source_documents"]
+        contexts = [doc.page_content for doc in source_docs]
 
-        section    = safe_val(row.get(section_col))
-        raw_text   = safe_text(row.get(text_col, ""))
-        content    = row.get(content_col, [])
-        row_type   = safe_val(row.get(type_col))
-        image_b64  = safe_val(row.get(image_col))
-        table_data = safe_val(row.get(table_col))
+        results.append(
+            {
+                "question": question,
+                "answer": answer,
+                "contexts": contexts,
+                "ground_truth": ground_truth,
+            }
+        )
+        print(f"  Q: {question[:60]}...")
+        print(f"  A: {answer[:100]}...\n")
 
-        # ── Auto detect type ──────────────────────────────────────────────
-        if row_type is None:
-            if image_b64:
-                row_type = "image"
-            elif table_data is not None:
-                row_type = "table"
-            else:
-                row_type = "text"
+    return results
 
-        # ── Build page_content ────────────────────────────────────────────
-        if row_type == "image":
-            # Include surrounding text as caption for context
-            page_content = f"[IMAGE]\n{raw_text}".strip() if raw_text else "[IMAGE]"
-            image_count += 1
 
-        elif row_type == "table":
-            # Convert table to rich string
-            table_str = table_to_string(table_data)
+# ══════════════════════════════════════════════════════════════════════════
+#  4.  DEEPEVAL EVALUATION
+# ══════════════════════════════════════════════════════════════════════════
+def evaluate_with_deepeval(rag_results: List[Dict]) -> pd.DataFrame:
+    """
+    Runs DeepEval metrics:
+      - Answer Relevancy
+      - Faithfulness
+      - Contextual Precision
+      - Contextual Recall
+      - Contextual Relevancy
+    """
+    print("\n" + "=" * 60)
+    print("  DeepEval Evaluation")
+    print("=" * 60)
 
-            # Structure: section heading + surrounding text + table string
-            # This gives retrieval maximum context
-            parts = []
+    threshold = 0.5
+    metrics = [
+        AnswerRelevancyMetric(threshold=threshold, model="gpt-4o-mini"),
+        FaithfulnessMetric(threshold=threshold, model="gpt-4o-mini"),
+        ContextualPrecisionMetric(threshold=threshold, model="gpt-4o-mini"),
+        ContextualRecallMetric(threshold=threshold, model="gpt-4o-mini"),
+        ContextualRelevancyMetric(threshold=threshold, model="gpt-4o-mini"),
+    ]
 
-            if section:
-                parts.append(f"Section: {section}")
+    test_cases = []
+    for r in rag_results:
+        test_cases.append(
+            LLMTestCase(
+                input=r["question"],
+                actual_output=r["answer"],
+                expected_output=r["ground_truth"],
+                retrieval_context=r["contexts"],
+            )
+        )
 
-            if raw_text:
-                parts.append(f"Context: {raw_text}")
+    # Run evaluation
+    evaluate(test_cases, metrics)
 
-            parts.append(f"Table:\n{table_str}")
+    # Collect per-question scores
+    rows = []
+    for tc, r in zip(test_cases, rag_results):
+        row = {"question": r["question"][:55] + "..."}
+        for m in metrics:
+            name = type(m).__name__.replace("Metric", "")
+            # score is available after evaluate()
+            try:
+                row[name] = round(m.score, 3)
+            except Exception:
+                row[name] = "N/A"
+        rows.append(row)
 
-            page_content = "\n\n".join(parts)
-            table_count += 1
+    df = pd.DataFrame(rows)
+    print("\nDeepEval Scores:")
+    print(df.to_string(index=False))
+    return df
 
-        else:  # text
-            page_content = raw_text
-            text_count += 1
 
-        # ── Skip empty ────────────────────────────────────────────────────
-        if not page_content.strip():
-            continue
+# ══════════════════════════════════════════════════════════════════════════
+#  5.  RAGAS EVALUATION
+# ══════════════════════════════════════════════════════════════════════════
+def evaluate_with_ragas(rag_results: List[Dict]) -> pd.DataFrame:
+    """
+    Runs RAGAS metrics:
+      - Faithfulness
+      - Answer Relevancy
+      - Context Precision
+      - Context Recall
+      - Context Entity Recall
+      - Answer Correctness
+      - Answer Similarity
+    """
+    print("\n" + "=" * 60)
+    print("  RAGAS Evaluation")
+    print("=" * 60)
 
-        # ── Metadata ──────────────────────────────────────────────────────
-        metadata = {
-            "chunk_id"  : chunk_id,
-            "section"   : section if section else "unknown",
-            "type"      : row_type,
-            "has_image" : image_b64 is not None,
-            "has_table" : table_data is not None,
+    # Build HuggingFace-style Dataset
+    dataset = Dataset.from_dict(
+        {
+            "question": [r["question"] for r in rag_results],
+            "answer": [r["answer"] for r in rag_results],
+            "contexts": [r["contexts"] for r in rag_results],
+            "ground_truth": [r["ground_truth"] for r in rag_results],
         }
+    )
 
-        if image_b64:
-            metadata["image_base64"] = image_b64
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
 
-        # Store original raw table in metadata for reference
-        if table_data is not None:
-            metadata["table_data"] = table_data
+    ragas_llm = LangchainLLMWrapper(llm)
+    ragas_emb = LangchainEmbeddingsWrapper(embeddings)
 
-        if isinstance(content, list) and len(content) > 0:
-            metadata["content"] = content
+    ragas_metrics = [
+        faithfulness,
+        answer_relevancy,
+        context_precision,
+        context_recall,
+        context_entity_recall,
+        answer_correctness,
+        answer_similarity,
+    ]
 
-        documents.append(Document(page_content=page_content, metadata=metadata))
+    result = ragas_evaluate(
+        dataset,
+        metrics=ragas_metrics,
+        llm=ragas_llm,
+        embeddings=ragas_emb,
+    )
 
-    print(f"Text: {text_count} | Table: {table_count} | Image: {image_count}")
-    return documents
+    df = result.to_pandas()
+    # Keep only score columns + question
+    score_cols = [c for c in df.columns if c not in ("question", "answer", "contexts", "ground_truth")]
+    display_cols = ["question"] + score_cols
+    display_df = df[display_cols].copy()
+    display_df["question"] = display_df["question"].str[:55] + "..."
+    display_df[score_cols] = display_df[score_cols].round(3)
+
+    print("\nRAGAS Scores:")
+    print(display_df.to_string(index=False))
+
+    # Aggregate means
+    print("\nRAGAS Mean Scores:")
+    print(df[score_cols].mean().round(3).to_string())
+
+    return df
 
 
-# ── Usage ─────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════
+#  6.  COMBINED REPORT
+# ══════════════════════════════════════════════════════════════════════════
+def save_combined_report(
+    rag_results: List[Dict],
+    deepeval_df: pd.DataFrame,
+    ragas_df: pd.DataFrame,
+    path: str = "rag_eval_report.json",
+) -> None:
+    """Save all results to a JSON report."""
 
-doc_df    = merge_sections(df)
-documents = build_documents(doc_df)
+    def safe_dict(df: pd.DataFrame) -> List[Dict]:
+        return json.loads(df.to_json(orient="records"))
 
-# Preview table documents
-for doc in documents:
-    if doc.metadata["type"] == "table":
-        print("\n===== TABLE DOCUMENT =====")
-        print(doc.page_content)
-        print("==========================")
-```
+    report = {
+        "rag_results": [
+            {k: v for k, v in r.items() if k != "contexts"} for r in rag_results
+        ],
+        "deepeval": safe_dict(deepeval_df),
+        "ragas": safe_dict(ragas_df),
+    }
+    with open(path, "w") as f:
+        json.dump(report, f, indent=2)
+    print(f"\nCombined report saved to '{path}'")
 
-What changed for table `page_content`:
 
-```
-Section: Business Problem solved by Non-Model Tool
+# ══════════════════════════════════════════════════════════════════════════
+#  7.  METRIC REFERENCE
+# ══════════════════════════════════════════════════════════════════════════
+METRIC_REFERENCE = """
+╔══════════════════════════════════════════════════════════════════════════╗
+║                    RAG Evaluation Metric Reference                      ║
+╠══════════════════════════╦══════════════╦═══════════════════════════════╣
+║ Metric                   ║ Framework    ║ What it measures              ║
+╠══════════════════════════╬══════════════╬═══════════════════════════════╣
+║ Answer Relevancy         ║ Both         ║ Is the answer relevant to Q?  ║
+║ Faithfulness             ║ Both         ║ Is answer grounded in context?║
+║ Contextual Precision     ║ Both         ║ Are ranked contexts relevant? ║
+║ Contextual Recall        ║ Both         ║ Do contexts cover ground truth║
+║ Contextual Relevancy     ║ DeepEval     ║ Are contexts useful for Q?    ║
+║ Context Entity Recall    ║ RAGAS        ║ Entities from GT in contexts? ║
+║ Answer Correctness       ║ RAGAS        ║ Factual match vs ground truth ║
+║ Answer Similarity        ║ RAGAS        ║ Semantic sim to ground truth  ║
+╚══════════════════════════╩══════════════╩═══════════════════════════════╝
+Scores range 0–1. Higher = better. Threshold for pass/fail: 0.5 (DeepEval)
+"""
 
-Context: The following table shows exposure limits by region.
 
-Table:
-| Region | Limit | Currency |
-|--------|-------|----------|
-| US     | 500   | USD      |
-| EU     | 300   | EUR      |
+# ══════════════════════════════════════════════════════════════════════════
+#  8.  MAIN
+# ══════════════════════════════════════════════════════════════════════════
+def main():
+    print(METRIC_REFERENCE)
 
-Row 1: Region is US, Limit is 500, Currency is USD.
-Row 2: Region is EU, Limit is 300, Currency is EUR.
-```
+    # Step 1 — Build RAG
+    print("Building RAG pipeline ...")
+    documents = get_documents()
+    qa_chain, _ = build_rag_pipeline(documents)
 
-This means when retrieval happens, the query matches against section name + surrounding text + table content all together, giving much richer context than a plain markdown table alone.
+    # Step 2 — Run RAG on eval set
+    print("\nRunning RAG on evaluation dataset ...")
+    rag_results = run_rag(qa_chain, EVAL_DATASET)
+
+    # Step 3 — DeepEval
+    deepeval_df = evaluate_with_deepeval(rag_results)
+
+    # Step 4 — RAGAS
+    ragas_df = evaluate_with_ragas(rag_results)
+
+    # Step 5 — Save report
+    save_combined_report(rag_results, deepeval_df, ragas_df)
+
+    print("\n✅ Evaluation complete.")
+
+
+if __name__ == "__main__":
+    main()
