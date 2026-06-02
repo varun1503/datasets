@@ -1,147 +1,243 @@
-Here's a separate clean `build_documents` function that takes the merged `doc_df`:
+"""
+Knowledge Graph Builder with FAISS Storage
+Input: LangChain Document objects (with page_content)
+Output: FAISS vector store + NetworkX knowledge graph
+"""
 
-```python
-from langchain_core.documents import Document
-import pandas as pd
+import os
+import json
+import pickle
+import re
+from typing import List, Tuple
 
-def build_documents(
-    doc_df,
-    section_col="section_name",
-    text_col="paragraph_content",
-    content_col="content",
-    type_col="type",
-    image_col="image_base64",
-    table_col="table_data",
-):
-    def safe_text(x):
-        if x is None or (not isinstance(x, (list, tuple)) and pd.isna(x)):
-            return ""
-        return str(x)
+# LangChain
+from langchain.schema import Document
+from langchain_community.vectorstores import FAISS
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
-    def safe_val(x):
-        if x is None:
-            return None
-        try:
-            if pd.isna(x):
-                return None
-        except Exception:
-            pass
-        return x
+# Graph
+import networkx as nx
+import matplotlib.pyplot as plt
 
-    documents = []
-    text_count = 0
-    table_count = 0
-    image_count = 0
 
-    for chunk_id, row in doc_df.iterrows():
+# ─────────────────────────────────────────────
+# 1.  SAMPLE DOCUMENTS  (replace with yours)
+# ─────────────────────────────────────────────
+def get_sample_documents() -> List[Document]:
+    """Replace this with your actual LangChain Document loader."""
+    return [
+        Document(
+            page_content=(
+                "Albert Einstein developed the theory of relativity. "
+                "He was born in Ulm, Germany in 1879. "
+                "Einstein won the Nobel Prize in Physics in 1921."
+            ),
+            metadata={"source": "doc1", "page": 1},
+        ),
+        Document(
+            page_content=(
+                "The theory of relativity revolutionised modern physics. "
+                "It introduced the famous equation E=mc². "
+                "Quantum mechanics and relativity are the two pillars of modern physics."
+            ),
+            metadata={"source": "doc2", "page": 1},
+        ),
+        Document(
+            page_content=(
+                "Isaac Newton formulated the laws of motion and universal gravitation. "
+                "Newton's work laid the groundwork for classical mechanics. "
+                "He was born in Woolsthorpe, England in 1643."
+            ),
+            metadata={"source": "doc3", "page": 1},
+        ),
+    ]
 
-        section    = safe_val(row.get(section_col))
-        raw_text   = safe_text(row.get(text_col, ""))
-        content    = row.get(content_col, [])
-        row_type   = safe_val(row.get(type_col))
-        image_b64  = safe_val(row.get(image_col))
-        table_data = safe_val(row.get(table_col))
 
-        # ── Detect type if not explicitly set ─────────────────────────────
-        if row_type is None:
-            if image_b64:
-                row_type = "image"
-            elif table_data:
-                row_type = "table"
-            else:
-                row_type = "text"
+# ─────────────────────────────────────────────
+# 2.  EXTRACT ENTITIES & RELATIONSHIPS via LLM
+# ─────────────────────────────────────────────
+def extract_triplets(text: str, llm: ChatOpenAI) -> List[Tuple[str, str, str]]:
+    """
+    Ask the LLM to return (subject, predicate, object) triplets as JSON.
+    Returns a list of (subject, predicate, object) tuples.
+    """
+    prompt = f"""Extract knowledge graph triplets from the text below.
+Return ONLY a JSON array of arrays, each inner array being [subject, predicate, object].
+No explanation, no markdown, just raw JSON.
 
-        # ── Build page_content based on type ──────────────────────────────
-        if row_type == "image":
-            page_content = raw_text if raw_text else "[IMAGE]"
-            image_count += 1
+Text:
+{text}
 
-        elif row_type == "table":
-            if isinstance(table_data, list):
-                # list of dicts → markdown table
-                table_df = pd.DataFrame(table_data)
-                page_content = table_df.to_markdown(index=False)
-            elif isinstance(table_data, dict):
-                table_df = pd.DataFrame([table_data])
-                page_content = table_df.to_markdown(index=False)
-            else:
-                page_content = safe_text(table_data)
-            # Append any caption/text below table
-            if raw_text:
-                page_content = f"{page_content}\n\n{raw_text}"
-            table_count += 1
+Example output:
+[["Albert Einstein","developed","theory of relativity"],["Einstein","born in","Ulm"]]
+"""
+    response = llm.invoke(prompt)
+    raw = response.content.strip()
 
-        else:  # text
-            page_content = raw_text
-            text_count += 1
+    # Strip markdown fences if present
+    raw = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.MULTILINE).strip()
 
-        # ── Skip empty documents ──────────────────────────────────────────
-        if not page_content.strip():
-            continue
+    try:
+        data = json.loads(raw)
+        return [(str(t[0]), str(t[1]), str(t[2])) for t in data if len(t) == 3]
+    except json.JSONDecodeError:
+        print(f"[WARN] Could not parse LLM output: {raw[:200]}")
+        return []
 
-        # ── Build metadata ────────────────────────────────────────────────
-        metadata = {
-            "chunk_id"  : chunk_id,
-            "section"   : section if section else "unknown",
-            "type"      : row_type,
-            "has_image" : image_b64 is not None,
-            "has_table" : table_data is not None,
-        }
 
-        # Attach base64 image to metadata if present
-        if image_b64:
-            metadata["image_base64"] = image_b64
+# ─────────────────────────────────────────────
+# 3.  BUILD KNOWLEDGE GRAPH
+# ─────────────────────────────────────────────
+def build_knowledge_graph(
+    documents: List[Document], llm: ChatOpenAI
+) -> Tuple[nx.DiGraph, List[Tuple]]:
+    """
+    Iterates over LangChain Documents, extracts triplets, builds a DiGraph.
+    Returns the graph and the flat list of all triplets.
+    """
+    G = nx.DiGraph()
+    all_triplets: List[Tuple[str, str, str]] = []
 
-        # Attach raw table to metadata if present
-        if table_data is not None:
-            metadata["table_data"] = table_data
+    for i, doc in enumerate(documents):
+        print(f"Processing document {i+1}/{len(documents)} ...")
+        triplets = extract_triplets(doc.page_content, llm)
+        for subj, pred, obj in triplets:
+            G.add_node(subj, type="entity")
+            G.add_node(obj, type="entity")
+            G.add_edge(subj, obj, relation=pred, source=doc.metadata.get("source", "unknown"))
+            all_triplets.append((subj, pred, obj))
 
-        # Attach content list to metadata if present
-        if isinstance(content, list) and len(content) > 0:
-            metadata["content"] = content
+    print(f"\nGraph built: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
+    return G, all_triplets
 
-        # ── Create Document ───────────────────────────────────────────────
-        doc = Document(
-            page_content=page_content,
-            metadata=metadata
+
+# ─────────────────────────────────────────────
+# 4.  STORE INTO FAISS
+#     Each triplet becomes a Document whose
+#     page_content is  "subject | predicate | object"
+# ─────────────────────────────────────────────
+def store_graph_in_faiss(
+    triplets: List[Tuple[str, str, str]],
+    original_docs: List[Document],
+    embeddings: OpenAIEmbeddings,
+    faiss_index_path: str = "faiss_kg_index",
+) -> FAISS:
+    """
+    Creates two sets of Documents for FAISS:
+      - Triplet documents  (structured knowledge)
+      - Original chunk documents  (raw page_content)
+    """
+    # --- triplet documents ---
+    triplet_docs = [
+        Document(
+            page_content=f"{s} | {p} | {o}",
+            metadata={"type": "triplet", "subject": s, "predicate": p, "object": o},
         )
-        documents.append(doc)
+        for s, p, o in triplets
+    ]
 
-    print(f"Text: {text_count} | Table: {table_count} | Image: {image_count}")
-    return documents
+    # --- chunk original docs for richer retrieval ---
+    splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=50)
+    chunk_docs = splitter.split_documents(original_docs)
+    for d in chunk_docs:
+        d.metadata["type"] = "chunk"
+
+    all_docs = triplet_docs + chunk_docs
+    print(f"\nIndexing {len(all_docs)} documents into FAISS ...")
+
+    vectorstore = FAISS.from_documents(all_docs, embeddings)
+    vectorstore.save_local(faiss_index_path)
+    print(f"FAISS index saved to '{faiss_index_path}/'")
+    return vectorstore
 
 
-# ── Usage ─────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# 5.  QUERY HELPER
+# ─────────────────────────────────────────────
+def query_knowledge_base(
+    query: str,
+    vectorstore: FAISS,
+    k: int = 5,
+) -> List[Document]:
+    results = vectorstore.similarity_search(query, k=k)
+    print(f"\nTop {k} results for: '{query}'")
+    for i, doc in enumerate(results, 1):
+        print(f"  [{i}] ({doc.metadata.get('type','?')}) {doc.page_content}")
+    return results
 
-doc_df   = merge_sections(df)
-documents = build_documents(doc_df)
 
-print(f"Total documents: {len(documents)}")
+# ─────────────────────────────────────────────
+# 6.  VISUALISE GRAPH
+# ─────────────────────────────────────────────
+def visualise_graph(G: nx.DiGraph, output_path: str = "knowledge_graph.png") -> None:
+    plt.figure(figsize=(14, 9))
+    pos = nx.spring_layout(G, seed=42, k=2)
 
-# Preview first 3
-for doc in documents[:3]:
-    print("\n--- Document ---")
-    print(f"Section : {doc.metadata['section']}")
-    print(f"Type    : {doc.metadata['type']}")
-    print(f"Has Image: {doc.metadata['has_image']}")
-    print(f"Has Table: {doc.metadata['has_table']}")
-    print(f"Content : {doc.page_content[:200]}")
-```
+    nx.draw_networkx_nodes(G, pos, node_color="#4A90D9", node_size=1800, alpha=0.9)
+    nx.draw_networkx_labels(G, pos, font_size=9, font_color="white", font_weight="bold")
+    nx.draw_networkx_edges(G, pos, edge_color="#888", arrows=True, arrowsize=20, width=1.5)
 
-How each type is handled:
+    edge_labels = {(u, v): d["relation"] for u, v, d in G.edges(data=True)}
+    nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_size=7, font_color="#333")
 
-| Type | `page_content` | Metadata extras |
-|---|---|---|
-| `text` | Raw paragraph text | — |
-| `table` | Markdown table + caption | `table_data` (raw) |
-| `image` | Caption/alt text or `[IMAGE]` | `image_base64` |
+    plt.title("Knowledge Graph", fontsize=16, fontweight="bold")
+    plt.axis("off")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+    print(f"Graph visualisation saved to '{output_path}'")
 
-If your columns have different names, just pass them in:
-```python
-documents = build_documents(
-    doc_df,
-    section_col="section_name",
-    image_col="img_b64",
-    table_col="tbl"
-)
-```
+
+# ─────────────────────────────────────────────
+# 7.  SAVE / LOAD GRAPH
+# ─────────────────────────────────────────────
+def save_graph(G: nx.DiGraph, path: str = "knowledge_graph.pkl") -> None:
+    with open(path, "wb") as f:
+        pickle.dump(G, f)
+    print(f"Graph saved to '{path}'")
+
+
+def load_graph(path: str = "knowledge_graph.pkl") -> nx.DiGraph:
+    with open(path, "rb") as f:
+        return pickle.load(f)
+
+
+def load_faiss(path: str, embeddings: OpenAIEmbeddings) -> FAISS:
+    return FAISS.load_local(path, embeddings, allow_dangerous_deserialization=True)
+
+
+# ─────────────────────────────────────────────
+# 8.  MAIN
+# ─────────────────────────────────────────────
+def main():
+    # --- init models ---
+    # Set your key: export OPENAI_API_KEY=sk-...
+    # Or swap OpenAIEmbeddings/ChatOpenAI for any LangChain-compatible provider.
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
+    # --- load documents ---
+    documents: List[Document] = get_sample_documents()
+    # To use your own loader, e.g.:
+    # from langchain_community.document_loaders import PyPDFLoader
+    # loader = PyPDFLoader("your_file.pdf")
+    # documents = loader.load()
+
+    # --- build graph ---
+    graph, triplets = build_knowledge_graph(documents, llm)
+
+    # --- persist graph ---
+    save_graph(graph)
+    visualise_graph(graph)
+
+    # --- store in FAISS ---
+    vectorstore = store_graph_in_faiss(triplets, documents, embeddings)
+
+    # --- sample query ---
+    query_knowledge_base("Who developed the theory of relativity?", vectorstore)
+    query_knowledge_base("Newton's contributions to physics", vectorstore)
+
+
+if __name__ == "__main__":
+    main()
