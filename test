@@ -1,64 +1,108 @@
-Here is the complete, runnable code demonstrating how to apply metadata filtering safely in FAISS using the fetch_k approach we discussed.
-This example creates a few documents (including your "section 1.4 varun" document), adds a bunch of "filler" documents to simulate a large database, and then successfully retrieves the correct document using the filter.
+It is very common for enterprise security teams to block the langchain-experimental package because it contains experimental, non-production code.
+Fortunately, you do not need LLMGraphTransformer. You can replicate its exact behavior using standard, production-approved LangChain Core components by combining **Pydantic schemas** with the with_structured_output() method.
+By defining your own Pydantic classes for the triplets, you force the LLM to output clean, validated JSON without relying on experimental wrappers.
+Here is how you can implement the triplet extraction, NetworkX graph building, and FAISS vector storage using only standard, production-ready libraries:
+### Prerequisites
+You only need the core, stable libraries:
+```bash
+pip install langchain-core langchain-openai faiss-cpu networkx pydantic
+
+```
+### Production-Ready Implementation
 ```python
 import os
+import networkx as nx
+from typing import List
+from pydantic import BaseModel, Field
 from langchain_core.documents import Document
-from langchain_openai import OpenAIEmbeddings
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 
 # 1. Setup API Key
 os.environ = "sk-..."
 
-def faiss_metadata_filter_example():
-    # 2. Initialize Embeddings 
-    # Using text-embedding-3-large but truncating to 1024 to save memory
-    embeddings = OpenAIEmbeddings(model="text-embedding-3-large", dimensions=1024)
+# 2. Define the Pydantic Schema for Triplet Extraction
+# This replaces the need for LLMGraphTransformer
+class Triplet(BaseModel):
+    subject: str = Field(..., description="The subject or main entity (e.g., Albert Einstein)")
+    predicate: str = Field(..., description="The relationship connecting subject and object (e.g., developed)")
+    object: str = Field(..., description="The object or target entity (e.g., theory of relativity)")
 
-    # 3. Create Sample Documents with Metadata
-    documents =
+class KnowledgeGraph(BaseModel):
+    """A list of knowledge graph triplets extracted from text."""
+    triplets: List = Field(default_factory=list, description="List of extracted relationships")
 
-    # Add 50 filler documents to simulate a large database.
-    # Without fetch_k, the target document might get buried under these if the semantic match isn't perfect.
-    for i in range(50):
-        documents.append(
-            Document(page_content=f"Filler content about general engineering topics {i}.", metadata={"name": "unknown"})
-        )
+def build_custom_graph_rag():
+    # 3. Initialize Models
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
 
-    # 4. Store in FAISS
-    print("Building FAISS index...")
-    vectorstore = FAISS.from_documents(documents, embeddings)
+    # 4. Create the Extraction Chain using standard LangChain
+    prompt = ChatPromptTemplate.from_messages()
+    
+    # Bind the Pydantic schema to the LLM
+    structured_llm = llm.with_structured_output(KnowledgeGraph)
+    extraction_chain = prompt | structured_llm
 
-    # 5. Create the Retriever with the fetch_k fix
-    # FAISS will fetch the top 100 semantic matches first, apply the filter, and return the top 4.
-    retriever = vectorstore.as_retriever(
-        search_type="similarity",
-        search_kwargs={
-            "k": 4, 
-            "fetch_k": 100, 
-            "filter": {"name": "varun"}
-        }
+    # Sample Unstructured Document
+    raw_text = (
+        "Albert Einstein developed the theory of relativity. "
+        "He was born in Ulm, Germany. "
+        "Einstein won the Nobel Prize in Physics in 1921."
     )
 
-    # 6. Execute the Query
-    query = "Tell me about the logic and rules."
-    print(f"\nExecuting search for: '{query}'")
-    print("Applying Metadata Filter: {'name': 'varun'}\n")
+    # 5. Extract Triplets
+    print("Extracting triplets via Custom Pydantic Chain...")
+    extracted_data = extraction_chain.invoke({"text": raw_text})
     
-    results = retriever.invoke(query)
+    # 6. Build Local Graph (NetworkX) and Format for Vector DB (FAISS)
+    print("Building NetworkX Graph and formatting for FAISS...")
+    G = nx.MultiDiGraph() 
+    faiss_documents =
 
-    # Print results
-    if not results:
-        print("No documents found matching the query and filter.")
-    else:
-        for i, res in enumerate(results, 1):
-            print(f"Result [{i}]:")
-            print(f"  Content: {res.page_content}")
-            print(f"  Metadata: {res.metadata}")
+    for triplet in extracted_data.triplets:
+        subj = triplet.subject
+        pred = triplet.predicate
+        obj = triplet.object
+        
+        # A. Add to NetworkX Topology
+        G.add_node(subj)
+        G.add_node(obj)
+        G.add_edge(subj, obj, relation=pred)
+        
+        # B. Format for FAISS Vector Store
+        triplet_text = f"Knowledge Fact: {subj} -> {pred} -> {obj}"
+        faiss_documents.append(Document(
+            page_content=triplet_text,
+            metadata={"type": "extracted_triplet", "subject": subj, "object": obj}
+        ))
+
+    # We also add the raw text chunk for standard semantic context
+    faiss_documents.append(Document(
+        page_content=raw_text, 
+        metadata={"type": "raw_text"}
+    ))
+
+    # 7. Store in FAISS
+    print(f"Storing {len(faiss_documents)} items in FAISS...")
+    vectorstore = FAISS.from_documents(faiss_documents, embeddings)
+
+    # 8. Querying the Hybrid Pipeline
+    query = "Where was the scientist who developed the theory of relativity born?"
+    print(f"\nExecuting Vector Search for: '{query}'")
+    
+    results = vectorstore.similarity_search(query, k=3)
+
+    for i, res in enumerate(results, 1):
+        doc_type = res.metadata.get('type', 'raw_text')
+        print(f"[{i}] Match Type: {doc_type} | Content: {res.page_content}")
 
 if __name__ == "__main__":
-    faiss_metadata_filter_example()
+    build_custom_graph_rag()
 
 ```
-### Key Takeaways in the Code:
- * **Metadata Assignment:** When creating a Document, you pass a dictionary to the metadata parameter. This can contain as many key-value pairs as you need.
- * **The search_kwargs Dictionary:** This is where the magic happens. We pass {"filter": {"name": "varun"}} to tell FAISS what metadata to look for, and we pass "fetch_k": 100 to ensure FAISS grabs a large enough initial pool of documents before filtering out everything that doesn't say "varun".
+### Why this is better for Enterprise:
+ * **No Experimental Code:** The with_structured_output() method is a core, fully supported feature of LangChain.
+ * **High Reliability:** Because you are defining Triplet using BaseModel from Pydantic, LangChain automatically translates this into strict JSON schemas for the OpenAI API, ensuring you don't have to write error-prone regex parsers to clean up the LLM's output.
+ * **Easily Customizable:** If you decide later that you want the LLM to extract entity *types* (e.g., classifying "Einstein" as a "Person"), you simply add a subject_type property to your Pydantic class, and the LLM will adapt immediately.
