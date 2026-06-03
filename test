@@ -1,3 +1,15 @@
+It is very common for enterprise security teams to block the langchain-experimental package because it contains experimental, non-production code.
+Fortunately, you do not need LLMGraphTransformer. You can replicate its exact behavior using standard, production-approved LangChain Core components by combining **Pydantic schemas** with the with_structured_output() method.
+By defining your own Pydantic classes for the triplets, you force the LLM to output clean, validated JSON without relying on experimental wrappers.
+Here is how you can implement the triplet extraction, NetworkX graph building, and FAISS vector storage using only standard, production-ready libraries:
+### Prerequisites
+You only need the core, stable libraries:
+```bash
+pip install langchain-core langchain-openai faiss-cpu networkx pydantic
+
+```
+### Production-Ready Implementation
+```python
 import os
 import networkx as nx
 from typing import List
@@ -88,3 +100,9 @@ def build_custom_graph_rag():
 
 if __name__ == "__main__":
     build_custom_graph_rag()
+
+```
+### Why this is better for Enterprise:
+ * **No Experimental Code:** The with_structured_output() method is a core, fully supported feature of LangChain.
+ * **High Reliability:** Because you are defining Triplet using BaseModel from Pydantic, LangChain automatically translates this into strict JSON schemas for the OpenAI API, ensuring you don't have to write error-prone regex parsers to clean up the LLM's output.
+ * **Easily Customizable:** If you decide later that you want the LLM to extract entity *types* (e.g., classifying "Einstein" as a "Person"), you simply add a subject_type property to your Pydantic class, and the LLM will adapt immediately.
