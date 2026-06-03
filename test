@@ -1,9 +1,91 @@
-- Fixed bugs in the MRNG module and supported ongoing testing activities.
-- Implemented formatting changes for version 0.2.
-- Investigated and identified root causes for reported issues and developed corresponding solutions.
-- Resolved non-content document generation bugs.
-- Fixed corrupt file generation issues and provided text-only output support for the new solution.
-- Conducted research and development to create a more robust document generation process to prevent file corruption.
-- Deployed enhancements to the assessment generation module.
-- Performed local testing and validation against existing and newly reported bugs.
-- Deployed and validated fixes across E1, E2, and E3 environments while supporting ongoing testing efforts.
+If your organization does not use Neo4j, you can absolutely build a completely local GraphRAG pipeline by using **NetworkX** to store the graph topology in-memory and **FAISS** to handle the vector similarity search.
+To achieve this without writing complex custom extraction logic, you can use LangChain's LLMGraphTransformer. This experimental module automatically uses an LLM to read your unstructured text and extract the subject-predicate-object triplets for you.
+Once extracted, you feed those relationships into a NetworkX graph to preserve the structure, and simultaneously convert them into text documents to embed and store inside FAISS.
+Here is a complete, runnable script demonstrating this architecture:
+### Prerequisites
+You will need to install the required LangChain packages, FAISS, and NetworkX:
+```bash
+pip install langchain langchain-openai langchain-experimental langchain-community faiss-cpu networkx
+
+```
+### Python Implementation
+```python
+import os
+import networkx as nx
+from langchain_core.documents import Document
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_experimental.graph_transformers import LLMGraphTransformer
+from langchain_community.vectorstores import FAISS
+
+# 1. Setup API Key
+os.environ = "sk-..."
+
+def build_local_graph_rag():
+    # 2. Initialize Models
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+
+    # 3. Define the LangChain Extraction Tool
+    # This automatically prompts the LLM to extract nodes and relationships
+    graph_transformer = LLMGraphTransformer(llm=llm)
+
+    # Sample Unstructured Document
+    text = (
+        "Albert Einstein developed the theory of relativity. "
+        "He was born in Ulm, Germany. "
+        "Einstein won the Nobel Prize in Physics in 1921."
+    )
+    documents =
+
+    # 4. Extract Triplets via LLM
+    print("Extracting triplets via LLM...")
+    graph_documents = graph_transformer.convert_to_graph_documents(documents)
+
+    # 5. Build Local Graph (NetworkX) and Format for Vector DB (FAISS)
+    print("Building NetworkX Graph and formatting for FAISS...")
+    G = nx.MultiDiGraph() # MultiDiGraph allows multiple distinct edges between the same nodes
+    triplet_docs_for_faiss =
+
+    for graph_doc in graph_documents:
+        for rel in graph_doc.relationships:
+            subj = rel.source.id
+            obj = rel.target.id
+            pred = rel.type
+            
+            # A. Add to NetworkX Topology
+            G.add_node(subj)
+            G.add_node(obj)
+            G.add_edge(subj, obj, relation=pred)
+            
+            # B. Format for FAISS Vector Store
+            # Converting the triplet into a clean, readable pseudo-sentence for the embedder
+            triplet_text = f"Knowledge Fact: {subj} -> {pred} -> {obj}"
+            triplet_docs_for_faiss.append(Document(
+                page_content=triplet_text,
+                metadata={"type": "extracted_triplet", "subject": subj, "object": obj}
+            ))
+
+    # 6. Store in FAISS
+    # We store BOTH the original raw documents (for dense context) 
+    # AND the extracted structured triplets (for specific facts)
+    all_docs = documents + triplet_docs_for_faiss
+    print(f"Storing {len(all_docs)} items in FAISS...")
+    vectorstore = FAISS.from_documents(all_docs, embeddings)
+
+    # 7. Querying the Hybrid Pipeline
+    query = "Where was the scientist who developed the theory of relativity born?"
+    print(f"\nExecuting Vector Search for: '{query}'")
+    
+    # FAISS will retrieve the semantically relevant triplets and text chunks
+    results = vectorstore.similarity_search(query, k=4)
+
+    for i, res in enumerate(results, 1):
+        doc_type = res.metadata.get('type', 'raw_text')
+        print(f"[{i}] Match Type: {doc_type} | Content: {res.page_content}")
+
+if __name__ == "__main__":
+    build_local_graph_rag()
+
+```
+### How to use this in a full RAG app:
+When a user asks a question, FAISS will perform the semantic retrieval. If FAISS retrieves an extracted_triplet document, you can extract the subject from its metadata, and use standard NetworkX commands (like G.neighbors(subject)) to pull the surrounding connections out of memory and feed them to your LLM. This gives you the accuracy of a Knowledge Graph without requiring you to provision enterprise graph database infrastructure.
