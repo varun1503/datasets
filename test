@@ -1,97 +1,30 @@
-Good news: the grid-count math is probably fine now — but the repair pass itself is generating schema-invalid XML, which is exactly what Word reports as "Table Properties" errors. Three concrete bugs in `_fix_table_rows`:
+import tempfile, os
+from template_extractor import extract_templates
 
-**1. `gridSpan` is appended in the wrong position inside `tcPr` (most likely your 8 errors).** OOXML enforces a strict child order in `w:tcPr`: `cnfStyle → tcW → gridSpan → hMerge → vMerge → tcBorders → shd → ...`. Your code does `etree.SubElement(tcPr, gridSpan)`, which appends it *after* existing children like `tcW`, `tcBorders`, `shd`, `vAlign`. Word flags each such cell as a "Table Properties" repair. So the short rows you "fixed" are the ones now failing.
+if validation_report_template is not None:
+    # 1. upload the raw template docx to its own path (unchanged)
+    admin_val_template_s3_path = request.app.state.config['admin_paths']['val_templates_path']
+    full_template_s3_path = admin_val_template_s3_path + output_file_name + '.docx'
+    logger.info(f"S3 path to upload template file to - {full_template_s3_path}")
 
-**2. Tables with no `tblGrid` are silently skipped** (`return False`) — a `w:tbl` without `tblGrid` is itself a repair trigger. You should synthesize one.
+    file_content = await validation_report_template.read()
+    _ = request.app.state.s3Utils.upload_file_obj(BytesIO(file_content), full_template_s3_path)
 
-**3. Empty rows are skipped** (`if not cells: continue`) — a `w:tr` with zero `w:tc` is invalid; remove it instead.
+    # 2. run extraction on it locally
+    with tempfile.TemporaryDirectory() as tmp_folder:
+        local_docx_path = os.path.join(tmp_folder, output_file_name + '.docx')
+        with open(local_docx_path, 'wb') as f:
+            f.write(file_content)
 
-Patched version:
+        output_csv = os.path.join(tmp_folder, 'stage_4.1_assess_templates.csv')
+        extract_templates(tmp_folder, output_csv)
 
-```python
-@staticmethod
-def _fix_table_rows(tbl, nsmap):
-    w = nsmap['w']
+        # 3. push extracted CSV to the gold standard path
+        admin_gold_standrad_s3_path = request.app.state.config['admin_paths']['val_gold_standr_val_path']
+        if request.app.state.module == 'NMT':
+            admin_gold_standrad_s3_path = admin_gold_standrad_s3_path + "NMT/"
+        admin_gold_standrad_s3_path = admin_gold_standrad_s3_path + "stage_4.1_assess_templates.csv"
 
-    def eff_cols(row):
-        return sum(
-            int(c.find('./w:tcPr/w:gridSpan', nsmap).get(f'{{{w}}}val'))
-            if c.find('./w:tcPr/w:gridSpan', nsmap) is not None else 1
-            for c in row.findall('./w:tc', nsmap)
-        )
-
-    modified = False
-    rows = tbl.findall('./w:tr', nsmap)
-
-    # (3) drop rows with no cells — invalid OOXML
-    for row in rows[:]:
-        if not row.findall('./w:tc', nsmap):
-            row.getparent().remove(row)
-            rows.remove(row)
-            modified = True
-    if not rows:
-        return modified
-
-    max_eff = max(eff_cols(r) for r in rows)
-
-    # (2) synthesize tblGrid if missing
-    grid = tbl.find('./w:tblGrid', nsmap)
-    if grid is None:
-        grid = etree.Element(f'{{{w}}}tblGrid')
-        for _ in range(max_eff):
-            gc = etree.SubElement(grid, f'{{{w}}}gridCol')
-            gc.set(f'{{{w}}}w', '1440')
-        tblPr = tbl.find('./w:tblPr', nsmap)
-        tbl.insert(tbl.index(tblPr) + 1 if tblPr is not None else 0, grid)
-        modified = True
-
-    grid_cols = grid.findall('./w:gridCol', nsmap)
-    num_grid = len(grid_cols)
-
-    if max_eff > num_grid:
-        last_w = grid_cols[-1].get(f'{{{w}}}w', '1440') if grid_cols else '1440'
-        for _ in range(max_eff - num_grid):
-            gc = etree.SubElement(grid, f'{{{w}}}gridCol')
-            gc.set(f'{{{w}}}w', last_w)
-        num_grid = max_eff
-        modified = True
-
-    for row in rows:
-        cells = row.findall('./w:tc', nsmap)
-        eff = eff_cols(row)
-        if eff >= num_grid:
-            continue
-        shortage = num_grid - eff
-        last_cell = cells[-1]
-
-        tcPr = last_cell.find('./w:tcPr', nsmap)
-        if tcPr is None:
-            tcPr = etree.Element(f'{{{w}}}tcPr')
-            last_cell.insert(0, tcPr)
-
-        span_elem = tcPr.find('./w:gridSpan', nsmap)
-        current_span = 1
-        if span_elem is not None:
-            current_span = int(span_elem.get(f'{{{w}}}val', '1'))
-        else:
-            # (1) insert in schema position: after cnfStyle/tcW, before everything else
-            span_elem = etree.Element(f'{{{w}}}gridSpan')
-            pos = 0
-            for i, child in enumerate(tcPr):
-                if etree.QName(child).localname in ('cnfStyle', 'tcW'):
-                    pos = i + 1
-                else:
-                    break
-            tcPr.insert(pos, span_elem)
-
-        span_elem.set(f'{{{w}}}val', str(current_span + shortage))
-        modified = True
-
-    return modified
-```
-
-Two more things worth checking:
-
-**Headers/footers aren't repaired.** `_repair_all_table_grids` only touches `document.xml`. Since your pipeline has a header/footer stage, extend it to loop over `word/header*.xml` and `word/footer*.xml` too — tables there trigger the same dialog.
-
-**Pinpoint the exact errors in 2 minutes:** open the file in Word, let it repair, Save As a new .docx, then unzip both and diff `word/document.xml`. Whatever Word changed is your ground truth — it'll confirm whether it's the `tcPr` ordering or something else. Also, in that Show Repairs dialog, sorting by Location + "Go To" tells you which 8 tables are affected, which you can cross-reference against which ones got the gridSpan patch.
+        logger.info(f"S3 path to upload extracted gold standard file to - {admin_gold_standrad_s3_path}")
+        with open(output_csv, 'rb') as f:
+            _ = request.app.state.s3Utils.upload_file_obj(BytesIO(f.read()), admin_gold_standrad_s3_path)
