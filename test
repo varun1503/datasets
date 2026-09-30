@@ -1,30 +1,3 @@
-import tempfile, os
-from template_extractor import extract_templates
-
-if validation_report_template is not None:
-    # 1. upload the raw template docx to its own path (unchanged)
-    admin_val_template_s3_path = request.app.state.config['admin_paths']['val_templates_path']
-    full_template_s3_path = admin_val_template_s3_path + output_file_name + '.docx'
-    logger.info(f"S3 path to upload template file to - {full_template_s3_path}")
-
-    file_content = await validation_report_template.read()
-    _ = request.app.state.s3Utils.upload_file_obj(BytesIO(file_content), full_template_s3_path)
-
-    # 2. run extraction on it locally
-    with tempfile.TemporaryDirectory() as tmp_folder:
-        local_docx_path = os.path.join(tmp_folder, output_file_name + '.docx')
-        with open(local_docx_path, 'wb') as f:
-            f.write(file_content)
-
-        output_csv = os.path.join(tmp_folder, 'stage_4.1_assess_templates.csv')
-        extract_templates(tmp_folder, output_csv)
-
-        # 3. push extracted CSV to the gold standard path
-        admin_gold_standrad_s3_path = request.app.state.config['admin_paths']['val_gold_standr_val_path']
-        if request.app.state.module == 'NMT':
-            admin_gold_standrad_s3_path = admin_gold_standrad_s3_path + "NMT/"
-        admin_gold_standrad_s3_path = admin_gold_standrad_s3_path + "stage_4.1_assess_templates.csv"
-
-        logger.info(f"S3 path to upload extracted gold standard file to - {admin_gold_standrad_s3_path}")
-        with open(output_csv, 'rb') as f:
-            _ = request.app.state.s3Utils.upload_file_obj(BytesIO(f.read()), admin_gold_standrad_s3_path)
+sudo apt install -y apt-transport-https ca-certificates gnupg curl
+curl https://google.com | sudo gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
+echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://google.com cloud-sdk main" | sudo tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
