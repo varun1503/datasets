@@ -1,3 +1,29 @@
-sudo apt install -y apt-transport-https ca-certificates gnupg curl
-curl https://google.com | sudo gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
-echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://google.com cloud-sdk main" | sudo tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
+Write a production-quality Python script (Python 3.10+) that runs 100 web search API calls in parallel.
+
+Input: a list of 100 product names (strings). Each one needs one call to a web search API.
+
+Parallelism:
+- Use ThreadPoolExecutor with max_workers=8 (configurable constant). The work is I/O-bound.
+- Use as_completed to collect results.
+
+Three output lists:
+1. success: API responded with non-empty results. Store {"item", "results"}.
+2. no_response: API responded fine (HTTP 200) but the result is empty or null, meaning the product isn't on the web. Store {"item", "reason"}. Do NOT retry these.
+3. dlq (dead letter queue): items that failed permanently. Store {"item", "error", "attempts"}.
+
+Retry rules (MAX_RETRIES = 3, so 4 attempts total):
+- Timeout, ConnectionError, HTTP 5xx: retry with exponential backoff (base 2s, doubling) plus random jitter. After retries are exhausted, put in DLQ.
+- HTTP 429: sleep for the Retry-After header value if present, otherwise exponential backoff. Use a shared thread-safe pause (lock + pause_until timestamp) so ALL workers wait when one hits 429. Retry afterwards. If still 429 after max retries, put in DLQ.
+- Other 4xx (401, 403, 400): no retry, go straight to DLQ.
+- Invalid or non-JSON response body: treat as empty, so no_response.
+
+Requirements:
+- Use the requests library with a 10s timeout per call.
+- Put API_URL, API_KEY, MAX_WORKERS, MAX_RETRIES, TIMEOUT, BASE_BACKOFF as constants at the top.
+- Put the response parsing in a separate function _extract_results(resp_json) so I can adapt it to my API's response shape.
+- search_one(item) returns a tuple (status, item, payload) where status is "success", "no_response" or "dlq".
+- run(items) returns (success, no_response, dlq).
+- In __main__, print the counts of each list, and add a commented example of reprocessing the DLQ by calling run() on the failed items.
+- Type hints, short docstrings, no unnecessary comments.
+
+My search API is: <Serper / Tavily / Bing / etc.>. Use its correct endpoint, auth header and response format.
