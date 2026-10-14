@@ -1,29 +1,75 @@
-Write a production-quality Python script (Python 3.10+) that runs 100 web search API calls in parallel.
+To explain this to your manager, focus on what the design is, why we need it, how it works, and why PostgreSQL is the right choice. You don't need to explain SQL queries or implementation details in the first discussion.
 
-Input: a list of 100 product names (strings). Each one needs one call to a web search API.
+# High-Level Design: Session-Scoped MPN Search Cache
 
-Parallelism:
-- Use ThreadPoolExecutor with max_workers=8 (configurable constant). The work is I/O-bound.
-- Use as_completed to collect results.
+## 1. What is the design?
 
-Three output lists:
-1. success: API responded with non-empty results. Store {"item", "results"}.
-2. no_response: API responded fine (HTTP 200) but the result is empty or null, meaning the product isn't on the web. Store {"item", "reason"}. Do NOT retry these.
-3. dlq (dead letter queue): items that failed permanently. Store {"item", "error", "attempts"}.
+The proposed design introduces a **session-scoped cache in PostgreSQL** for the MPN alternatives chatbot.
 
-Retry rules (MAX_RETRIES = 3, so 4 attempts total):
-- Timeout, ConnectionError, HTTP 5xx: retry with exponential backoff (base 2s, doubling) plus random jitter. After retries are exhausted, put in DLQ.
-- HTTP 429: sleep for the Retry-After header value if present, otherwise exponential backoff. Use a shared thread-safe pause (lock + pause_until timestamp) so ALL workers wait when one hits 429. Retry afterwards. If still 429 after max retries, put in DLQ.
-- Other 4xx (401, 403, 400): no retry, go straight to DLQ.
-- Invalid or non-JSON response body: treat as empty, so no_response.
+Currently, whenever a user asks about a manufacturing part number (MPN), the application calls an external web search API to find alternative parts. If the user asks about the same MPN again in the same chat, the application repeats the search unnecessarily.
 
-Requirements:
-- Use the requests library with a 10s timeout per call.
-- Put API_URL, API_KEY, MAX_WORKERS, MAX_RETRIES, TIMEOUT, BASE_BACKOFF as constants at the top.
-- Put the response parsing in a separate function _extract_results(resp_json) so I can adapt it to my API's response shape.
-- search_one(item) returns a tuple (status, item, payload) where status is "success", "no_response" or "dlq".
-- run(items) returns (success, no_response, dlq).
-- In __main__, print the counts of each list, and add a commented example of reprocessing the DLQ by calling run() on the failed items.
-- Type hints, short docstrings, no unnecessary comments.
+The proposed solution stores successfully retrieved results in a dedicated PostgreSQL table, linked to the chat session and MPN. When the user asks about that MPN again, the application retrieves the previous result instead of making another external API call.
 
-My search API is: <Serper / Tavily / Bing / etc.>. Use its correct endpoint, auth header and response format.
+**In simple terms:** Search once, save the result, and reuse it within the same chat while the cache entry remains valid.
+
+## 2. Why do we need this design?
+
+- **Reduce API costs:** Avoid unnecessary external web searches for previously searched MPNs.
+- **Improve response time:** Retrieving results from PostgreSQL is generally faster than repeating an external web search.
+- **Reduce API rate-limit risks:** Fewer external requests reduce pressure on the search provider.
+- **Maintain session isolation:** Each chat has its own cache, so results from one chat are not reused in another.
+- **Improve scalability:** All Kubernetes pods access the same PostgreSQL cache, regardless of which pod processes the request.
+
+## 3. How will it work?
+
+1. The user uploads an Excel file or asks about specific MPNs.
+2. The application extracts, normalizes, and deduplicates the requested MPNs.
+3. It checks PostgreSQL for valid cached results belonging to the current chat.
+4. Cached MPNs are retrieved directly; only missing, expired, or explicitly refreshed MPNs are sent to the external search API.
+5. Successful results are stored in PostgreSQL for subsequent requests.
+6. The application combines cached and fresh results and returns only the MPNs requested in the current turn.
+
+## 4. Why PostgreSQL instead of Redis or in-memory caching?
+
+We already have PostgreSQL, and the application runs on Kubernetes with multiple pods.
+
+An in-memory cache would not be shared reliably across pods. Redis would introduce another infrastructure dependency, including deployment, monitoring, and maintenance.
+
+PostgreSQL provides shared, indexed storage with JSONB support and durable writes, allowing us to implement the cache without introducing a new service.
+
+The cache will use a dedicated table, created through Alembic migrations. Existing audit and retrieval log tables will remain unchanged.
+
+## 5. Key design decisions
+
+- **Storage:** A dedicated, regular logged PostgreSQL table.
+- **Cache key:** Chat ID and normalized MPN, with manufacturer identity included when needed to distinguish parts.
+- **Cache lifetime:** Successful search results are cached for 24 hours initially.
+- **Refresh:** An explicit refresh option allows the application to retrieve updated alternatives.
+- **Error handling:** Cache failures should not unnecessarily block web searches. Upstream errors must not be presented as valid search results.
+- **Concurrency:** No distributed locking in the initial implementation; revisit only if monitoring shows duplicate searches are a material problem.
+- **Monitoring:** Track cache hits, external searches avoided, API failures, and cache database errors.
+
+## 6. Expected business benefits
+
+The design is intended to reduce repeated external API calls, lower search latency, control API usage, and improve the responsiveness of follow-up questions.
+
+It also provides a straightforward foundation for future improvements without introducing additional infrastructure.
+
+## 7. Implementation plan
+
+1. Create the cache table and indexes through an Alembic migration.
+2. Implement shared MPN normalization and batch cache lookups.
+3. Integrate cache-hit and cache-miss handling into the existing search service.
+4. Save successful results using bulk database upserts.
+5. Add cache expiry cleanup, fail-open handling, and monitoring.
+6. Validate session isolation, refresh behavior, API failures, and multi-pod access.
+
+**Recommendation:** Proceed with the PostgreSQL-based session cache. It addresses the repeated-search problem using existing infrastructure, keeps the initial implementation simple, and provides a scalable foundation for the MPN alternatives chatbot.
+
+### How to explain it verbally in a meeting
+
+You can explain it in about 30 seconds:
+
+Currently, our MPN chatbot performs external web searches even when a user asks about part numbers that were already searched in the same chat. My proposal is to introduce a session-scoped cache using a dedicated PostgreSQL table. We will store search results against the chat ID and normalized MPN, reuse valid results for follow-up questions, and call the external API only for new or expired entries. Since PostgreSQL is already available and shared across our Kubernetes pods, we can achieve this without introducing Redis or another service. This should reduce redundant API calls, improve respponse times, and simplify infrastructure maintenance.
+
+The key message for your manager: This is not a new search system. It is a small optimization to the existing search workflow that avoids repeating work while preserving the current architecture and audit logs.
