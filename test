@@ -1,51 +1,150 @@
-Here's the table, `mpn_search_cache`.
+MPN Search Results Cache
+Detailed Copilot Implementation Plan
+Existing conversation_context.state JSON • No new table/migration • No max-five alternatives cap
 
-**Columns**
+1. Objective and non-negotiable decisions
+Implement a cache for web-search results used to find alternatives for manufacturer part numbers (MPNs). Reuse the existing conversation_context database row and existing end-of-turn save path. Do not create a new PostgreSQL table, migration, or independent cache persistence mechanism.
+Cache entries are scoped to chat_id. On a later turn in the same chat, reuse valid cached entries and search only requested keys that are missing, expired, invalid, or created under an old result version.
+Important requirement: there is NO new maximum of five alternatives per MPN. Preserve all alternatives returned by the existing search/ranking pipeline, subject to any limit already imposed by the current provider or product contract. Do not add alternatives[:5] or equivalent truncation.
+The cache is an optimization, not the source of truth. Cache parsing or lookup problems must not stop the conversation; fall back to direct search where appropriate.
+2. Existing JSON structure and correct placement
+The supplied context is an envelope containing top-level turn, state, transcript, and schema_version. Existing conversation fields such as focus, overrides, referents, detections, topic_stack, active_request, pending_clarification, and last_completed_request are nested under state.
+{\n  "turn": 2,\n  "state": {\n    "focus": {...},\n    "overrides": [],\n    "referents": {...},\n    "detections": [...],\n    "topic_stack": [...],\n    "active_request": null,\n    "pending_clarification": null,\n    "last_completed_request": null\n  },\n  "transcript": [...],\n  "schema_version": "2.0"\n}
 
-| Column | Type | Example |
-|---|---|---|
-| `chat_id` | text | `chat-abc` |
-| `manufacturer_norm` | text | `TI` (empty if unknown) |
-| `mpn_norm` | text | `LM317T` |
-| `result` | jsonb | alternatives list (below) |
-| `status` | text | `success` |
-| `result_version` | integer | `1` |
-| `fetched_at` | timestamptz | `2026-10-14 10:00` |
-| `expires_at` | timestamptz | `2026-10-15 10:00` |
-| `created_at` | timestamptz | `2026-10-14 10:00` |
-| `updated_at` | timestamptz | `2026-10-14 10:00` |
+Place webref inside the inner state. If the code variable holds the complete envelope, use context_doc['state']['webref']['alternatives']. If it holds only the inner state, use state['webref']['alternatives']. Copilot must inspect the actual loading code and confirm which shape is passed to each helper before implementing. Do not accidentally add webref at the envelope root.
+"state": {\n  "...existing fields...": "...",\n  "webref": {\n    "version": 1,\n    "alternatives": {\n      "LM317T": {\n        "status": "success",\n        "result_version": 1,\n        "fetched_at": "2026-10-14T10:00:00+00:00",\n        "expires_at": "2026-10-15T10:00:00+00:00",\n        "alternatives": [\n          {"mpn": "LM317TG", "manufacturer": "onsemi", "source_url": "https://example.com/part", "confidence": 0.92},\n          {"mpn": "LM317T-TR", "manufacturer": "Example Semi", "source_url": "https://example.com/another-part", "confidence": 0.88}\n        ]\n      }\n    }\n  }\n}
 
-The primary key is `(chat_id, manufacturer_norm, mpn_norm)`. There's an index on `expires_at` for cleanup.
+The example is illustrative. The alternatives array must retain all alternatives returned by the existing pipeline; it is not capped at five. Create webref lazily on the first MPN search so chats that never use this feature remain unchanged.
+3. Chat/user isolation
+The cache is conversation-scoped, not user-wide. A new chat_id starts with an independent cache even when the same user starts it. A different user or chat must never inherit another chat's entries.
+•	Load context using the existing repository/service and chat_id.
+•	Verify the authenticated user is authorized to access the chat; apply the existing user_id ownership check.
+•	Save to the same context row that was loaded.
+•	Confirm the database has a unique constraint/index on chat_id if the code assumes one row per chat.
+•	Do not share cache entries across chats as part of this implementation.
+4. MPN normalization and cache keys
+Use one normalization function in Excel parsing, chat extraction, cache lookup, and cache writes. Normalize before deduplicating.
+def normalize_mpn(mpn: str | None) -> str:\n    if not mpn:\n        return ""\n    return "".join(mpn.strip().upper().split())
 
-**Sample rows (one chat, 100 MPNs uploaded)**
+•	Trim surrounding whitespace, uppercase, and remove whitespace within the key.
+•	Preserve hyphens, slashes, dots, and leading zeros; these may distinguish different parts.
+•	Reject empty normalized keys.
+•	Deduplicate normalized keys for searching, but preserve original input text and Excel row references for output mapping.
+•	If manufacturer is necessary to distinguish identical MPN strings, use a composite key such as MANUFACTURER|MPN and normalize both components consistently.
+5. Cache entry schema
+Use a dictionary keyed by normalized MPN, not a list. Each MPN entry expires and versions independently.
+{\n  "status": "success",\n  "result_version": 1,\n  "fetched_at": "ISO-8601 UTC timestamp",\n  "expires_at": "ISO-8601 UTC timestamp",\n  "alternatives": [\n    {\n      "mpn": "candidate MPN",\n      "manufacturer": "manufacturer if available",\n      "source_url": "canonical source URL",\n      "confidence": 0.92\n    }\n  ]\n}
 
-| chat_id | manufacturer_norm | mpn_norm | status |
-|---|---|---|---|
-| chat-abc | TI | LM317T | success |
-| chat-abc | ST | STM32F407VGT6 | success |
-| chat-abc | MICROCHIP | PIC16F877A-I/P | no_alternatives |
-| chat-abc | TI | SN74HC595N | success |
-| ... | ... | ... | ... |
+•	Cache only status=success or status=no_alternatives.
+•	For success, store all alternatives returned by the current search/ranking pipeline. Do not impose a new per-MPN maximum.
+•	For no_alternatives, store an empty alternatives array only when the search completed successfully and genuinely found no alternatives.
+•	Never cache timeouts, 429/5xx responses, provider errors, malformed responses, or exceptions as no_alternatives.
+•	Store only structured fields needed by the chatbot. Do not store raw HTML, full provider responses, tracking URLs, or verbose exception strings.
+6. TTL, versioning, refresh
+Start with a configurable 24-hour TTL and RESULT_VERSION=1. Store UTC timestamps in ISO-8601 format and check expiry on every lookup.
+•	A valid hit requires a dictionary entry, matching result_version, status success/no_alternatives, a parseable expires_at, and expires_at later than current UTC time.
+•	Missing or malformed fields, unknown statuses, malformed timestamps, expired entries, or old result versions count as misses; they must not break the turn.
+•	A force-refresh/bypass flag skips cache reuse for requested keys and performs fresh search.
+•	If force-refresh fails, preserve the previous entry for future normal reads but report that this turn's refresh failed. Do not claim the old result was freshly verified.
+•	Bump RESULT_VERSION when search, ranking, normalization, or cached-result structure changes incompatibly. Do not change conversation schema_version unless existing validation/migration rules require it.
+7. Required per-turn flow
+1.	Load the conversation context once through the existing code path.
+2.	Identify whether the function holds the full context envelope or only inner state, and use the correct webref path.
+3.	Extract MPNs from the user's message or uploaded Excel file. Preserve original values and row mappings.
+4.	Normalize and deduplicate MPN keys.
+5.	Look up only the requested keys in webref.alternatives; do not scan the entire cache to build the LLM prompt.
+6.	Classify requested keys as valid hits or misses. Misses include absent, expired, malformed, old-version, and explicitly bypassed entries.
+7.	Search only misses, using bounded concurrency and provider-appropriate timeouts/rate limits.
+8.	Collect all search results first. Search tasks must return results; they must not mutate shared state or write to the database independently.
+9.	Merge cacheable results into the in-memory state once after searches finish. On failed searches, do not overwrite a valid prior entry.
+10.	Build a separate turn_results object containing only requested MPNs and their relevant results.
+11.	Pass turn_results—not the full webref cache—to the LLM/answer-generation layer.
+12.	Use the existing end-of-turn save exactly as the persistence path. Keep existing audit logging behavior.
+8. Search concurrency and failure handling
+Use a configurable semaphore/concurrency limit and per-search timeout. A starting concurrency of eight is only an example; set it according to the actual search provider limits and existing application patterns.
+•	Timeout, rate limiting, HTTP 5xx, invalid provider data, and exceptions are failures—not empty search results.
+•	Do not cache failed results as no_alternatives.
+•	If an uncached MPN fails, return a failure outcome to the response builder so the user is told that MPN could not be searched.
+•	If refresh fails and an old cache entry exists, retain that entry but make the refresh failure visible for the current response.
+•	Log safe error categories using existing logging conventions. Do not log credentials, secrets, or large raw provider responses.
+•	Ensure async execution and cancellation behavior match the application's existing runtime.
+9. State mutation, persistence, concurrency
+Single write path
+Cache helpers must mutate only the already-loaded in-memory context/state. They must not issue a separate database UPDATE. The existing end-of-turn save persists webref together with all existing state.
+Preserve existing state
+Do not replace the state object with a cache-only dictionary. Preserve focus, overrides, referents, detections, topic_stack, active_request, pending_clarification, last_completed_request, transcript, turn, and schema_version as managed by existing code. Unknown-key validation must be checked before adding webref.
+Concurrent requests
+Two simultaneous requests for the same chat can load the same old state and overwrite one another. Inspect existing save logic. If it has no protection, use optimistic concurrency control (compare expected turn/version during save) or an appropriate per-chat lock. On conflict, reload and merge/retry safely or reject a stale save. Never silently overwrite newer state. Confirm the application's turn semantics before relying on turn alone.
+10. LLM prompt and token discipline
+Stored cache size and prompt size are separate concerns. The cache can contain many MPNs, but the LLM must receive only results for the MPNs requested in the current turn.
+requested_keys = normalize_and_deduplicate(extracted_mpns)\nhits, misses = split_hits_misses(inner_state, requested_keys)\nfresh_results = await search_misses(misses, search_fn)\nmerge_results(inner_state, fresh_results)\n\nturn_results = build_turn_results(inner_state, requested_keys, fresh_results)\nanswer = await llm_answer(user_request, mpn_results=turn_results)
 
-That is 100 rows for `chat-abc`. Each row also has `result_version` 1 and an `expires_at` 24 hours after `fetched_at`.
+Inspect all prompt-building code. If it serializes the full state, explicitly exclude webref.alternatives and pass the selected current-turn results through the intended prompt field. Do not copy the entire cache into transcript or duplicate it in another state field.
+11. Cache growth and retention
+Remove the proposed max-five alternatives rule entirely. No code path should slice the alternatives array to five. Preserve all alternatives returned by the existing pipeline.
+•	Keep entries compact by storing only structured fields used by the chatbot.
+•	Prune expired entries when cache updates occur.
+•	An overall cap on the number of MPN keys per chat is optional, not required by this plan. Do not add one without approval. If later configured, evict oldest entries by fetched_at and document that this affects reuse, not answer correctness.
+•	Measure JSON state size before implementation and after a 100-MPN upload, including tests with many alternatives per MPN.
+•	Monitor average/max state size and context load/save latency. Use measured behavior to decide whether further limits are needed.
+TTL does not automatically delete a stored entry at expiry. Expired entries become unusable immediately and are physically pruned on a later cache update unless an existing cleanup job is available.
+12. Repository/database reconnaissance before edits
+Database checks
+SELECT column_name, data_type\nFROM information_schema.columns\nWHERE table_name = 'conversation_context';\n\nSELECT indexname, indexdef\nFROM pg_indexes\nWHERE tablename = 'conversation_context';\n\nSELECT avg(pg_column_size(state)) AS avg_bytes,\n       max(pg_column_size(state)) AS max_bytes\nFROM conversation_context;
 
-**What the `result` column holds for one row**
-
-```json
-{
-  "alternatives": [
-    {"mpn": "LM317TG", "manufacturer": "onsemi", "source_url": "https://...", "confidence": 0.92},
-    {"mpn": "L7805CV", "manufacturer": "ST", "source_url": "https://...", "confidence": 0.85}
-  ],
-  "provider": "web_search_provider",
-  "schema_version": 1
-}
-```
-
-For a part with no alternatives, `status` is `no_alternatives` and `alternatives` is an empty list.
-
-**A different chat**
-
-If another user uploads `LM317T`, it becomes a separate row with its own `chat_id`, such as `chat-xyz`. Chats never see each other's rows.
-
-If your Excel has no manufacturer column, `manufacturer_norm` stays empty for every row and the key effectively becomes `(chat_id, mpn_norm)`.
+•	Confirm state column type and existing serialization/deserialization behavior.
+•	Confirm one row per chat and uniqueness/index on chat_id.
+•	Record baseline average and maximum state size.
+Code checks
+•	Locate all context load/save functions and the end-of-turn persistence point.
+•	Determine whether each helper receives the full envelope or inner state.
+•	Find state validators that may reject unknown keys.
+•	Find all prompt construction code that serializes state or referents.
+•	Check for alternate writers and current protection against stale concurrent saves.
+•	Check conversation row retention/deletion behavior.
+13. Tests and acceptance criteria
+Functional
+•	☐ A 100-MPN upload searches each unique normalized key once in the turn, subject to explicit refresh/provider retry behavior, and saves all cacheable outcomes.
+•	☐ A follow-up for five valid cached MPNs makes zero web searches and sends only those five results to the LLM.
+•	☐ A mixed cached/new request searches only missing, expired, malformed, old-version, or bypassed keys.
+•	☐ The same MPN in a different chat does not reuse the first chat's cache.
+•	☐ Duplicate MPNs are searched once after normalization and map back to original Excel rows.
+•	☐ ABC-123 and ABC123 remain distinct keys.
+•	☐ All alternatives from the existing search pipeline are retained; no max-five truncation occurs.
+•	☐ Expired/malformed/old-version entries are treated as misses.
+•	☐ Genuine empty results are cached as no_alternatives; timeout/429/5xx are not.
+•	☐ Successful force-refresh replaces the entry; failed refresh preserves the old entry and reports failure.
+Compatibility/reliability
+•	☐ Existing state fields survive mutation and the normal end-of-turn save.
+•	☐ Cache survives end-of-turn save without a separate UPDATE.
+•	☐ LLM prompt never includes the whole cache.
+•	☐ Missing/corrupt webref does not break the turn.
+•	☐ Concurrent same-chat requests cannot silently overwrite newer state.
+•	☐ State size and load/save latency are measured before and after 100-MPN test.
+•	☐ Tests include one or more MPNs with many alternatives.
+14. Metrics and rollout
+Metrics
+•	Cache-hit ratio = valid cache hits / unique requested MPN keys.
+•	Web searches avoided per turn.
+•	Counts of success, no_alternatives, timeout, 429, 5xx, and other failures.
+•	Cached MPN key count and total alternatives stored per chat.
+•	Average/max state size, context load/save latency, and concurrency conflicts/retries.
+Rollout
+13.	Inspect actual state shape, prompt builder, and save path.
+14.	Implement normalization, cache lookup, miss search, merge, and turn_results helpers using project conventions.
+15.	Add unit tests for normalization, TTL, versions, malformed entries, failures, and force-refresh.
+16.	Add integration tests for 100 MPNs, five-MPN follow-up, mixed hit/miss, and separate chats.
+17.	Verify the prompt includes only current-turn results.
+18.	Measure state size/latency, then enable gradually and monitor metrics.
+15. Instructions for Copilot
+First inspect the repository; do not assume function names or architecture. Identify the conversation context model/repository, context serialization, end-of-turn save, MPN extraction, web-search function, and LLM prompt builder. Reuse existing project patterns and make the smallest safe changes.
+•	Do not create a database table, migration, or independent cache save path.
+•	Do not truncate alternatives to five or add a new per-MPN maximum.
+•	Do not change unrelated state fields or schema_version without evidence it is required.
+•	Do not send the full cache to the LLM.
+•	Do not save search failures as no_alternatives.
+•	Do not silently ignore concurrency conflicts.
+•	Run relevant tests and report actual outcomes; do not claim tests passed unless they were executed.
+At completion, report: files changed; where webref is stored; how hit/miss and TTL work; confirmation that no max-five cap exists; tests added/run and results; assumptions requiring confirmation; and any remaining concurrency limitations.
+16. Final specification
+Use the existing conversation_context row and store cache data at inner_state['webref']['alternatives'], keyed by normalized MPN (or manufacturer+MPN when required). Scope cache access to chat_id and validate user ownership. Cache successful results and genuine no-alternatives outcomes with per-entry result version and expiry. Preserve every alternative returned by the existing pipeline; do not add a max-five rule. Search only misses, merge once in memory, pass only requested current-turn results to the LLM, and persist using the existing end-of-turn save.
