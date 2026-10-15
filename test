@@ -1,11 +1,32 @@
+GitHub Copilot Implementation Task: MPN Search Cache and Latency Optimization
+
+1. Objective
+
+Implement a persistent, conversation-scoped MPN search cache using the existing "conversation_context.state" JSON.
+
+The goals are to:
+
+1. Avoid repeating MPN searches when valid results are already available.
+2. Reduce turn latency, particularly for conversations involving large MPN uploads.
+3. Prevent unnecessary growth of LLM prompt tokens.
+4. Preserve the existing conversation reference-resolution logic.
+5. Avoid creating a new database table or adding a database column.
+6. Preserve all alternatives returned by the existing MPN search pipeline without introducing an arbitrary maximum of five alternatives.
+
+Important: Inspect the repository and existing implementation before changing code. Reuse the existing search service, conversation-state model, persistence mechanism, and error-handling patterns. Do not assume that example field names or function signatures in this task match the repository exactly.
+
+2. Current problem
+
+The application maintains conversation state in a JSON structure similar to:
 
 {
+  "turn": 7,
   "state": {
     "focus": {
-      "ref": "part:E9657",
+      "ref": "mpn:40097129",
       "kind": "entity",
-      "label": "part E9657",
-      "since_turn": 4
+      "label": "mpn 40097129",
+      "since_turn": 7
     },
     "overrides": [],
     "referents": {
@@ -15,35 +36,289 @@
         "label": "part E9657",
         "value": "E9657",
         "status": "active",
+        "members": [],
+        "confidence": 1.0,
+        "was_answered": false,
+        "description": null,
         "entity_type": "part",
         "origin_turn": 4,
-        "last_mentioned_turn": 4,
-        "mention_count": 1
+        "derived_from": null,
+        "mention_count": 1,
+        "last_mentioned_turn": 4
       }
     },
     "detections": [],
     "topic_stack": [],
     "active_request": null,
     "pending_clarification": null,
-    "last_completed_request": null,
-    "webref": {
-      "schema_version": 1,
-      "entries": {
-        "E9657": {
-          "status": "success",
-          "result_version": 1,
-          "fetched_at": "2026-10-15T10:00:00Z",
-          "expires_at": "2026-10-16T10:00:00Z",
-          "alternatives": [
-            {
-              "mpn": "ALT-101"
-            },
-            {
-              "mpn": "ALT-102"
-            }
-          ]
-        }
+    "last_completed_request": null
+  },
+  "transcript": [],
+  "schema_version": "2.0"
+}
+
+This is an illustrative representation of the current structure. Preserve the actual schema and all existing fields in the repository.
+
+The current "focus" and "referents" fields help the application understand which part or MPN the user is discussing. They are not a substitute for storing the full alternatives returned by the MPN search service.
+
+The problems to investigate are:
+
+- Previously searched MPNs may be searched again in follow-up turns.
+- The application may repeatedly process conversation history to identify previously searched MPNs.
+- Search results may be copied into multiple messages or repeatedly injected into the LLM prompt.
+- Large MPN uploads may result in high search latency, excessive token consumption, or both.
+
+Use repository evidence to establish which of these issues currently occur. Do not assume all of them are present.
+
+3. Required design
+
+Add a "webref" object inside the existing inner "state" object.
+
+Do not put "webref" at the top level of the context envelope.
+
+Do not replace or restructure the existing "focus", "referents", "detections", "overrides", or other state fields.
+
+Do not create a new database table or column for this initial implementation.
+
+The proposed structure is:
+
+{
+  "webref": {
+    "schema_version": 1,
+    "entries": {
+      "NORMALIZED-MPN": {
+        "status": "success",
+        "result_version": 1,
+        "fetched_at": "2026-10-15T10:00:00Z",
+        "expires_at": "2026-10-16T10:00:00Z",
+        "alternatives": []
       }
     }
   }
 }
+
+Use the project's existing naming conventions and serialization types. Timestamps can use the project's standard datetime representation.
+
+Cache key
+
+Normalize each MPN consistently before lookup and storage:
+
+- Trim leading and trailing whitespace.
+- Apply case normalization where appropriate.
+- Remove whitespace consistently.
+- Preserve hyphens and slashes unless the existing search domain explicitly defines a different canonicalization rule.
+- Preserve leading zeros.
+- Deduplicate equivalent normalized keys within the same request.
+
+If an MPN alone is insufficient to identify a component, include the manufacturer or other necessary identity fields in the cache key.
+
+Do not accidentally merge distinct parts through aggressive normalization.
+
+Cache entry fields
+
+Each cache entry should contain:
+
+- "status": "success" or "no_alternatives".
+- "result_version": version of the cached result contract or search logic.
+- "fetched_at": when the search result was obtained.
+- "expires_at": when the result becomes stale.
+- "alternatives": all alternatives returned by the existing search pipeline.
+
+Use a 24-hour TTL initially unless the repository already defines a different approved cache policy.
+
+Cache only successful searches, including successful searches that returned no alternatives. Never represent a timeout, exception, rate-limit response, or provider failure as "no_alternatives".
+
+Do not truncate alternatives to five results. Do not add an arbitrary per-MPN alternative limit.
+
+4. Conversation reference resolution
+
+Reuse the existing "focus" and "referents" logic.
+
+Do not build a separate reference-resolution system if the application already supports resolving conversational references.
+
+When processing a new user message:
+
+1. Extract explicit MPNs or part identifiers from the current message using the existing extraction logic.
+2. Resolve implicit references such as "that part", "the previous MPN", or "the second alternative" using the existing conversation state.
+3. Identify the normalized cache key for each resolved entity.
+4. Look up only those keys in "state.webref.entries".
+5. Search only entries that are missing, expired, invalidated, or explicitly requested to refresh.
+
+If a reference cannot be resolved unambiguously, follow the application's existing clarification behavior instead of searching an arbitrary MPN.
+
+Where possible, preserve stable alternative identifiers so that a follow-up such as "show me the second alternative" refers to the same result even if alternatives are later refreshed.
+
+Do not use "origin_turn" or "last_mentioned_turn" as the cache key. They describe conversation references, not search-result identity.
+
+5. Search execution and latency optimization
+
+Implement the following request flow:
+
+1. Load the current conversation context once using the existing persistence path.
+2. Extract, normalize, and deduplicate the MPNs required for the current request.
+3. Read the relevant cache entries from the in-memory state.
+4. Separate cache hits from misses, expired entries, and entries requiring refresh.
+5. Reuse valid cache hits without calling the search service.
+6. Execute searches only for cache misses or entries that require refresh.
+7. Use bounded concurrency for independent searches, respecting downstream API limits.
+8. If the existing search provider supports batch requests, benchmark batching against bounded concurrent individual requests.
+9. Merge successful results into the in-memory "webref" state.
+10. Build the LLM input using only the results relevant to the current user request.
+11. Save the updated context through the existing end-of-turn persistence mechanism.
+
+Avoid database round trips for each individual MPN when the required data is already in the loaded state.
+
+Avoid loading and scanning the entire transcript solely to determine whether an explicit MPN has cached search results.
+
+Do not perform network searches for MPNs that are already valid cache hits.
+
+Do not add unbounded "asyncio.gather" calls or unbounded thread pools. Use the concurrency controls and asynchronous patterns already established in the project.
+
+If searches partially fail, preserve successful results and handle failed MPNs according to the existing retry/error-handling behavior. Do not discard successful results because another MPN failed.
+
+6. LLM prompt optimization
+
+Caching search results alone does not guarantee lower token usage.
+
+Inspect the existing prompt construction and agent orchestration to determine whether full search results are repeatedly included in the conversation.
+
+Implement the following rules:
+
+- Do not inject the entire "webref" object into the LLM prompt.
+- Do not serialize the complete cache into transcript messages.
+- Do not append the same complete alternatives repeatedly to conversation history without a functional reason.
+- Include only alternatives relevant to the current request.
+- Preserve the conversation context needed to answer follow-up questions.
+- Reuse existing conversation-summary or history-trimming mechanisms if available.
+- Do not remove necessary history blindly or break reference resolution to reduce tokens.
+
+If the user asks about one MPN, the prompt should not contain alternatives for every MPN uploaded earlier unless those results are needed for the answer.
+
+7. Persistence, compatibility, and concurrency
+
+The cache must survive subsequent turns by using the existing conversation persistence mechanism.
+
+Verify that the application loads the latest saved state for the same conversation before processing each turn.
+
+When "webref" is absent from an existing state, initialize it lazily with an empty entries dictionary.
+
+Preserve all existing fields and ensure old conversation states remain readable.
+
+Do not overwrite unrelated state fields while saving the cache.
+
+Inspect how the application handles simultaneous requests for the same chat. If the existing persistence mechanism supports optimistic concurrency, version checks, or per-chat serialization, reuse that mechanism to avoid lost updates.
+
+If two requests update the same conversation concurrently, one request must not silently overwrite cache entries added by the other. Merge updates or apply the project's established conflict-resolution strategy.
+
+Respect existing user authorization and chat ownership checks before reading or updating conversation state.
+
+Do not claim the cache has been persisted until the existing save operation succeeds.
+
+8. Expiration and invalidation
+
+Implement:
+
+- TTL validation during lookup.
+- Version validation when the cached result format or search behavior changes.
+- Explicit refresh behavior if supported by the existing application.
+- Removal of expired entries during an appropriate pruning step.
+
+An expired entry must not be treated as a valid hit.
+
+Do not remove all valid cache entries just because one MPN has expired.
+
+Because this cache is stored inside a JSON state object, measure serialized state size. Avoid introducing an arbitrary cache-size cap or alternative-count limit without an explicit product requirement. If state size becomes problematic, report the measurements and propose a separately reviewed storage change.
+
+9. Tests required
+
+Add automated tests using the project's existing testing framework.
+
+At minimum, cover these scenarios:
+
+1. First upload: 100 distinct MPNs are searched and successful results are cached.
+2. Follow-up cache hit: A later turn requests a previously searched MPN and does not call the search service again.
+3. Multiple hits: A comparison between two cached MPNs does not trigger unnecessary searches.
+4. Mixed request: Two cached MPNs and one new MPN cause only the new MPN to be searched.
+5. Duplicate MPNs: Duplicate identifiers in one request do not cause duplicate searches.
+6. Normalization: Whitespace and case variations map consistently to the same key where appropriate.
+7. Identifier distinctions: Hyphens, slashes, and leading zeros are preserved according to the defined normalization rules.
+8. Reference resolution: A phrase such as "that part" resolves using existing "focus" and "referents" behavior.
+9. Ambiguous reference: The application does not silently search an arbitrary MPN.
+10. TTL expiration: Expired entries are refreshed.
+11. Version invalidation: Entries from incompatible cache versions are not reused.
+12. Empty result: A successful search with no alternatives is cached as "no_alternatives".
+13. Failure handling: Search failures and timeouts are not cached as empty results.
+14. Partial failure: Successful MPN results are retained when other searches fail.
+15. All alternatives preserved: No new five-alternative truncation is introduced.
+16. Prompt size: The complete cache is not injected into the LLM prompt.
+17. State compatibility: Existing fields survive a cache update unchanged.
+18. Concurrent updates: Updates from concurrent turns do not silently lose previously cached entries.
+19. Persistence: A cache entry written in one turn is available in a subsequent turn for the same conversation.
+20. Isolation: One chat cannot read another chat's cached MPN results.
+
+For the 100-MPN scenario, verify both the number of search calls and the number of unique MPNs actually searched. The precise number of provider requests depends on whether the existing service supports batching.
+
+10. Performance instrumentation
+
+Add or reuse metrics for:
+
+- Cache hits and misses.
+- Cache hit ratio.
+- Number of MPNs requested and searched per turn.
+- Search-service latency.
+- Total turn latency.
+- P50 and P95 latency where the monitoring stack supports them.
+- LLM input token count.
+- Serialized state size.
+- Conversation-state load/save latency.
+- Search errors and refreshes.
+
+Do not log sensitive conversation contents or complete alternatives merely to produce these metrics.
+
+Benchmark at least:
+
+- Initial upload of 100 MPNs.
+- A follow-up involving one cached MPN.
+- A comparison involving multiple cached MPNs.
+- A mixed cache-hit/cache-miss request.
+- A follow-up after cache expiry.
+
+Compare results against the current implementation. Report measured changes rather than claiming latency improvements without measurements.
+
+11. Implementation constraints
+
+- No new database table.
+- No new database column.
+- No migration unless repository inspection proves an existing migration is required for an unrelated, already-approved reason.
+- Preserve the existing conversation-state schema and reference-resolution behavior.
+- Reuse the existing MPN search implementation.
+- Preserve all alternatives returned by the current search pipeline.
+- Avoid unrelated refactoring.
+- Do not hardcode example MPNs or alternative values from this task into production logic.
+
+12. Required Copilot workflow and final report
+
+Before modifying files:
+
+1. Inspect the repository structure.
+2. Find the "conversation_context" model and state serialization/deserialization code.
+3. Find the existing end-of-turn state load/save path.
+4. Locate MPN extraction, search execution, result processing, and prompt construction.
+5. Identify current caching, retry, timeout, and concurrency mechanisms.
+6. Present a short implementation plan grounded in actual files and functions.
+
+Then implement the changes and tests.
+
+At completion, report:
+
+- Files changed.
+- Where "webref" is stored.
+- How cache keys are normalized.
+- How follow-up references are resolved.
+- How misses and expired entries are handled.
+- How concurrency and persistence conflicts are handled.
+- Test results.
+- Before-and-after performance measurements, if available.
+- Any remaining risks or limitations.
+
+Do not create a new database table or column without stopping and explaining why the existing state-based design cannot meet the requirements.
