@@ -1,1 +1,53 @@
-give me alternate parts for LM317AEMP, NE555DR, LM358DR, ATMEGA328P-AU, TL072CP, 1N4148W.
+Perfect. Your branch names are:
+
+* Developer: `reengineer/plugin`
+
+* UAT: `Reengineeruat/plugin`
+
+Let's identify the commits to cherry-pick, step by step.
+
+### Step 1 — Fetch the latest remote branches
+
+```bash
+git fetch origin
+```
+
+### Step 2 — Find commits in developer that are not in UAT
+
+Run this command:
+
+```bash
+git log --oneline origin/Reengineeruat/plugin..origin/reengineer/plugin
+```
+
+This lists commits reachable from developer but not from UAT by commit history.
+
+### Step 3 — Filter out commits with equivalent changes
+
+Because your team has already been cherry-picking commits, run:
+
+```bash
+git log --oneline --left-right --cherry-pick origin/Reengineeruat/plugin...origin/reengineer/plugin
+```
+
+Interpret the output:
+
+* `<` — commits unique to UAT.
+
+* `>` — commits unique to developer after Git excludes patch-equivalent commits.
+
+The `>` commits are candidates to investigate; verify their changes and dependencies before cherry-picking.
+
+### Step 4 — Save the candidate list
+
+```bash
+git log --reverse --format="%H %s" origin/Reengineeruat/plugin..origin/reengineer/plugin > candidate_commits.txt
+```
+
+This creates `candidate_commits.txt` with the full commit hashes and messages.
+
+### Step 5 — Check the output before proceeding
+
+Share the output of Step 3 here. I'll help you interpret which commits need further review.
+
+Important: Since you created your new branch from developer, don't cherry-pick onto that branch if your goal is to prepare UAT. The integration branch should be based on `origin/Reengineeruat/plugin` so you don't accidentally include unrelated developer changes or disturb the UAT baseline.
