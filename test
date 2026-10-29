@@ -1,53 +1,66 @@
-Perfect. Your branch names are:
+## Current flow
 
-* Developer: `reengineer/plugin`
-
-* UAT: `Reengineeruat/plugin`
-
-Let's identify the commits to cherry-pick, step by step.
-
-### Step 1 — Fetch the latest remote branches
-
-```bash
-git fetch origin
+```text
+Question + active attachment + saved chat context
+                         ↓
+           Understand intent, action and constraints
+                         ↓
+                Resolve/confirm MPN scope
+                         ↓
+             Check cache for each MPN–intent
+                         ↓
+         Reuse valid evidence / research missing evidence
+                         ↓
+          Return answer + provenance; persist chat state
 ```
 
-### Step 2 — Find commits in developer that are not in UAT
+### 1. Understand the question
+Identify:
+- **Intent:** alternatives, price, datasheet, availability, lead time, lifecycle, manufacturer, etc.
+- **Action:** `CACHE_FIRST` by default; explicit refresh → `REFRESH`; explain/enrich handled separately.
+- **Constraints:** budget, vendor restrictions, quantity and other meaningful qualifiers.
 
-Run this command:
+**Repeating a question does not automatically mean refresh.**
 
-```bash
-git log --oneline origin/Reengineeruat/plugin..origin/reengineer/plugin
-```
+### 2. Select the MPNs
 
-This lists commits reachable from developer but not from UAT by commit history.
+| Your input | Current behavior |
+|---|---|
+| Explicit MPNs | Use those MPNs |
+| Active attached parts | Use the structured attachment; don’t ask you to paste it |
+| “Same list” | Use the latest selected list |
+| “All MPNs above/in this conversation” | Use the deduplicated history of user-selected MPNs |
+| “Give alternatives” without attachment or scope | Ask which MPNs; no research yet |
+| “All of them” after clarification | Use the exact list offered |
+| Explicit subset after clarification | Use only that subset |
 
-### Step 3 — Filter out commits with equivalent changes
+The pending question retains its intent/constraints/action. **First/second/Q1/Q2 historical-list selection is not reliably implemented.** Discovered alternative candidates are not automatically added to user-MPN history.
 
-Because your team has already been cherry-picking commits, run:
+### 3. Check evidence independently
+Cache identity is:
 
-```bash
-git log --oneline --left-right --cherry-pick origin/Reengineeruat/plugin...origin/reengineer/plugin
-```
+**Chat + MPN + intent + meaningful constraints**
 
-Interpret the output:
+- Valid match → reuse.
+- Missing/expired → research.
+- Explicit refresh → bypass cache.
+- Different intent/constraints → separate evidence.
 
-* `<` — commits unique to UAT.
+For **alternatives + price**, reuse whichever intent is cached and research only the missing one. “Price of PART_A” means the original part—not its alternatives. Ambiguous candidate pricing asks for selection.
 
-* `>` — commits unique to developer after Git excludes patch-equivalent commits.
+### 4. Expiry and failure handling
+- Newly fetched evidence has **72-hour expiry**; cache hits do not extend it.
+- Existing entries keep their stored expiry until refreshed.
+- **100 evidence entries per chat** can cause earlier eviction—three days is not guaranteed minimum retention.
+- Failed research must not mark old evidence fresh; combined requests retain successful evidence and report failures.
+- **Web Search OFF:** no cached web evidence or live web lookup; internal-data answers may still run.
 
-The `>` commits are candidates to investigate; verify their changes and dependencies before cherry-picking.
+### 5. Save and display
+The existing per-chat `conversation_context` JSONB stores:
+- Latest selected list and deduplicated subject history.
+- Pending clarification question and list snapshot.
+- Intent-specific evidence, sources and timestamps.
 
-### Step 4 — Save the candidate list
+Normal and streaming paths share this behavior. The UI shows progress/provenance; logs distinguish scope selection, cache hits, research and committed persistence.
 
-```bash
-git log --reverse --format="%H %s" origin/Reengineeruat/plugin..origin/reengineer/plugin > candidate_commits.txt
-```
-
-This creates `candidate_commits.txt` with the full commit hashes and messages.
-
-### Step 5 — Check the output before proceeding
-
-Share the output of Step 3 here. I'll help you interpret which commits need further review.
-
-Important: Since you created your new branch from developer, don't cherry-pick onto that branch if your goal is to prepare UAT. The integration branch should be based on `origin/Reengineeruat/plugin` so you don't accidentally include unrelated developer changes or disturb the UAT baseline.
+**Status:** 110 focused tests passed. Full live acceptance is still pending. Older chats cannot reliably recover historical lists that were never saved.
