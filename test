@@ -1,35 +1,184 @@
-Yes, now I understand the issue. Your chatbot is automatically using the last two MPNs from the datasheet search when you ask for alternatives, instead of asking which MPNs you mean.
+Search for `class ConversationState|class Request\(|class PendingClarification|class Turn...`
 
-The problem is that the chatbot is treating the most recent search results as the intended scope of the next question.
+Search for `async def begin_turn|manager.add_user_turn|load_context_state|_build_detectio...`
 
-### Current behavior vs. expected behavior
+Search for `class ConversationContext|__tablename__ = 'conversation_context'|class UserIn...`
 
-| Conversation step                                  | Current chatbot behavior                                | Expected behavior                                                                                         |
-| -------------------------------------------------- | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| 1. Ask for prices of 30 MPNs                       | Returns prices for 30 MPNs                              | Same                                                                                                      |
-| 2. Ask for datasheets for 2 specific MPNs          | Returns those 2 datasheets                              | Same                                                                                                      |
-| 3. Ask “Give me alternatives for the part numbers” | Automatically searches alternatives for the last 2 MPNs | Ask which MPNs: all 30 from the price request, the last 2 from the datasheet request, or a specific list. |
+Search for `cp_enabled|begin_turn\(|finalize_turn\(|persist_turn\(`
 
-### Why this is happening
+Search for `enable_context_preserver`
 
-Your chatbot likely updates its active MPN context whenever a new search runs. When the user asks the third question, the model sees the two most recently searched MPNs and assumes those are the targets.
+Read , lines 55 to 215
+Completed with input: {
+  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/ai/middleware/context_preserver/conversation_context.py",
+  "view_range": [
+    55,
+    215
+  ]
+}
 
-The solution is to separate search history from user-intended scope.
+Read , lines 220 to 390
+Completed with input: {
+  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/ai/middleware/context_preserver/conversation_context.py",
+  "view_range": [
+    220,
+    390
+  ]
+}
 
-### How to fix it in Copilot
+Read , lines 450 to 505
+Completed with input: {
+  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/ai/middleware/context_preserver/conversation_context.py",
+  "view_range": [
+    450,
+    505
+  ]
+}
 
-* Preserve the original list of 30 MPNs in conversation context.
+Read , lines 570 to 685
+Completed with input: {
+  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/ai/middleware/context_preserver/conversation_context.py",
+  "view_range": [
+    570,
+    685
+  ]
+}
 
-* Track the two MPNs used for the datasheet request separately.
+Read , lines 60 to 165
+Completed with input: {
+  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/vece_backend/db/context_store.py",
+  "view_range": [
+    60,
+    165
+  ]
+}
 
-* Detect when the user asks for alternatives without explicitly identifying the target MPNs.
+Read , lines 557 to 735
+Completed with input: {
+  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/ai/middleware/context_preserver/context_flow.py",
+  "view_range": [
+    557,
+    735
+  ]
+}
 
-* If multiple MPN groups are plausible, ask a conversational clarification instead of executing the web search.
+Read , lines 175 to 245
+Completed with input: {
+  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/ai/middleware/context_preserver/conversation_context.py",
+  "view_range": [
+    175,
+    245
+  ]
+}
 
-* After the user clarifies, search only the selected MPNs.
+Read , lines 270 to 395
+Completed with input: {
+  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/ai/middleware/context_preserver/conversation_context.py",
+  "view_range": [
+    270,
+    395
+  ]
+}
 
-The key instruction for your Copilot agent:
+Search for `start_request\(`
 
-> Do not automatically use the MPNs from the most recent tool call as the target of a follow-up request. Determine the intended MPN scope from the user's current message and conversation history. If the request is ambiguous and multiple MPN groups are available, ask the user which group they mean before invoking the search tool.
+Read , lines 123 to 155
+Completed with input: {
+  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/vece_backend/db/models.py",
+  "view_range": [
+    123,
+    155
+  ]
+}
 
-This should address the issue without introducing forms or unnecessary questions when the user's intent is already clear.
+Read , lines 58 to 116
+Completed with input: {
+  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/vece_backend/db/models.py",
+  "view_range": [
+    58,
+    116
+  ]
+}
+
+Read , lines 515 to 615
+Completed with input: {
+  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/vece_backend/api.py",
+  "view_range": [
+    515,
+    615
+  ]
+}
+
+## What the context state is
+
+The Context Preserver is a **per-chat working memory**. It lives in memory while a request is processed, then is serialized and stored in PostgreSQL so the next request can restore it. It is not the same thing as the full interaction log.
+
+A simplified stored record looks like this:
+
+```json
+{
+  "schema_version": "2.0",
+  "turn": 3,
+  "state": {
+    "referents": {},
+    "webref": {},
+    "focus": null,
+    "active_request": null,
+    "last_completed_request": null,
+    "overrides": [],
+    "topic_stack": [],
+    "pending_clarification": null,
+    "detections": []
+  },
+  "transcript": []
+}
+```
+
+The exact fields are defined in `ConversationState`, and `export_state()` creates the durable snapshot.
+
+## What each part contains
+
+| Field | What it is used for |
+|---|---|
+| `turn` | Count of user messages processed by the context manager. It increments when a user turn is added. A system reply is recorded with that same turn number. See `add_user_turn() and add_system_turn()`. |
+| `transcript` | Context-preserver conversation entries: user messages and, on completed turns, system answers. This is serialized with the state. |
+| `referents` | Parts/entities the system has identified, plus result sets when the journey supplies them. A part referent records its stable reference (such as `mpn:ATMEGA...`), entity type, value, display label, origin turn, last-mentioned turn, status and confidence. See `Referent`. |
+| `focus` | The entity or result set currently treated as the conversation’s focus. |
+| `topic_stack` | Previously focused topics that were set aside when the user changed topics, so they can potentially be resumed. |
+| `pending_clarification` | If the system needs clarification, stores the question, its attribute/intent, any selectable options, and the turn when it was asked. See `PendingClarification`. |
+| `detections` | A capped audit trail—up to 50 records—of how turns were classified, including relation, selected reference, resolved scope, and whether clarification was needed. |
+| `webref` | The per-chat web-research cache, when used. It is stored as part of the context state and merged when context snapshots are saved. |
+| `overrides` | User corrections to an earlier interpretation, such as correcting what a phrase means. |
+| `active_request` / `last_completed_request` | Fields available for structured request tracking. **In the current code, I found no caller of `start_request()`, so these may remain empty; they should not be assumed to contain every query.** |
+
+The detector receives a **compact view**, not the entire serialized snapshot: for example, up to 8 salient references and the last 6 transcript entries. That compact view is assembled in `build_cache_memory()`. The serialized transcript itself is stored separately in the full export.
+
+## What happens on each turn
+
+1. **Load:** `begin_turn()` loads the saved state for the chat and authenticated user. If none exists, it starts a fresh manager.
+2. **Add the user message:** The manager increments the user-turn counter and records the message in its transcript.
+3. **Detect context:** The detector receives the compact cache memory and current message. The context flow decides whether the message is a new topic, follow-up, correction, or clarification reply.
+4. **Update memory:** The flow registers entities resolved for the current turn, updates focus/referents, and records a detection audit entry. The current-turn helper data used for detection is temporary; the durable snapshot is made from the manager’s state and transcript.
+5. **If a clarification is needed:** The pending question and options are stored in `pending_clarification`. The API skips the normal journey/tool execution for that turn and calls `persist_turn()` to save the pending state.
+6. **When the user replies:** The next `begin_turn()` reloads that pending state. The detector can classify the reply as a clarification response and resolve or clear the pending clarification.
+7. **After a normal answer:** `finalize_turn()` registers answer entities/result-set references, adds the assistant answer to the context transcript, and saves the snapshot.
+
+One detail: on the **context-preserver clarification short-circuit**, the pending question is saved in `pending_clarification`; `persist_turn()` does not itself append the assistant’s question to the context transcript. The user/assistant exchange is also tracked by the separate interaction-log path.
+
+## Where it is stored
+
+The durable working-memory snapshot is in PostgreSQL:
+
+- **Table:** `conversation_context`
+- **Key:** one row per `chat_id`
+- **Owner:** associated `user_id`
+- **Snapshot:** `state` JSONB column
+- **Turn count:** also duplicated in the row’s `turn` column
+
+See the `ConversationContext model` and `save_context_state() / load_context_state()`. Reads are scoped to the authenticated user; writes check ownership and serialize the short save transaction.
+
+There is also a separate **`user_interaction_log`** table for interaction history and reporting—question, response, SQL, entity-resolution data, and related fields. That log is not the context manager’s working-memory snapshot. See `UserInteractionLog`.
+
+Both the regular API and streaming API call the context flow. It runs only when `enable_context_preserver` is enabled; the config currently defaults that setting to `True`. See the `config setting`.
+
+**In short:** `context_flow.py` coordinates loading and updates; `conversation_context.py` defines and serializes the memory; `context_store.py` reads and writes it; PostgreSQL stores the durable snapshot.
