@@ -1,239 +1,35 @@
-For your chatbot in Copilot, I recommend implementing a context-aware clarification layer before your web-search and NL-to-SQL tools execute. This will let the chatbot understand follow-up questions naturally, reuse conversation context, and ask questions only when necessary.
+Yes, now I understand the issue. Your chatbot is automatically using the last two MPNs from the datasheet search when you ask for alternatives, instead of asking which MPNs you mean.
 
-The plan below is suitable for your existing chatbot architecture.
+The problem is that the chatbot is treating the most recent search results as the intended scope of the next question.
 
-### 1\. Target architecture
+### Current behavior vs. expected behavior
 
-User query
+| Conversation step                                  | Current chatbot behavior                                | Expected behavior                                                                                         |
+| -------------------------------------------------- | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| 1. Ask for prices of 30 MPNs                       | Returns prices for 30 MPNs                              | Same                                                                                                      |
+| 2. Ask for datasheets for 2 specific MPNs          | Returns those 2 datasheets                              | Same                                                                                                      |
+| 3. Ask “Give me alternatives for the part numbers” | Automatically searches alternatives for the last 2 MPNs | Ask which MPNs: all 30 from the price request, the last 2 from the datasheet request, or a specific list. |
 
-Current message + conversation history
+### Why this is happening
 
-Intent and entity resolution
+Your chatbot likely updates its active MPN context whenever a new search runs. When the user asks the third question, the model sees the two most recently searched MPNs and assumes those are the targets.
 
-Detect intent, identify MPNs, resolve references
+The solution is to separate search history from user-intended scope.
 
-Scope and ambiguity check
+### How to fix it in Copilot
 
-Ambiguous
+* Preserve the original list of 30 MPNs in conversation context.
 
-Ask a natural-language clarification and wait.
+* Track the two MPNs used for the datasheet request separately.
 
-Resolved
+* Detect when the user asks for alternatives without explicitly identifying the target MPNs.
 
-Build the tool arguments and execute.
+* If multiple MPN groups are plausible, ask a conversational clarification instead of executing the web search.
 
-Tool router
+* After the user clarifies, search only the selected MPNs.
 
-Web SearchNL-to-SQL
+The key instruction for your Copilot agent:
 
-Response generation
+> Do not automatically use the MPNs from the most recent tool call as the target of a follow-up request. Determine the intended MPN scope from the user's current message and conversation history. If the request is ambiguous and multiple MPN groups are available, ask the user which group they mean before invoking the search tool.
 
-Return results for the resolved request
-
-The critical rule is that a tool must not run with an unresolved MPN scope.
-
-### 2\. Step-by-step implementation plan
-
-### Step 1 — Detect the intent
-
-Classify the user's request into the appropriate action.
-
-| Intent       | Example                                       |
-| ------------ | --------------------------------------------- |
-| Price        | “Give me the price of these MPNs.”            |
-| Datasheet    | “Get the datasheet for MPN-A.”                |
-| Alternatives | “Find alternatives.”                          |
-| NL-to-SQL    | “Show the total spend by supplier.”           |
-| Mixed        | “Find alternatives and compare their prices.” |
-
-Keep intent detection separate from deciding which MPNs the user means. A request can have a clear intent but an ambiguous target.
-
-### Step 2 — Resolve MPNs from conversation context
-
-Maintain or derive the following context:
-
-| Field                 | Purpose                                                        |
-| --------------------- | -------------------------------------------------------------- |
-| mentioned_mpns        | MPNs mentioned during the conversation                         |
-| active_mpns           | MPNs associated with the most recent relevant request          |
-| current_intent        | Price, datasheet, alternative, etc.                            |
-| pending_clarification | Whether a clarification is awaiting an answer                  |
-| pending_intent        | The original intent that must be completed after clarification |
-
-For example, if the conversation discusses MPN-A, MPN-B and MPN-C, and the user says “Find alternatives,” the chatbot should identify the alternative-search intent but leave the target unresolved.
-
-Implementation note: Treat these as logical fields, not necessarily database columns. You can maintain them in your orchestrator or conversation state.
-
-### Step 3 — Apply clarification rules
-
-Use these rules in order.
-
-* If the user explicitly identifies one or more MPNs, use those MPNs.
-
-* If the user clearly says “all of them,” use all relevant MPNs from the conversation.
-
-* If the user says “the second one,” resolve that reference against the most recent relevant list.
-
-* If the user uses a reference such as “it,” “that part,” or “those,” resolve it from context when the meaning is unambiguous.
-
-* If the user asks for alternatives without specifying the target and multiple MPNs are plausible, ask a conversational clarification.
-
-* If the context contains no reliable MPNs, ask the user to provide them.
-
-* Do not execute the tool while the required scope remains unresolved.
-
-Suggested clarification:
-
-> Which MPNs would you like me to find alternatives for? I can search all the MPNs we discussed or just the specific ones you need.
-
-This is ordinary conversational text, not a form or an Adaptive Card.
-
-### Step 4 — Preserve the pending request
-
-When the chatbot asks a clarification, it must remember the original request.
-
-Example:
-
-User
-
-Find alternatives.
-
-Chatbot
-
-Which MPNs should I find alternatives for?
-
-User
-
-Only MPN-B.
-
-Chatbot
-
-Resolves the reply to the pending alternative-search request, selects MPN-B and calls the web-search tool.
-
-The clarification reply “Only MPN-B” should not be interpreted as a new standalone request. It is the answer to the pending question.
-
-### Step 5 — Execute the appropriate tool
-
-Once the intent and scope are resolved, build a validated tool request.
-
-Example:
-
-```json
-{
-  "intent": "find_alternatives",
-  "mpns": ["MPN-B"],
-  "scope_resolved": true
-}
-```
-
-This is an illustrative internal payload; adapt the field names to your actual API contract.
-
-* For web search, pass the resolved MPN list to the search service.
-
-* For NL-to-SQL, pass the user's actual data question through your existing query-generation and validation process.
-
-* For mixed requests, execute the required tools in the correct sequence and combine the results.
-
-### 3\. Prompt/instructions to give Copilot
-
-You can copy the following into your Copilot agent's instructions or use it as the behavioral specification for your orchestration layer.
-
-# Context-Aware Intent and MPN Resolution
-
-## Role
-Understand the user's current request using the current message and relevant conversation history. Route the request to the appropriate configured tool, including web search and NL-to-SQL.
-
-## Core rules
-
-1. Identify the user's intent independently from the entities or MPNs targeted by that intent.
-
-2. Resolve references such as "it", "that one", "the second one", "all of them", "those MPNs", and "only MPN-B" using relevant conversation context.
-
-3. When the user explicitly specifies MPNs, use only those MPNs unless the user clearly requests a broader scope.
-
-4. When the user explicitly requests all previously discussed MPNs, use the complete relevant set of MPNs from the conversation.
-
-5. When the user asks to find alternatives but does not identify the target MPNs, and multiple MPNs are plausible, ask a short, natural-language clarification. Offer the choice of all relevant MPNs discussed or specific MPNs.
-
-6. Do not display forms, radio buttons, Adaptive Cards, or predefined selection menus for this clarification. Use ordinary conversational text.
-
-7. When asking a clarification, preserve the original intent and any required context. Interpret the user's next message as a response to the pending clarification when appropriate.
-
-8. After the user clarifies, resolve the target MPNs, validate the scope, and execute the original request without asking the same question again.
-
-9. Do not call the web-search or NL-to-SQL tool when required inputs remain ambiguous or unresolved.
-
-10. Do not ask for information already available in the conversation when it can be resolved reliably.
-
-11. If there is no reliable MPN context, ask the user which MPNs they mean rather than inventing MPNs.
-
-12. If the user changes their request while a clarification is pending, handle the new request appropriately and do not force the old intent onto it.
-
-## Examples
-
-User: "Find alternatives."
-Assistant: "Which MPNs would you like me to find alternatives for? I can search all the MPNs we discussed or just specific ones."
-
-User: "All of them."
-Action: Find alternatives for all relevant MPNs in the conversation.
-
-User: "Only MPN-B."
-Action: Find alternatives for MPN-B only.
-
-User: "Find alternatives for MPN-A and MPN-C."
-Action: Search for alternatives for MPN-A and MPN-C without clarification.
-
-User: "Get its datasheet."
-Action: Resolve "its" from conversation context. Ask for clarification only if the target cannot be determined reliably.
-
-User: "Show supplier spend by month."
-Action: Route to the configured NL-to-SQL workflow, subject to its existing validation rules.
-
-## Execution requirement
-Before any tool call, confirm that the user's intent is known, the required entities are resolved, and all mandatory inputs are available. Only then execute the appropriate configured tool. Never fabricate tool results or claim that a search or query was performed if it was not.
-
-### 4\. How to implement this in Copilot Studio
-
-Microsoft's documentation describes generative orchestration as using conversation history to fill inputs and ask follow-up questions when required details are missing. It also emphasizes clear tool descriptions and instructions. Microsoft Learn +2
-
-* Open your agent in Copilot Studio and review its Instructions.
-
-* Add the context-aware resolution instructions above, referencing your actual configured web-search and NL-to-SQL tools where supported.
-
-* Give each tool a clear description of what it does, its required inputs, and when it must not be invoked.
-
-* If your implementation uses explicit topics or an external orchestration API, add a clarification state that retains the pending intent until the user responds.
-
-* Use the test pane and, where available, the activity map to verify whether the agent asked for clarification or called a tool too early. Microsoft Learn +1
-
-Important: Prompt instructions guide the model but are not a hard guarantee. If calling a tool prematurely would cause a costly or incorrect operation, enforce the unresolved-scope check in your orchestration code or tool input validation as well.
-
-### 5\. Test plan
-
-Test these cases before releasing the change.
-
-| Test                                                                            | Expected result                                                    |
-| ------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| Three MPNs discussed → “Find alternatives.”                                     | Ask which MPNs; mention all or specific ones conversationally.     |
-| User replies “All of them.”                                                     | Search all three.                                                  |
-| User replies “Only MPN-B.”                                                      | Search only MPN-B.                                                 |
-| User explicitly requests alternatives for A and C.                              | Search A and C directly.                                           |
-| User asks “Get its datasheet” after discussing one MPN.                         | Resolve the MPN and retrieve its datasheet.                        |
-| User asks “Get its datasheet” after discussing multiple equally plausible MPNs. | Ask which MPN.                                                     |
-| User changes topic while clarification is pending.                              | Handle the new request without executing the old one accidentally. |
-| User starts a new conversation with no MPN context.                             | Ask for the target MPNs.                                           |
-| User asks a clear NL-to-SQL question.                                           | Continue through the existing NL-to-SQL workflow.                  |
-
-Track three practical metrics: correct tool selection, correct MPN resolution, and unnecessary or missing clarification rate.
-
-### 6\. Recommended delivery sequence
-
-* Phase 1: Add the instructions and tool descriptions.
-
-* Phase 2: Test context resolution and natural-language clarification.
-
-* Phase 3: Add deterministic scope validation to the orchestrator if necessary.
-
-* Phase 4: Run regression tests for existing web-search and NL-to-SQL behavior before deployment.
-
-One design decision matters: if your chatbot already has an API or middleware that routes requests to web search and NL-to-SQL, put the final scope validation there. Copilot should manage natural-language understanding, while the orchestration layer ensures that tools receive 
+This should address the issue without introducing forms or unnecessary questions when the user's intent is already clear.
