@@ -1,184 +1,306 @@
-Search for `class ConversationState|class Request\(|class PendingClarification|class Turn...`
+Agreed. These gaps should be resolved in the design before any implementation begins. The most important change is to separate LLM reference extraction, deterministic scope resolution, clarification policy, and backend execution.
 
-Search for `async def begin_turn|manager.add_user_turn|load_context_state|_build_detectio...`
+I would revise the implementation plan as follows.
 
-Search for `class ConversationContext|__tablename__ = 'conversation_context'|class UserIn...`
+### 1\. Lock down the scope-resolution rules first
 
-Search for `cp_enabled|begin_turn\(|finalize_turn\(|persist_turn\(`
+The LLM should identify what the user means; ordinary Python code should decide which MPNs are valid and whether execution is permitted.
 
-Search for `enable_context_preserver`
+### Precedence rules
 
-Read , lines 55 to 215
-Completed with input: {
-  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/ai/middleware/context_preserver/conversation_context.py",
-  "view_range": [
-    55,
-    215
-  ]
-}
+Apply these rules in order:
 
-Read , lines 220 to 390
-Completed with input: {
-  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/ai/middleware/context_preserver/conversation_context.py",
-  "view_range": [
-    220,
-    390
-  ]
-}
+| Priority | User message pattern                                            | Required behavior                                                                       |
+| -------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| 1        | Explicit MPNs: “Find alternatives for MPN-12.”                  | Resolve the explicitly named MPNs and validate them.                                    |
+| 2        | Count or group match: “Find alternatives for all 30 parts.”     | Match the requested count to a known group containing 30 MPNs.                          |
+| 3        | Deictic reference: “Find alternatives for the above two parts.” | Resolve to the latest relevant group when the reference is unambiguous.                 |
+| 4        | All-group reference: “Find alternatives for all of them.”       | Resolve only when the conversation context identifies the intended group unambiguously. |
+| 5        | Bare request: “Find alternatives.”                              | Ask if multiple plausible groups exist.                                                 |
+| 6        | Unresolvable or conflicting reference                           | Ask a clarification question rather than guessing.                                      |
 
-Read , lines 450 to 505
-Completed with input: {
-  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/ai/middleware/context_preserver/conversation_context.py",
-  "view_range": [
-    450,
-    505
-  ]
-}
+Additional safety rule: Never automatically execute an alternatives request against a group containing 30 or more MPNs. Ask the user to confirm the scope first, even if the group was identified unambiguously.
 
-Read , lines 570 to 685
-Completed with input: {
-  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/ai/middleware/context_preserver/conversation_context.py",
-  "view_range": [
-    570,
-    685
-  ]
-}
+Explicitly naming one or two MPNs is different: validate those MPNs and proceed if their scope is clear.
 
-Read , lines 60 to 165
-Completed with input: {
-  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/vece_backend/db/context_store.py",
-  "view_range": [
-    60,
-    165
-  ]
-}
+For mixed messages, such as “MPN-12 and the above,” resolve both parts of the reference, deduplicate them, and validate the combined set. If “the above” could refer to multiple groups, ask rather than silently combining them.
 
-Read , lines 557 to 735
-Completed with input: {
-  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/ai/middleware/context_preserver/context_flow.py",
-  "view_range": [
-    557,
-    735
-  ]
-}
+### Example: required behavior
 
-Read , lines 175 to 245
-Completed with input: {
-  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/ai/middleware/context_preserver/conversation_context.py",
-  "view_range": [
-    175,
-    245
-  ]
-}
+CONVERSATION CONTEXT
 
-Read , lines 270 to 395
-Completed with input: {
-  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/ai/middleware/context_preserver/conversation_context.py",
-  "view_range": [
-    270,
-    395
-  ]
-}
+* Group A: 30 uploaded MPNs
 
-Search for `start_request\(`
+* Group B: MPN-05 and MPN-12
 
-Read , lines 123 to 155
-Completed with input: {
-  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/vece_backend/db/models.py",
-  "view_range": [
-    123,
-    155
-  ]
-}
+User: “Find alternatives for the above two parts.”
 
-Read , lines 58 to 116
-Completed with input: {
-  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/vece_backend/db/models.py",
-  "view_range": [
-    58,
-    116
-  ]
-}
+Resolve Group B
 
-Read , lines 515 to 615
-Completed with input: {
-  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/vece_backend/api.py",
-  "view_range": [
-    515,
-    615
-  ]
-}
+The reference is clear and the group contains fewer than 30 MPNs. Proceed with the alternatives lookup.
 
-## What the context state is
+User: “Find alternatives.”
 
-The Context Preserver is a **per-chat working memory**. It lives in memory while a request is processed, then is serialized and stored in PostgreSQL so the next request can restore it. It is not the same thing as the full interaction log.
+Ask which group
 
-A simplified stored record looks like this:
+Both groups are plausible. Do not call a backend yet.
+
+User: “Find alternatives for all 30 parts.”
+
+Resolve Group A, then confirm
+
+The group matches the count, but its size triggers the mandatory confirmation gate.
+
+### 2\. Use stable, turn-based group IDs
+
+Do not use intent-based IDs such as `price_request_mpn_group`. A user can make multiple price requests, and intent alone does not uniquely identify a group.
+
+Use a stable identifier associated with the turn that introduced the group, together with a unique suffix if multiple groups originate in the same turn.
+
+For example:
 
 ```json
 {
-  "schema_version": "2.0",
-  "turn": 3,
-  "state": {
-    "referents": {},
-    "webref": {},
-    "focus": null,
-    "active_request": null,
-    "last_completed_request": null,
-    "overrides": [],
-    "topic_stack": [],
-    "pending_clarification": null,
-    "detections": []
-  },
-  "transcript": []
+  "group_id": "group_turn_1_a",
+  "mpn_count": 30,
+  "source": "upload",
+  "origin_turn": 1,
+  "parent_group_id": null,
+  "file_ref": "uploaded_file_reference"
 }
 ```
 
-The exact fields are defined in `ConversationState`, and `export_state()` creates the durable snapshot.
+The two-MPN subset could be represented as:
 
-## What each part contains
+```json
+{
+  "group_id": "group_turn_2_a",
+  "mpn_count": 2,
+  "source": "typed",
+  "origin_turn": 2,
+  "parent_group_id": "group_turn_1_a",
+  "mpns": ["MPN-05", "MPN-12"]
+}
+```
 
-| Field | What it is used for |
-|---|---|
-| `turn` | Count of user messages processed by the context manager. It increments when a user turn is added. A system reply is recorded with that same turn number. See `add_user_turn() and add_system_turn()`. |
-| `transcript` | Context-preserver conversation entries: user messages and, on completed turns, system answers. This is serialized with the state. |
-| `referents` | Parts/entities the system has identified, plus result sets when the journey supplies them. A part referent records its stable reference (such as `mpn:ATMEGA...`), entity type, value, display label, origin turn, last-mentioned turn, status and confidence. See `Referent`. |
-| `focus` | The entity or result set currently treated as the conversation’s focus. |
-| `topic_stack` | Previously focused topics that were set aside when the user changed topics, so they can potentially be resumed. |
-| `pending_clarification` | If the system needs clarification, stores the question, its attribute/intent, any selectable options, and the turn when it was asked. See `PendingClarification`. |
-| `detections` | A capped audit trail—up to 50 records—of how turns were classified, including relation, selected reference, resolved scope, and whether clarification was needed. |
-| `webref` | The per-chat web-research cache, when used. It is stored as part of the context state and merged when context snapshots are saved. |
-| `overrides` | User corrections to an earlier interpretation, such as correcting what a phrase means. |
-| `active_request` / `last_completed_request` | Fields available for structured request tracking. **In the current code, I found no caller of `start_request()`, so these may remain empty; they should not be assumed to contain every query.** |
+These are illustrative schemas, not existing repository fields.
 
-The detector receives a **compact view**, not the entire serialized snapshot: for example, up to 8 salient references and the last 6 transcript entries. That compact view is assembled in `build_cache_memory()`. The serialized transcript itself is stored separately in the full export.
+Important implementation requirements:
 
-## What happens on each turn
+* Keep the original group intact.
 
-1. **Load:** `begin_turn()` loads the saved state for the chat and authenticated user. If none exists, it starts a fresh manager.
-2. **Add the user message:** The manager increments the user-turn counter and records the message in its transcript.
-3. **Detect context:** The detector receives the compact cache memory and current message. The context flow decides whether the message is a new topic, follow-up, correction, or clarification reply.
-4. **Update memory:** The flow registers entities resolved for the current turn, updates focus/referents, and records a detection audit entry. The current-turn helper data used for detection is temporary; the durable snapshot is made from the manager’s state and transcript.
-5. **If a clarification is needed:** The pending question and options are stored in `pending_clarification`. The API skips the normal journey/tool execution for that turn and calls `persist_turn()` to save the pending state.
-6. **When the user replies:** The next `begin_turn()` reloads that pending state. The detector can classify the reply as a clarification response and resolve or clear the pending clarification.
-7. **After a normal answer:** `finalize_turn()` registers answer entities/result-set references, adds the assistant answer to the context transcript, and saves the snapshot.
+* Represent subsets through `parent_group_id`.
 
-One detail: on the **context-preserver clarification short-circuit**, the pending question is saved in `pending_clarification`; `persist_turn()` does not itself append the assistant’s question to the context transcript. The user/assistant exchange is also tracked by the separate interaction-log path.
+* Record the actual MPNs or a verified reference to their source.
 
-## Where it is stored
+* Track the source, count, origin turn, and last-mentioned turn.
 
-The durable working-memory snapshot is in PostgreSQL:
+* A second upload should create a new group by default, not overwrite the first.
 
-- **Table:** `conversation_context`
-- **Key:** one row per `chat_id`
-- **Owner:** associated `user_id`
-- **Snapshot:** `state` JSONB column
-- **Turn count:** also duplicated in the row’s `turn` column
+* If a group is derived from another group, record the parent relationship.
 
-See the `ConversationContext model` and `save_context_state() / load_context_state()`. Reads are scoped to the authenticated user; writes check ownership and serialize the short save transaction.
+For large uploads, store a durable file or dataset reference and its associated metadata instead of duplicating hundreds of MPN strings in every snapshot. Confirm that the referenced file remains available and belongs to the correct chat/user.
 
-There is also a separate **`user_interaction_log`** table for interaction history and reporting—question, response, SQL, entity-resolution data, and related fields. That log is not the context manager’s working-memory snapshot. See `UserInteractionLog`.
+### 3\. Define the resolver contract before coding it
 
-Both the regular API and streaming API call the context flow. It runs only when `enable_context_preserver` is enabled; the config currently defaults that setting to `True`. See the `config setting`.
+The LLM should return a structured interpretation of the user's reference, not choose arbitrary MPNs from memory.
 
-**In short:** `context_flow.py` coordinates loading and updates; `conversation_context.py` defines and serializes the memory; `context_store.py` reads and writes it; PostgreSQL stores the durable snapshot.
+A proposed extraction schema:
+
+```json
+{
+  "intent": "find_alternatives",
+  "backend_route": "web",
+  "reference": {
+    "type": "deictic",
+    "number_hint": 2,
+    "explicit_mpns": [],
+    "phrases": ["above two parts"]
+  }
+}
+```
+
+The supported reference types should be:
+
+* `explicit` — named MPNs
+
+* `count` — a number-based group reference, such as “all 30”
+
+* `deictic` — references such as “above,” “these two,” or “those parts”
+
+* `all` — a reference to all members of a clearly identified group
+
+* `none` — no usable scope reference
+
+Then use deterministic Python logic to match the extracted reference against known groups.
+
+The resolver must:
+
+* Reject invalid or unsupported reference types.
+
+* Match explicit MPNs against known entities or validate them through the application's authoritative MPN validation path.
+
+* Match count hints against actual group counts.
+
+* Apply the precedence rules defined above.
+
+* Deduplicate the final MPN list.
+
+* Verify that every returned MPN comes from a known group or has passed authoritative validation.
+
+* Enforce the 30-MPN confirmation gate.
+
+* Return either a validated scope or a clarification requirement.
+
+The LLM must never invent missing MPNs or turn an ambiguous reference into an assumed list.
+
+### 4\. Make the selected group the new active group
+
+This is a required part of the design.
+
+Suppose the user says:
+
+> Only MPN-12.
+
+The resolver must create or activate a group containing only MPN-12, with a parent reference to the group from which it was selected.
+
+The next message:
+
+> Now give me its price.
+
+must resolve to MPN-12, not the older two-MPN or 30-MPN group.
+
+Maintain these concepts separately:
+
+* Known groups: all groups available in conversation history.
+
+* Active group: the currently selected MPN scope.
+
+* Pending request: the task awaiting clarification or execution.
+
+* Parent group: the source from which a subset was derived.
+
+Do not delete previous groups when the active group changes.
+
+### 5\. Specify the pending-clarification lifecycle
+
+The pending state must retain enough information to resume the original request.
+
+```json
+{
+  "intent": "find_alternatives",
+  "backend_route": "web",
+  "initiating_turn": 3,
+  "candidate_group_ids": [
+    "group_turn_1_a",
+    "group_turn_2_a"
+  ],
+  "attempt_count": 0,
+  "status": "awaiting_scope"
+}
+```
+
+Add the appropriate fields to the existing `PendingClarification` model only after inspecting its current structure.
+
+Define these exit paths explicitly:
+
+| User's reply                               | Expected action                                                                                                                                                        |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| “All 30”                                   | Resolve Group A, then request confirmation if required by the size rule.                                                                                               |
+| “Only MPN-12”                              | Validate the MPN, create or activate the one-MPN scope, and resume the request.                                                                                        |
+| A valid MPN not present in any known group | Treat it as a new explicit MPN candidate and validate it through the authoritative data source.                                                                        |
+| An unrelated new question                  | Cancel or suspend the pending request according to a documented policy, and process the new question independently. Do not attach the old request to the new question. |
+| An invalid or unrecognized answer          | Re-ask once with a concise explanation, then stop repeated clarification loops and offer a fresh request.                                                              |
+| “Cancel” or equivalent                     | Cancel the pending request without executing it.                                                                                                                       |
+
+Store `backend_route` (`web` or `sql`) and the normalized intent in the pending state. However, do not trust a stale route blindly: revalidate the route against the resumed intent before dispatching.
+
+Do not clear the pending request before backend success. Resolve the scope, prepare the request, and execute it while preserving enough state for recovery. Clear or complete the pending request only after successful execution. Handle failures without accidentally submitting duplicate operations.
+
+### 6\. Integrate the existing session search cache
+
+Before sending resolved MPNs to web search, inspect the existing session search cache and how it associates results with MPNs and chat/session IDs.
+
+The flow should be:
+
+* Resolve and validate the MPN scope.
+
+* Apply the large-group confirmation rule.
+
+* Retrieve relevant cached results.
+
+* Search only for missing or stale results.
+
+* Merge and validate results.
+
+* Return the response.
+
+* Update context and mark the request completed.
+
+Do not let a cached result for MPN-05 satisfy a lookup for MPN-12 merely because both belong to the same group. Cache keys and lookup filters must respect the actual MPN and relevant search parameters.
+
+For NL-to-SQL, retain the existing structured-query path and ensure the scope is validated before execution.
+
+### 7\. Decide the role of `start_request()` and `active_request`
+
+Do not leave these fields half-integrated.
+
+Inspect whether `start_request()` has callers, what it initializes, and whether request completion and recovery already use it.
+
+My recommendation is to reuse these fields if they are intended to track the current request and can represent pending clarification and execution status correctly. Otherwise, explicitly keep request tracking in the existing context-flow mechanism rather than introducing two competing sources of truth.
+
+Whichever approach you choose, document the lifecycle:
+
+`created → awaiting_clarification → ready_to_execute → executing → completed`
+
+A failure should have a recoverable state such as `failed_retryable`, not be misreported as completed.
+
+### 8\. Revised implementation order: inspect first
+
+Do not start coding yet. Inspect in this order:
+
+* `conversation_context.py` — current referent/group model, serialization, and `PendingClarification`.
+
+* `context_flow.py` — detector output, scope resolution, pending reply handling, and group registration.
+
+* `context_store.py` — persistence and restoration behavior.
+
+* `api.py` — clarification short-circuit in both regular and streaming APIs.
+
+* Session search cache — cache key, scope validation, and result reuse.
+
+* Existing request lifecycle — `start_request()`, `active_request`, and completion/failure handling.
+
+After inspection, write down which existing fields already satisfy the requirements and which fields or functions genuinely need changing. Only then implement the resolver.
+
+### 9\. Add the missing regression tests
+
+In addition to the original scenarios, include these cases:
+
+* Mixed reference: “MPN-12 and the above.”
+
+* An unrelated question during pending clarification.
+
+* A second file upload that should create another group.
+
+* Invalid and mistyped MPNs.
+
+* Two users with the same MPNs but different conversations.
+
+* Two chats belonging to the same user.
+
+* A 30-MPN group with a bare alternatives request.
+
+* A 30-MPN group explicitly referenced by count, which still requires confirmation.
+
+* Selecting MPN-12 and then asking “What is its price?”
+
+* A failed web search followed by retry, without losing pending request state.
+
+* A clarification reply that itself requires confirmation.
+
+* A cache hit for one MPN and a cache miss for another.
+
+Verify both the final response and the actual arguments sent to the backend. The tests should prove that an ambiguous or unconfirmed large scope cannot trigger a search.
+
+Final recommendation: First inspect the existing models and execution flow. Then lock down the precedence and confirmation rules, implement deterministic resolution, and finally wire the resolver into both API paths. Reuse the existing context snapshot and cache wherever possible; introduce neither a new table nor a parallel memory layer unless inspection demonstrates a concrete need.
