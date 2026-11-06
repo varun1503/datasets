@@ -1,82 +1,68 @@
-You need a dynamic comparison instruction for GitHub Copilot, not a fixed template. The chatbot should decide how to structure its response based on the user's question and the available data.
+The part number you provided, NESESDR ATMEGA328P-ALLLM317AEMP, appears to be a combined or concatenated string containing distinct, well-known electronic component identifiers.
+The two primary, standard components embedded in this query are the ATmega328P (an 8-bit microcontroller widely used in Arduino boards) and the LM317AEMP (a high-precision adjustable linear voltage regulator from Texas Instruments). [1] (https://en.wikipedia.org/wiki/ATmega328), [2] (https://www.google.com/search?q=product&prds=pvt:hg,pvo:29,productid:12259270835592847557,catalogid:14299450674745939112,gpcid:970933936938641000,mid:576462875149571958&ibp=oshop), [3] (https://www.digikey.com/en/products/detail/texas-instruments/LM317AEMP-NOPB/363903)
+A direct comparison of their standard specifications and common functional alternatives provides a clear overview of how they match up against alternative options. [1] (https://www.seeedstudio.com/blog/2022/05/24/three-alternatives-to-atmega-328p-au-microcontroller-to-bypass-the-chip-crisis/), [2] (https://www.utmel.com/components/atmega328p-microcontroller-pinout-datasheet-and-application?id=146)
 
-You can use the following as a Copilot instruction.
+1. Microcontroller Alternatives: ATmega328P vs. ATmega328PB vs. ATmega168
 
-# Dynamic Comparison Response Guidelines
+The ATmega328P is an 8-bit AVR RISC microcontroller. When looking for alternatives, the ATmega328PB serves as a modern, backwards-compatible upgrade, while the ATmega168 is a lower-memory legacy alternative. [1] (https://ww1.microchip.com/downloads/en/DeviceDoc/Atmel-7810-Automotive-Microcontrollers-ATmega328P_Datasheet.pdf), [2] (https://www.seeedstudio.com/blog/2022/05/24/three-alternatives-to-atmega-328p-au-microcontroller-to-bypass-the-chip-crisis/)
 
-Whenever a user provides multiple alternatives (such as MPNs, products, components, manufacturers, suppliers, or other options) and asks for a comparison, generate a structured, comparison-first response.
+Microchip ATmega328P
+₹152.00₹160
+4.8 ★ (47)
+	Microchip ATmega328PB
+₹372.26($3.96)
+4.6 ★ (36)
+	Microchip ATmega168
+₹156.14
+Core Architecture
+8-bit AVR RISC	Core Architecture
+8-bit AVR RISC	Core Architecture
+8-bit AVR RISC
+Flash Memory
+32 KB	Flash Memory
+32 KB	Flash Memory
+16 KB
+SRAM
+2 KB	SRAM
+2 KB	SRAM
+1 KB
+EEPROM
+1 KB	EEPROM
+1 KB	EEPROM
+512 Bytes
+Max Frequency
+20 MHz	Max Frequency
+20 MHz	Max Frequency
+20 MHz
+Programmable I/Os
+23 Lines	Programmable I/Os
+27 Lines	Programmable I/Os
+23 Lines
+Hardware Interfaces
+1x SPI, 1x I2C (TWI), 1x UART	Hardware Interfaces
+2x SPI, 2x I2C, 2x UART	Hardware Interfaces
+1x SPI, 1x I2C, 1x UART
+Key Advantage
+High compatibility, massive community support.	Key Advantage
+Advanced peripherals, touch controllers, more I/Os.	Key Advantage
+Cost-effective drop-in for low-code applications.
 
-## 1. Response Structure
 
-Adapt the response structure to the user's intent. Do not force every comparison into the same fixed template.
+2. Linear Voltage Regulator Alternatives: LM317AEMP vs. Standard LM317 vs. LM1117
 
-- **Quick Summary:** Start with a concise overview of the most important findings.
-- **Comparison Table:** When comparing multiple alternatives, prefer a tabular representation for parameters that can be compared side by side.
-- **Detailed Analysis:** Explain important differences relevant to the user's specific question.
-- **Advantages and Limitations:** Highlight meaningful strengths, weaknesses, and trade-offs where applicable.
-- **Recommendation:** Provide a recommendation only when sufficient information is available to support one.
+The LM317AEMP is an advanced, high-precision version of the classic LM317 adjustable regulator housed in a surface-mount SOT-223 package. Standard LM317 components or Low-Dropout (LDO) regulators like the LM1117 are common alternatives. [1] (https://www.digikey.com/en/products/detail/texas-instruments/LM317AEMP-NOPB/363903)
 
-## 2. Understand User Intent
+Specification	TI LM317AEMP	Standard LM317	TI LM1117 (SOT-223 Alternative)
+Output Type	Adjustable Positive	Adjustable Positive	Fixed (1.8V, 3.3V, 5V) or Adjustable
+Output Current	Up to 1.5 A	Up to 1.5 A	Up to 800 mA
+Output Voltage Range	1.25 V to 37 V	1.25 V to 37 V	1.25 V to 13.8 V (or fixed steps)
+Dropout Voltage	High (~2V to 2.5V typical)	High (~2V to 2.5V typical)	Low (~1.2V typical at max current)
+Line Regulation	0.01% / V (High Precision)	0.04% / V (Standard)	0.2% / V
+Package / Case	SOT-223-4	TO-220, TO-263, etc.	SOT-223, TO-220, TO-252
+Key Advantage	Tighter output tolerance, excellent precision.	Globally available, robust thermal protection.	Ideal for lower voltage gaps (e.g., 5V down to 3.3V).
 
-Determine what the user actually wants to compare.
-
-Examples:
-- Price comparison → Focus on pricing, currency, price differences, and cost competitiveness.
-- Specification comparison → Focus on technical specifications and parameter-level differences.
-- Alternative selection → Focus on compatibility, functional equivalence, availability, and suitability.
-- Overall comparison → Combine relevant pricing, specifications, availability, and other meaningful attributes.
-- Specific parameter comparison → Focus on the requested parameters instead of generating unnecessary sections.
-
-## 3. Dynamic Response Generation
-
-- Do not always generate all sections.
-- Select only the sections that add value to the user's question.
-- Prioritize the most relevant information at the beginning.
-- Use tables when they improve readability and comparison.
-- Use concise bullet points for observations and explanations.
-- Avoid repeating information already presented in the table.
-- For a large number of alternatives, organize information to maintain readability.
-
-## 4. Data Accuracy and Transparency
-
-- Use only available and retrieved information.
-- Never fabricate prices, specifications, manufacturer details, or availability.
-- Clearly distinguish between verified information, unavailable information, and inferred information.
-- Use "Not available" when a parameter is missing.
-- Do not assume two alternatives are technically equivalent merely because their descriptions look similar.
-- Highlight critical specification mismatches and compatibility risks.
-- Maintain the original units and currencies unless conversion is explicitly requested or clearly explained.
-
-## 5. Recommendation Logic
-
-When providing recommendations:
-- Consider the user's stated requirements first.
-- Evaluate technical compatibility before price competitiveness.
-- Consider availability and specification differences when relevant.
-- Explain why an alternative is recommended.
-- If the available data is insufficient, explicitly state that a reliable recommendation cannot yet be made.
-
-## 6. Conversational Flexibility
-
-- Preserve the context of the current conversation.
-- If the user asks a follow-up question about a previously compared alternative, reuse the relevant comparison context.
-- Do not repeat the entire comparison unless requested.
-- If the user's request is ambiguous, ask a focused clarification question rather than making assumptions.
-
-## Expected Outcome
-
-The response should feel like an intelligent technical comparison assistant, not a predefined report generator.
-
-The first part should help the user understand the answer quickly, while the remaining content should provide the relevant supporting details based on the user's actual question.
-
-### My recommendation for your Copilot implementation
-
-One additional point is important: separate response formatting from comparison logic.
-
-* Comparison logic determines which attributes to compare.
-
-* Data retrieval provides the actual values.
-
-* Response formatting decides whether to use a summary, table, detailed analysis, or recommendation.
-
-This separation will make your chatbot flexible. You can reuse the same comparison engine for price comparisons, MPN alternatives, technical specifications, and supplier comparisons without hardcoding one response format.
+To help narrow down the best choice for your project, please let me know:
+• Are you looking to replace these parts on an existing PCB design, or are you designing a completely new circuit?
+• What are your primary project requirements regarding supply voltage constraints or memory size limits?
+With these details, I can recommend the exact drop-in replacements or design adjustments you need.
+Copying...
