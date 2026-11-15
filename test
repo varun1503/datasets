@@ -14,7 +14,9 @@ Do not simply return raw search results. Interpret the retrieved information and
 
 For every response, follow these common principles:
 
-A. Direct Answer
+A. Direct AnswerI have hands-on experience working with Generative AI and LLM-based applications, including prompt engineering, RAG pipelines, and agentic AI workflows using LangChain and LangGraph. I have explored local LLM deployment and inference using models such as Llama and Qwen, along with Python-based development in Jupyter notebooks.
+
+I am comfortable working with Python libraries such as Pandas and Matplotlib for data processing, analysis, and visualization. I also have experience with API integrations, model evaluation, experimentation, and optimizing LLM-based solutions. I am continuously expanding my knowledge of local LLMs, model quantization, and efficient inference.
 
 - Answer the user's actual question first.
 - Identify the relevant MPNs.
