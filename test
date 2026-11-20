@@ -1,3 +1,179 @@
-I'm open to exploring ideas from everyone, including Jishen and Shilpi. However, I'd like to focus more on the implementation aspects of Agentic AI, particularly the low-level design, system architecture, and key technical decisions.
+Read skill `analyzing-architecture`
+Completed with input: {"skill":"analyzing-architecture"}
 
-I'll prepare a basic flow diagram along with a few implementation ideas and possible approaches that we can discuss during the brainstorming session. This should help us align on the architecture and move towards finalizing the design.
+Search for `SKU Intelligence|web_search_enabled|enable_web_search|webSearchEnabled`
+
+Ran terminal command: wc -l /home/h689454/.vscode-server/data/agentPlugins/vscode-synced-customization-agent-host-copilotcli-1811831823/1447440279/skills/analyzing-architecture/references/*.md; git --no-pager branch --show-current
+
+Search Tools
+
+Searched codebase for "SKU Intelligence UJ01 web search enabled web_started context preserver stream query web research hybrid internal routing middleware", 29 results
+
+Search for `^async def|^def |web_search|context_|uj01|event:|StreamingResponse`
+
+Search for `^class .*Web|^async def .*web|^def .*web|^class .*Context|web_started`
+
+Search for `web_search|webSearch|streamingWeb`
+
+Search for `^#|^artifact:|^  strategy:`
+
+Ran terminal command: cd application/vece_unified_be/src; rg -n 'web_search|disambiguate|prepare_|engine|runner|async for|yield |finish_turn|require_|@router' vece_backend/stream_api.py; rg -n '^async def |^def |resolve_web_research|web_lookup|thread|asyncio|provider|gemini|bigquery|execute_|grounding' ai/uj01_backend/uj01_utils.py | head -170; rg -n 'web_search|_web|uj01_utils|BigQuery' ai/uj01_backend/uj01*.py | tail -65
+
+Ran terminal command: cd application/vece_unified_be/src; rg -n 'aim\.|resume|record_|save_|EventSourceResponse|^@' vece_backend/stream_api.py; rg -n '^class .*Middleware|def (disambiguate|orchestrat|process_disambig)|UJ01Utils' ai/middleware; rg -n '^class |^async def |^def |async def (web_lookup|.*search|.*resolve|.*query)|google_search' ai/uj01_backend/{uj01_utils,web_search_policy,web_search_cache,web_grounding}.py; rg -n 'async def web_lookup|def get_search|class GeneralAgent|class BigQueryExecutor|GoogleSearch\(|VertexAISearch\(' ai --glob '*.py' | head -80
+
+Ran terminal command: cd application/vece_unified_be/src; sed -n '1873,2080p' ai/middleware/middleware.py; sed -n '804,958p' ai/uj01_backend/uj01_utils.py; rg -n 'def |web_search|route|clarification' ai/middleware/context_preserver/context_flow.py | tail -65
+
+Search for `UJ01Agent|EntityResolver|async def|typed_parts|attachments|classif`
+
+Search for `^class |^    async def|BigQuery|graph|validate|execute`
+
+Search for `include_router|web_search|web_started|web_completed|web_progress|emit\(|final...`
+
+Search for `async def web_lookup|cache_only|refresh|STORE|TTL|WebResearch|ResearchAction|...`
+
+Read skill `python-fact-grounded-coding`
+Completed with input: {"skill":"python-fact-grounded-coding"}
+
+Search Tools
+
+Analyzed usages of `UJ01Agent`, 4 results
+
+Read , lines 435 to 518
+Completed with input: {
+  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/vece_backend/stream_api.py",
+  "view_range": [
+    435,
+    518
+  ]
+}
+
+Read , lines 509 to 566
+Completed with input: {
+  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/ai/uj01_backend/uj01_utils.py",
+  "view_range": [
+    509,
+    566
+  ]
+}
+
+Read , lines 195 to 270
+Completed with input: {
+  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/ai/uj01_backend/uj01_utils.py",
+  "view_range": [
+    195,
+    270
+  ]
+}
+
+Search for `class NL2SQLPipeline|class ReasoningPipeline|class .*EntityResolver|class .*S...`
+
+Search for `upload|emit_final|save_|sendQueryStream|user_journey_override|cp_enabled|web_...`
+
+Search for `class DynamicPipeline|async def run_pipeline_async|async def upload_csv`
+
+Search for `load_working_memory|save_working_memory|Redis|redis|construct_chat_history|pg...`
+
+Search for `^class |^    async def|schema|execute|validate`
+
+Search for `ENABLE_WEB_SEARCH|ENABLE_CONTEXT_PRESERVER|enable_context_preserver|Web Searc...`
+
+vote_memory
+Completed with input: {"kind":"memory","action":"vote","scope":"repository","fact":"Unified VECE query and stream routes use require_user and require_session dependencies; routers are mounted at both root and /v2.","direction":"upvote","reason":"Verified the stream dependencies in stream_api.py at lines 65–79 and the root and versioned router mounts in app.py at lines 148–161. Both bindings matter for preserving the SKU Intelligence entry point.","repoNwo":"HON-CORP/HON_ASCEND_GITREPO","toolCallId":"call_J8cGe1rcDc3fkkplzzLibvc9"}
+
+vote_memory
+Completed with input: {"kind":"memory","action":"vote","scope":"repository","fact":"sendQueryStream's SSE loop in api.js must route backend steps \"web_started\", \"web_progress\", and \"web_completed\" to the \"streamingWeb\" CustomEvent; any other step name falls through to the generic \"streamingStep\" event used for unrelated progress bubbles.","direction":"upvote","reason":"Verified the same three web step names in the current frontend parser around api.js lines 402–407. Context.jsx consumes the streamingWeb event separately, and UJ01 emits web_completed from its answer handling.","repoNwo":"HON-CORP/HON_ASCEND_GITREPO","toolCallId":"call_VH2q3ihm5NIo3AVgltyt0g3G"}
+
+Search for `NL2SQLPipeline|read.only|validator|BigQuery|cloud_storage|bucket|\.load\(|\.s...`
+
+Ran terminal command: git --no-pager status --short --branch; git --no-pager diff --name-only reengineer/plugin -- application/vece_unified_be/src application/cloud_run/vece_agent_ui/frontend/src
+
+Search for `from vece_backend|load_conversation|save_conversation`
+
+Search for `NL2SQLPipeline|web_research|^    async def process`
+
+Read , lines 1190 to 1302
+Completed with input: {
+  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/ai/uj01_backend/uj01_utils.py",
+  "view_range": [
+    1190,
+    1302
+  ]
+}
+
+Read , lines 426 to 508
+Completed with input: {
+  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/ai/uj01_backend/uj01_utils.py",
+  "view_range": [
+    426,
+    508
+  ]
+}
+
+Search for `genai.Client|vertexai=|conversation_context|def _create_llm_interface|upload_...`
+
+Read , lines 570 to 625
+Completed with input: {
+  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/ai/uj01_backend/uj01_utils.py",
+  "view_range": [
+    570,
+    625
+  ]
+}
+
+Read , lines 218 to 251
+Completed with input: {
+  "path": "/home/h689454/pso-deliverables/HON_ASCEND_GITREPO/application/vece_unified_be/src/vece_backend/stream_api.py",
+  "view_range": [
+    218,
+    251
+  ]
+}
+
+## ReEngineer.AI SKU Intelligence — Web Search ON
+
+**Web Search adds a public-research branch to SKU Intelligence (UJ01); it does not replace the internal BigQuery branch.** For a normal question with resolved parts, UJ01 starts web research while the internal query runs. It can stream the internal answer first, then append public evidence with citations. Turning Web Search on does **not** guarantee a fresh Google search: the system may reuse cached evidence, ask for clarification, or take an internal-only route.
+
+I traced the checked-out `agenticaisolution` branch and verified that the relevant frontend and backend source trees match `reengineer/plugin`. This is a source trace, not a live-service test. No files were changed.
+
+### Current flow
+
+```text
+SKU Intelligence chat → authenticated streaming API
+    → load chat history and classify the turn
+    → disambiguate question and resolve part identifiers
+    → restore conversation context; clarify if needed
+    → enforce UJ01-only Web Search policy
+    → dispatch to UJ01
+        ├─ Internal: saved SQL match or NL-to-SQL → BigQuery → answer/table
+        └─ Public: part identity → research policy/cache → Gemini + Google Search
+    → stream progress and, when prefetched, the internal answer
+    → append grounded public evidence → persist chat context → final response
+```
+
+### What’s in the middle
+
+| Component | What it does today |
+|---|---|
+| **Chat UI and API client** — `SearchBar.jsx`, `api.js` | The Web toggle sends `web_search: true` with the question. The frontend consumes server-sent events (SSE). `web_started`, `web_progress`, and `web_completed` go to the dedicated web-progress UI, not the generic progress UI. |
+| **FastAPI streaming controller** — `query_stream` | Owns authentication and session handling, loads chat history, optionally warms the PostgreSQL follow-up cache, and calls the middleware. It also owns the **actual permission gate**: the server feature must be enabled, the resolved route must be UJ01, and the request cannot be FBA. A resumed clarification can carry its previous route. The toggle itself does not select the journey. |
+| **Disambiguation and entity resolution** — `MiddlewareAgent.disambiguate`, `EntityResolver` | Interprets the question, produces a usable standalone question, identifies the journey, and resolves catalog identifiers such as SKU, Honeywell part number (HPN), or manufacturer part number (MPN). This is where “that part” becomes a concrete subject—or remains ambiguous and needs a clarification. `MiddlewareAgent.orchestrate` then dispatches to the selected journey and validates its response. |
+| **Context Preserver** — `begin_turn`, `context_store.py` | Loads per-chat working memory: previously mentioned parts and result sets, corrections, pending clarifications, and web references. This supports follow-ups like “only the second one,” “search again,” and “explain those results.” The updated state is persisted in PostgreSQL’s `conversation_context`. When Context Preserver is enabled it makes the history-gating decision; the hybrid classifier and PostgreSQL-cache path remain fallback behavior when it is disabled. |
+| **UJ01 workflow and internal data** — `UJ01Agent.process`, `DynamicPipeline` | UJ01 first checks for a matching curated SQL template. Otherwise, the standard pipeline links the question to the relevant internal schema and examples, generates SQL, validates or corrects it, and executes in **BigQuery**. UJ01 summarizes and formats the result as an answer/table and can export a CSV to **Cloud Storage**. Catalog-discovery questions take a separate path. Successful **Lane B** reasoning turns decompose “why” questions into internal retrieval subquestions and intentionally do not consume web prefetch. |
+| **Public search preparation** — `_build_web_context` | Builds a search work item for each named part. For HPNs, it looks up corresponding MPNs in BigQuery in one batch so the public provider can search for the manufacturer’s identifier. It scopes what it passes to the named subjects instead of forwarding the entire internal result table. Named-part requests can `start research concurrently`; without named parts, the normal answer path can build search context later from available results. |
+| **Research policy, cache, and provider** — `web_search_policy.py`, `web_search_cache.py`, `GeneralAgent.web_lookup` | Policy decides whether to reuse matching evidence, refresh it, enrich it, or explain it. Compatible evidence can be reused from the chat’s web-reference cache. For a live lookup, the provider is **Gemini Pro on Vertex AI with Google Search grounding**. It is a separate model call from internal answer generation. The web code handles per-part progress, timeouts, retries, and extraction of source links and search queries. |
+| **Answer assembly and completion** — `UJ01 response assembly`, `context finalization` | With prefetch, the internal answer streams before UJ01 waits for research to finish. Public text is included only when grounding reports that it was used; unsourced model text is **not** displayed as a web result. If web research fails, the internal answer can still be returned. The final response carries source links, search queries, and research status when available. |
+
+### Where I’d make it agentic
+
+**Start at the UJ01 orchestration boundary, not the UI or the shared middleware.** The app already uses model-based disambiguation, SQL planning, and grounded search. The change would be to let a bounded coordinator decide **which evidence tools to call, in what order, and whether a targeted follow-up lookup is needed**. Keep the existing services rather than turning every component into its own agent.
+
+| Keep or expose as a tool | What the coordinator can decide |
+|---|---|
+| **Context Preserver + entity resolver** | Resolve the intended part or ask a targeted clarification. Don’t guess between multiple candidates. |
+| **Internal SKU retrieval** | Call the existing validated BigQuery pipeline when the question needs company data. Return structured facts and provenance rather than giving the coordinator unrestricted SQL access. |
+| **Public part research** | Request datasheets, public alternatives, or other relevant evidence for verified identities. Leave cache compatibility, refresh rules, allowed inputs, timeouts, and grounding checks in the tool. |
+| **Evidence comparison and answer assembly** | Compare the two evidence sets, identify missing coverage or disagreements, and keep internal facts separate from public claims. Make bounded follow-up calls only when they address a specific gap. |
+
+For example, for **“Show approved alternates for HPN X and find public datasheets”**, the coordinator resolves HPN X to its MPNs, runs internal alternate retrieval and public datasheet lookup in parallel, and returns **internally approved alternates** separately from **publicly sourced documents**. A public match must not be presented as company-approved.
+
+The first version can stay in the same backend process. Preserve the existing endpoint and SSE events, clarification/resume behavior, cache semantics, and internal answer on web failure. Keep the Web toggle, data-sharing rules, and citation checks in deterministic code—not in the agent prompt.
