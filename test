@@ -1,1 +1,119 @@
-mkdir -p .github && curl -o .github/copilot-instructions.md https://raw.githubusercontent.com/multica-ai/andrej-karpathy-skills/main/CLAUDE.md
+Based on both screenshots and your current responsibilities in the SKU Intelligence / ReEngineer.AI project, I recommend keeping the same overall goal categories as Shilpi but adjusting the deliverables to reflect your August joining date and your actual ownership.
+
+The main changes will be:
+
+* Reduce 4 POCs/Pilots to 2 POCs/Pilots.
+
+* Remove the 1+ IP/Patent opportunity.
+
+* Add ownership of 2 major SKU Intelligence modules.
+
+* Add application optimization and cost reduction under Execution Excellence.
+
+* Keep Adoption, Talent Development and Day-to-Day responsibilities unchanged.
+
+Below is the proposed version you can put into the Excel.
+
+### Proposed 2026 Goals
+
+### 1\. Financial Target
+
+OBJECTIVE: Achieve Margin Saving of $330M HON / Organic Growth
+
+* Expand and mature ReEngineering initiatives – Lead and deliver 2 POCs/Pilots aligned with the 2026/27 roadmap.
+
+* Deliver on the existing ReEngineering value proposition and contribute towards achieving the targeted 40% MOM value in 2026.
+
+Removed: Drive 1+ IP/Patent opportunity.
+
+### 2\. Digital Transformation
+
+OBJECTIVE: ASCEND Project – AI Innovation, Technology & Partnerships
+
+* Lead and deliver 2 major modules of the SKU Intelligence application, ensuring successful implementation and readiness.
+
+* Take ownership and stabilize the ReEngineer AI Application 1.0/1.1 and drive Phase 2 readiness.
+
+* Drive adoption of 2 AI new offerings/tools.
+
+* Enhance existing application capabilities, usability, performance and functionality.
+
+* Participate in external/internal forums, conferences and knowledge-sharing opportunities, with at least 1 contribution/publication.
+
+### 3\. High Performance Growth Culture
+
+OBJECTIVE: Execution Excellence
+
+For All Engagements:
+
+* Demonstrate total ownership, on-time delivery and zero-defect execution.
+
+* Ensure systematic planning and top-down execution.
+
+* Proactive reporting, stakeholder communication and executive showcases.
+
+* Deploy 2 best practices / automation initiatives.
+
+* Application Optimization & Cost Efficiency: Identify and implement optimization opportunities across applications to reduce infrastructure, cloud, LLM/API and database costs while maintaining performance, scalability and reliability.
+
+### 4\. Talent Development / Build a Strong Team
+
+OBJECTIVE: Talent Development
+
+Keep the existing goals unchanged:
+
+* Maintain rigor on IDP/Upskill Plan with measurable progress in:
+
+    * Ideation
+
+    * Functional (Electronics)
+
+    * Product (Business)
+
+    * AI/LLM technology upskilling
+
+* Deliver at least 2 ideas/outcomes as a result of upskilling activities.
+
+### 5\. Day-to-Day Job Responsibilities
+
+OBJECTIVE: Perform day-to-day requirements of the job
+
+Keep unchanged:
+
+* Perform day-to-day job responsibilities effectively.
+
+* Ensure timely execution of assigned tasks and commitments.
+
+### My recommendation: Make the optimization goal measurable
+
+For the new application optimization objective, don't keep it generic. Your manager will appreciate measurable outcomes.
+
+You can use these examples:
+
+| Optimization area       | Expected contribution                                        |
+| ----------------------- | ------------------------------------------------------------ |
+| LLM optimization        | Reduce unnecessary LLM calls and token consumption           |
+| RAG optimization        | Improve retrieval efficiency and reduce redundant processing |
+| Database optimization   | Optimize PostgreSQL/BigQuery queries and resource usage      |
+| Application performance | Improve API response time and resource utilization           |
+| Infrastructure          | Identify opportunities to reduce cloud/infrastructure costs  |
+
+Suggested final wording:
+
+"Drive application optimization and cost efficiency by identifying and implementing improvements across LLM usage, RAG pipelines, database operations and infrastructure, resulting in reduced operational costs and improved application performance."
+
+### Final target summary
+
+| Goal                        | Your proposed target              |
+| --------------------------- | --------------------------------- |
+| POCs / Pilots               | 2                                 |
+| SKU Intelligence            | 2 major modules                   |
+| AI adoption                 | 2 new offerings/tools             |
+| Best practices / Automation | 2                                 |
+| Talent Development          | At least 2 ideas/outcomes         |
+| Application Optimization    | Cost and performance improvements |
+| IP / Patent                 | Removed                           |
+
+One important suggestion: Since you joined in August, keep your goals focused on deliverables you can realistically own and complete during your available performance period. Don't simply copy the targets of someone who was involved for the entire year.
+
+This version maintains the same organizational goal structure while making your individual contribution clearer and more measurable.
